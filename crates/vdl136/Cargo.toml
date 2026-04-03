@@ -1,0 +1,16 @@
+[package]
+name = "vdl136"
+description = "CLI to decode VDL2 / ACARS / ADS-C payloads"
+repository = "https://github.com/xoolive/vdl136"
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+hex = "0.4"
+acars = { path = "../acars" }
+serde_json = "1.0"
+desperado = { path = "../../../desperado/crates/desperado" }

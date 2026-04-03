@@ -1,0 +1,17 @@
+[package]
+name = "acars"
+description = "Rust library to decode ACARS, VDL2, ADS-C, and CPDLC payloads"
+repository = "https://github.com/xoolive/vdl136"
+keywords = ["acars", "vdl", "aviation", "decoder"]
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+deku = "0.20.2"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]

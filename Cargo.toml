@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+license = "MIT"
+edition = "2021"
+readme = "readme.md"
+version = "0.1.0"
+authors = ["Xavier Olive <git@xoolive.org>"]
+
+[profile.release]
+lto = "thin"
+overflow-checks = true
+
+[profile.dist]
+inherits = "release"
+lto = true
+strip = true

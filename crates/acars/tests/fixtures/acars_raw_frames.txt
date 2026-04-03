@@ -1,0 +1,2 @@
+# name\thex\tdirection\treg\tlabel\tblock_id\tflight_id\tmsg_num\tmsg_seq\ttxt_prefix\tcrc_ok
+prog_guide_example	32aed3d0ad4cc4451532b3b302cdb0b9c14c4fb032c4cd4fceceb0314c4fb032c4cd2f2a2a32b932b03431454c4c5845d057c132b03431b0b0323883dfcb7f	downlink	.SP-LDE	23	3	LO02DM	M09	A	ONN01LO02DM/**292041ELLXEPWA20410028	true
