@@ -90,14 +90,10 @@ const H: [u32; HDRFECLEN as usize] = [
 ];
 
 const SYNDTABLE: [u32; 32] = [
-    0x00000000, 0x00000001, 0x00000002, 0x00800004,
-    0x00000004, 0x00800002, 0x01000000, 0x00800000,
-    0x00000008, 0x00400000, 0x00200000, 0x00100000,
-    0x00080000, 0x01100000, 0x00040000, 0x00020000,
-    0x00000010, 0x00010000, 0x00804000, 0x00008000,
-    0x00808000, 0x00004000, 0x00002000, 0x01010000,
-    0x00001000, 0x00000800, 0x00000400, 0x00000200,
-    0x00000100, 0x00000080, 0x00000040, 0x00000020,
+    0x00000000, 0x00000001, 0x00000002, 0x00800004, 0x00000004, 0x00800002, 0x01000000, 0x00800000,
+    0x00000008, 0x00400000, 0x00200000, 0x00100000, 0x00080000, 0x01100000, 0x00040000, 0x00020000,
+    0x00000010, 0x00010000, 0x00804000, 0x00008000, 0x00808000, 0x00004000, 0x00002000, 0x01010000,
+    0x00001000, 0x00000800, 0x00000400, 0x00000200, 0x00000100, 0x00000080, 0x00000040, 0x00000020,
 ];
 
 // ─── Chebyshev 2-pole lowpass filter ────────────────────────────────────────
@@ -152,26 +148,22 @@ fn chebyshev_calc_pole(p: usize, cutoff: f32, ripple: f32, npoles: usize) -> ([f
 
     if ripple != 0.0 {
         let es = ((100.0 / (100.0 - ripple)).powi(2) - 1.0).sqrt();
-        let vx = (1.0 / npoles as f32)
-            * ((1.0 / es) + ((1.0 / (es * es)) + 1.0).sqrt()).ln();
-        let kx = (1.0 / npoles as f32)
-            * ((1.0 / es) + ((1.0 / (es * es)) - 1.0).sqrt()).ln();
+        let vx = (1.0 / npoles as f32) * ((1.0 / es) + ((1.0 / (es * es)) + 1.0).sqrt()).ln();
+        let kx = (1.0 / npoles as f32) * ((1.0 / es) + ((1.0 / (es * es)) - 1.0).sqrt()).ln();
         let kx_val = (kx.exp() + (-kx).exp()) / 2.0;
         rp *= ((vx.exp() - (-vx).exp()) / 2.0) / kx_val;
         let ip_new = ip * ((vx.exp() + (-vx).exp()) / 2.0) / kx_val;
         let _ = ip_new; // ip_new not used again (C code updates ip but doesn't reassign rp's ip part)
-        // Actually, dumpvdl2 does modify ip in-place too:
-        // ip *= ((expf(vx) + expf(-vx)) / 2.f) / kx;
-        // We handle this as a local computation below.
+                        // Actually, dumpvdl2 does modify ip in-place too:
+                        // ip *= ((expf(vx) + expf(-vx)) / 2.f) / kx;
+                        // We handle this as a local computation below.
     }
 
     // Recompute with ripple-modified rp and ip
     let (ip_mod, rp_mod) = if ripple != 0.0 {
         let es = ((100.0 / (100.0 - ripple)).powi(2) - 1.0).sqrt();
-        let vx = (1.0 / npoles as f32)
-            * ((1.0 / es) + ((1.0 / (es * es)) + 1.0).sqrt()).ln();
-        let kx = (1.0 / npoles as f32)
-            * ((1.0 / es) + ((1.0 / (es * es)) - 1.0).sqrt()).ln();
+        let vx = (1.0 / npoles as f32) * ((1.0 / es) + ((1.0 / (es * es)) + 1.0).sqrt()).ln();
+        let kx = (1.0 / npoles as f32) * ((1.0 / es) + ((1.0 / (es * es)) - 1.0).sqrt()).ln();
         let kx_val = (kx.exp() + (-kx).exp()) / 2.0;
         let sinh_vx = (vx.exp() - (-vx).exp()) / 2.0;
         let cosh_vx = (vx.exp() + (-vx).exp()) / 2.0;
@@ -282,8 +274,7 @@ impl RsDecoder {
                 if s[i] == 0 {
                     s[i] = data[j];
                 } else {
-                    s[i] = data[j]
-                        ^ a[modnn(ix[s[i] as usize] as usize + (RS_FCR + i * RS_PRIM))];
+                    s[i] = data[j] ^ a[modnn(ix[s[i] as usize] as usize + (RS_FCR + i * RS_PRIM))];
                 }
             }
         }
@@ -443,9 +434,10 @@ impl RsDecoder {
                 ii -= 2;
             }
             if num1 != 0 {
-                data[loc[j]] ^=
-                    a[modnn(ix[num1 as usize] as usize + ix[num2 as usize] as usize + RS_N
-                        - ix[den as usize] as usize)];
+                data[loc[j]] ^= a[modnn(
+                    ix[num1 as usize] as usize + ix[num2 as usize] as usize + RS_N
+                        - ix[den as usize] as usize,
+                )];
             }
         }
         Some(count)
@@ -550,8 +542,11 @@ impl Vdl2Channel {
     /// * `offset_hz`   — frequency offset = channel_freq − center_freq.
     /// * `freq_hz`     — absolute channel frequency in Hz (used for ppm computation).
     pub fn new(sample_rate: f32, offset_hz: f32, freq_hz: f32) -> Self {
-        let (lpf_a, lpf_b) =
-            chebyshev_lpf_init(INP_LPF_CUTOFF_HZ / sample_rate, INP_LPF_RIPPLE, INP_LPF_NPOLES);
+        let (lpf_a, lpf_b) = chebyshev_lpf_init(
+            INP_LPF_CUTOFF_HZ / sample_rate,
+            INP_LPF_RIPPLE,
+            INP_LPF_NPOLES,
+        );
 
         let oversample = (sample_rate / (SYMBOL_RATE * SPS) as f32).round() as u32;
         let downmix_dphi = if offset_hz.abs() > 1.0 {
@@ -676,9 +671,8 @@ impl Vdl2Channel {
                 self.nfcnt += 1;
                 if self.nfcnt == 1000 {
                     self.nfcnt = 0;
-                    self.mag_nf = NF_LP * self.mag_nf
-                        + (1.0 - NF_LP) * self.mag_lp.min(self.mag_nf)
-                        + 0.0001;
+                    self.mag_nf =
+                        NF_LP * self.mag_nf + (1.0 - NF_LP) * self.mag_lp.min(self.mag_nf) + 0.0001;
                 }
 
                 if self.got_sync() {
@@ -776,8 +770,8 @@ impl Vdl2Channel {
             // Preamble found. Use parabolic interpolation on the three pherr samples
             // to find the sub-sample timing of the pherr minimum (= sync point).
             // Called with x=0 (sclk was reset to 0 before got_sync), d=SYNC_SKIP.
-            let vertex_x = calc_para_vertex(0.0, SYNC_SKIP as i32,
-                self.pherr[2], self.pherr[1], pherr0);
+            let vertex_x =
+                calc_para_vertex(0.0, SYNC_SKIP as i32, self.pherr[2], self.pherr[1], pherr0);
             self.sclk = (-vertex_x).round() as i32;
             self.dphi = self.prev_dphi;
             // prev_phi = phase at the sync point (sclk samples back from now).
@@ -900,8 +894,7 @@ impl Vdl2Channel {
                 } else {
                     nb
                 };
-                if deinterleave(&fec_bytes, fec_rows, RS_N, &mut rs_tab, RS_NROOTS, RS_K).is_err()
-                {
+                if deinterleave(&fec_bytes, fec_rows, RS_N, &mut rs_tab, RS_NROOTS, RS_K).is_err() {
                     self.demod_reset();
                     return Vec::new();
                 }
@@ -915,8 +908,7 @@ impl Vdl2Channel {
                         get_fec_octetcount(last_len as u32)
                     };
                     let erasure_cnt = RS_NROOTS - n_fec;
-                    let erasures: Vec<usize> =
-                        (RS_K + n_fec..RS_N).take(erasure_cnt).collect();
+                    let erasures: Vec<usize> = (RS_K + n_fec..RS_N).take(erasure_cnt).collect();
 
                     if self.rs.decode(&mut rs_tab[r], &erasures).is_none() {
                         self.demod_reset();
@@ -948,15 +940,19 @@ impl Vdl2Channel {
                 // Capture signal metadata before reset clears frame_pwr.
                 let signal_dbfs = 10.0 * self.frame_pwr.max(1e-20_f32).log10();
                 let noise_dbfs = 20.0 * (self.mag_nf + 0.001_f32).log10();
-                let ppm_error = self.dphi * SYMBOL_RATE as f32
-                    / (2.0 * PI * self.freq_hz)
-                    * 1_000_000.0;
+                let ppm_error =
+                    self.dphi * SYMBOL_RATE as f32 / (2.0 * PI * self.freq_hz) * 1_000_000.0;
 
                 self.demod_reset();
 
                 raw_frames
                     .into_iter()
-                    .map(|bytes| DemodFrame { bytes, signal_dbfs, noise_dbfs, ppm_error })
+                    .map(|bytes| DemodFrame {
+                        bytes,
+                        signal_dbfs,
+                        noise_dbfs,
+                        ppm_error,
+                    })
                     .collect()
             }
 
@@ -1027,7 +1023,8 @@ fn calc_para_vertex(x: f32, d: i32, y1: f32, y2: f32, y3: f32) -> f32 {
     let d = d as f32;
     let denom = d * 2.0 * d * (-d);
     let a = (x * (y2 - y1) + (x - d) * (y1 - y3) + (x - 2.0 * d) * (y3 - y2)) / denom;
-    let b = (x * x * (y1 - y2) + (x - d) * (x - d) * (y3 - y1)
+    let b = (x * x * (y1 - y2)
+        + (x - d) * (x - d) * (y3 - y1)
         + (x - 2.0 * d) * (x - 2.0 * d) * (y2 - y3))
         / denom;
     -b / (2.0 * a)

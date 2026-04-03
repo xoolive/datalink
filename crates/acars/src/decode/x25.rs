@@ -123,6 +123,15 @@ pub struct CotpPdu {
     #[serde(serialize_with = "crate::decode::avlc::serialize_opt_bytes_hex")]
     #[serde(deserialize_with = "crate::decode::avlc::deserialize_opt_bytes_hex")]
     pub user_data: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpdlc: Option<CpdlcMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpdlcMessage {
+    pub parser: String,
+    pub bit_offset: u8,
+    pub free_text: String,
 }
 
 /// One decoded COTP variable-part parameter.
@@ -148,8 +157,11 @@ pub fn parse_x25_packet(buf: &[u8]) -> X25Packet {
     if buf.len() < 3 {
         return X25Packet {
             packet_type: "Unknown".into(),
-            chan_group: 0, chan_num: 0,
-            sseq: None, rseq: None, more: None,
+            chan_group: 0,
+            chan_num: 0,
+            sseq: None,
+            rseq: None,
+            more: None,
             reasm_status: "skipped".into(),
             inner: None,
         };
@@ -163,8 +175,11 @@ pub fn parse_x25_packet(buf: &[u8]) -> X25Packet {
     if gfi != GFI_X25_MOD8 {
         return X25Packet {
             packet_type: "Unknown".into(),
-            chan_group, chan_num,
-            sseq: None, rseq: None, more: None,
+            chan_group,
+            chan_num,
+            sseq: None,
+            rseq: None,
+            more: None,
             reasm_status: "skipped".into(),
             inner: None,
         };
@@ -185,8 +200,11 @@ pub fn parse_x25_packet(buf: &[u8]) -> X25Packet {
         };
         X25Packet {
             packet_type: "Data".into(),
-            chan_group, chan_num,
-            sseq: Some(sseq), rseq: Some(rseq), more: Some(more),
+            chan_group,
+            chan_num,
+            sseq: Some(sseq),
+            rseq: Some(rseq),
+            more: Some(more),
             reasm_status: "skipped".into(),
             inner,
         }
@@ -196,8 +214,11 @@ pub fn parse_x25_packet(buf: &[u8]) -> X25Packet {
             let rseq = (type_byte >> 5) & 0x7;
             X25Packet {
                 packet_type: "Receive Ready".into(),
-                chan_group, chan_num,
-                sseq: None, rseq: Some(rseq), more: None,
+                chan_group,
+                chan_num,
+                sseq: None,
+                rseq: Some(rseq),
+                more: None,
                 reasm_status: "skipped".into(),
                 inner: None,
             }
@@ -205,16 +226,22 @@ pub fn parse_x25_packet(buf: &[u8]) -> X25Packet {
             let rseq = (type_byte >> 5) & 0x7;
             X25Packet {
                 packet_type: "Receive Reject".into(),
-                chan_group, chan_num,
-                sseq: None, rseq: Some(rseq), more: None,
+                chan_group,
+                chan_num,
+                sseq: None,
+                rseq: Some(rseq),
+                more: None,
                 reasm_status: "skipped".into(),
                 inner: None,
             }
         } else {
             X25Packet {
                 packet_type: format!("Unknown(0x{:02x})", type_byte),
-                chan_group, chan_num,
-                sseq: None, rseq: None, more: None,
+                chan_group,
+                chan_num,
+                sseq: None,
+                rseq: None,
+                more: None,
                 reasm_status: "skipped".into(),
                 inner: None,
             }
@@ -246,7 +273,14 @@ fn parse_x25_user_data(buf: &[u8]) -> X25Inner {
 fn parse_clnp_compressed(buf: &[u8]) -> ClnpCompressedPdu {
     const CLNP_MIN: usize = 4;
     if buf.len() < CLNP_MIN {
-        return ClnpCompressedPdu { lref: 0, priority: 0, flags: 0, lifetime_sec: 0.0, pdu_id: None, inner: None };
+        return ClnpCompressedPdu {
+            lref: 0,
+            priority: 0,
+            flags: 0,
+            lifetime_sec: 0.0,
+            pdu_id: None,
+            inner: None,
+        };
     }
 
     let pdu_type = buf[0] >> 4;
@@ -266,7 +300,14 @@ fn parse_clnp_compressed(buf: &[u8]) -> ClnpCompressedPdu {
 
     let lref = if exp != 0 {
         if pos >= buf.len() {
-            return ClnpCompressedPdu { lref: 0, priority, flags, lifetime_sec, pdu_id: None, inner: None };
+            return ClnpCompressedPdu {
+                lref: 0,
+                priority,
+                flags,
+                lifetime_sec,
+                pdu_id: None,
+                inner: None,
+            };
         }
         let lref_b = buf[pos];
         pos += 1;
@@ -277,7 +318,14 @@ fn parse_clnp_compressed(buf: &[u8]) -> ClnpCompressedPdu {
 
     let pdu_id = if is_segmentation_permitted {
         if pos + 2 > buf.len() {
-            return ClnpCompressedPdu { lref, priority, flags, lifetime_sec, pdu_id: None, inner: None };
+            return ClnpCompressedPdu {
+                lref,
+                priority,
+                flags,
+                lifetime_sec,
+                pdu_id: None,
+                inner: None,
+            };
         }
         let id = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
         pos += 2;
@@ -297,7 +345,14 @@ fn parse_clnp_compressed(buf: &[u8]) -> ClnpCompressedPdu {
         None
     };
 
-    ClnpCompressedPdu { lref, priority, flags, lifetime_sec, pdu_id, inner }
+    ClnpCompressedPdu {
+        lref,
+        priority,
+        flags,
+        lifetime_sec,
+        pdu_id,
+        inner,
+    }
 }
 
 // ─── CLNP payload dispatch ───────────────────────────────────────────────────
@@ -384,9 +439,12 @@ fn parse_cotp_concatenated(buf: &[u8]) -> Vec<CotpPdu> {
     out
 }
 
-fn parse_cotp_tpdu(li: usize, hdr: &[u8], full_buf: &[u8], after_hdr: usize)
-    -> Option<(CotpPdu, usize)>
-{
+fn parse_cotp_tpdu(
+    li: usize,
+    hdr: &[u8],
+    full_buf: &[u8],
+    after_hdr: usize,
+) -> Option<(CotpPdu, usize)> {
     if hdr.is_empty() {
         return None;
     }
@@ -397,7 +455,11 @@ fn parse_cotp_tpdu(li: usize, hdr: &[u8], full_buf: &[u8], after_hdr: usize)
         _ => code_byte,
     };
     let credit_nibble = code_byte & 0x0F;
-    let roa = if code_byte & 0xF0 == COTP_TPDU_DT { code_byte & 1 } else { 0 };
+    let roa = if code_byte & 0xF0 == COTP_TPDU_DT {
+        code_byte & 1
+    } else {
+        0
+    };
 
     if hdr.len() < 3 {
         return None;
@@ -421,6 +483,7 @@ fn parse_cotp_tpdu(li: usize, hdr: &[u8], full_buf: &[u8], after_hdr: usize)
         options: None,
         params: Vec::new(),
         user_data: None,
+        cpdlc: None,
     };
 
     let mut var_part_offset: usize = 0;
@@ -428,7 +491,9 @@ fn parse_cotp_tpdu(li: usize, hdr: &[u8], full_buf: &[u8], after_hdr: usize)
 
     match code {
         COTP_TPDU_CR | COTP_TPDU_CC | COTP_TPDU_DR => {
-            if hdr.len() < 6 { return None; }
+            if hdr.len() < 6 {
+                return None;
+            }
             pdu.src_ref = Some(u16::from_be_bytes([hdr[3], hdr[4]]));
             if code == COTP_TPDU_DR {
                 pdu.disc_reason = Some(hdr[5]);
@@ -442,15 +507,21 @@ fn parse_cotp_tpdu(li: usize, hdr: &[u8], full_buf: &[u8], after_hdr: usize)
             final_pdu = true;
         }
         COTP_TPDU_DC => {
-            if hdr.len() < 5 { return None; }
+            if hdr.len() < 5 {
+                return None;
+            }
             pdu.src_ref = Some(u16::from_be_bytes([hdr[3], hdr[4]]));
             var_part_offset = 5;
         }
         COTP_TPDU_DT | COTP_TPDU_ED => {
-            if hdr.len() < 4 { return None; }
+            if hdr.len() < 4 {
+                return None;
+            }
             let is_extended = (li & 1) != 0;
             if is_extended {
-                if hdr.len() < 7 { return None; }
+                if hdr.len() < 7 {
+                    return None;
+                }
                 let seq = u32::from_be_bytes([hdr[3], hdr[4], hdr[5], hdr[6]]) & 0x7FFF_FFFF;
                 pdu.eot = Some((hdr[3] & 0x80) != 0);
                 pdu.sseq = Some(seq);
@@ -466,13 +537,17 @@ fn parse_cotp_tpdu(li: usize, hdr: &[u8], full_buf: &[u8], after_hdr: usize)
         COTP_TPDU_AK => {
             let is_extended = (li & 1) != 0;
             if is_extended {
-                if hdr.len() < 9 { return None; }
+                if hdr.len() < 9 {
+                    return None;
+                }
                 let seq = u32::from_be_bytes([hdr[3], hdr[4], hdr[5], hdr[6]]) & 0x7FFF_FFFF;
                 pdu.rseq = Some(seq);
                 pdu.credit = Some(u16::from_be_bytes([hdr[7], hdr[8]]));
                 var_part_offset = 9;
             } else {
-                if hdr.len() < 4 { return None; }
+                if hdr.len() < 4 {
+                    return None;
+                }
                 pdu.rseq = Some((hdr[3] & 0x7F) as u32);
                 pdu.credit = Some(credit_nibble as u16);
                 var_part_offset = 4;
@@ -481,12 +556,16 @@ fn parse_cotp_tpdu(li: usize, hdr: &[u8], full_buf: &[u8], after_hdr: usize)
         COTP_TPDU_EA => {
             let is_extended = (li & 1) != 0;
             if is_extended {
-                if hdr.len() < 7 { return None; }
+                if hdr.len() < 7 {
+                    return None;
+                }
                 let seq = u32::from_be_bytes([hdr[3], hdr[4], hdr[5], hdr[6]]) & 0x7FFF_FFFF;
                 pdu.rseq = Some(seq);
                 var_part_offset = 7;
             } else {
-                if hdr.len() < 4 { return None; }
+                if hdr.len() < 4 {
+                    return None;
+                }
                 pdu.rseq = Some((hdr[3] & 0x7F) as u32);
                 var_part_offset = 4;
             }
@@ -494,17 +573,23 @@ fn parse_cotp_tpdu(li: usize, hdr: &[u8], full_buf: &[u8], after_hdr: usize)
         COTP_TPDU_RJ => {
             let is_extended = (li & 1) != 0;
             if is_extended {
-                if hdr.len() < 9 { return None; }
+                if hdr.len() < 9 {
+                    return None;
+                }
                 let seq = u32::from_be_bytes([hdr[3], hdr[4], hdr[5], hdr[6]]) & 0x7FFF_FFFF;
                 pdu.rseq = Some(seq);
                 pdu.credit = Some(u16::from_be_bytes([hdr[7], hdr[8]]));
             } else {
-                if hdr.len() < 4 { return None; }
+                if hdr.len() < 4 {
+                    return None;
+                }
                 pdu.rseq = Some((hdr[3] & 0x7F) as u32);
             }
         }
         COTP_TPDU_ER => {
-            if hdr.len() < 4 { return None; }
+            if hdr.len() < 4 {
+                return None;
+            }
             // reject cause at hdr[3]
             var_part_offset = 4;
         }
@@ -523,6 +608,9 @@ fn parse_cotp_tpdu(li: usize, hdr: &[u8], full_buf: &[u8], after_hdr: usize)
         let user_data = &full_buf[after_hdr..];
         if !user_data.is_empty() {
             pdu.user_data = Some(user_data.to_vec());
+            if code == COTP_TPDU_DT {
+                pdu.cpdlc = parse_cpdlc_user_data(user_data);
+            }
         }
         user_data_end = full_buf.len();
     }
@@ -555,35 +643,50 @@ fn parse_cotp_var_params(buf: &[u8]) -> Vec<CotpVarParam> {
 
 fn decode_cotp_param(id: u8, data: &[u8]) -> (&'static str, CotpParamValue) {
     match id {
-        0x08 => ("atn_checksum",     CotpParamValue::Bytes(data.to_vec())),
-        0x85 => ("ack_time_ms",      read_u16(data)),
-        0x87 => ("priority",         read_u16(data)),
-        0x8a => ("subseq_num",       read_u16(data)),
+        0x08 => ("atn_checksum", CotpParamValue::Bytes(data.to_vec())),
+        0x85 => ("ack_time_ms", read_u16(data)),
+        0x87 => ("priority", read_u16(data)),
+        0x8a => ("subseq_num", read_u16(data)),
         0x8b => ("reassignment_time_sec", read_u16(data)),
-        0x8c => ("flow_control",     CotpParamValue::Bytes(data.to_vec())),
-        0xc0 => ("tpdu_size_bytes",  decode_tpdu_size(data)),
-        0xc1 => ("calling_transport_selector", CotpParamValue::Bytes(data.to_vec())),
-        0xc2 => ("called_responding_transport_selector", CotpParamValue::Bytes(data.to_vec())),
-        0xc3 => ("checksum",         CotpParamValue::Bytes(data.to_vec())),
+        0x8c => ("flow_control", CotpParamValue::Bytes(data.to_vec())),
+        0xc0 => ("tpdu_size_bytes", decode_tpdu_size(data)),
+        0xc1 => (
+            "calling_transport_selector",
+            CotpParamValue::Bytes(data.to_vec()),
+        ),
+        0xc2 => (
+            "called_responding_transport_selector",
+            CotpParamValue::Bytes(data.to_vec()),
+        ),
+        0xc3 => ("checksum", CotpParamValue::Bytes(data.to_vec())),
         0xc4 => ("additional_options", read_uint(data)),
         0xf2 => ("inactivity_timer_ms", read_u32(data)),
-        _    => ("unknown",          CotpParamValue::Bytes(data.to_vec())),
+        _ => ("unknown", CotpParamValue::Bytes(data.to_vec())),
     }
 }
 
 fn decode_tpdu_size(data: &[u8]) -> CotpParamValue {
-    if data.len() == 1 { CotpParamValue::Uint(1u64 << data[0]) }
-    else { CotpParamValue::Bytes(data.to_vec()) }
+    if data.len() == 1 {
+        CotpParamValue::Uint(1u64 << data[0])
+    } else {
+        CotpParamValue::Bytes(data.to_vec())
+    }
 }
 
 fn read_u16(data: &[u8]) -> CotpParamValue {
-    if data.len() >= 2 { CotpParamValue::Uint(u16::from_be_bytes([data[0], data[1]]) as u64) }
-    else { CotpParamValue::Bytes(data.to_vec()) }
+    if data.len() >= 2 {
+        CotpParamValue::Uint(u16::from_be_bytes([data[0], data[1]]) as u64)
+    } else {
+        CotpParamValue::Bytes(data.to_vec())
+    }
 }
 
 fn read_u32(data: &[u8]) -> CotpParamValue {
-    if data.len() >= 4 { CotpParamValue::Uint(u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as u64) }
-    else { CotpParamValue::Bytes(data.to_vec()) }
+    if data.len() >= 4 {
+        CotpParamValue::Uint(u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as u64)
+    } else {
+        CotpParamValue::Bytes(data.to_vec())
+    }
 }
 
 fn read_uint(data: &[u8]) -> CotpParamValue {
@@ -592,6 +695,96 @@ fn read_uint(data: &[u8]) -> CotpParamValue {
         2 => read_u16(data),
         4 => read_u32(data),
         _ => CotpParamValue::Bytes(data.to_vec()),
+    }
+}
+
+fn parse_cpdlc_user_data(data: &[u8]) -> Option<CpdlcMessage> {
+    let mut best: Option<(u8, String)> = None;
+
+    for bit_offset in 0..7u8 {
+        let decoded = decode_7bit(data, bit_offset);
+        if let Some(text) = longest_cpdlc_text_run(&decoded) {
+            match &best {
+                Some((_, cur)) if cur.len() >= text.len() => {}
+                _ => best = Some((bit_offset, text)),
+            }
+        }
+    }
+
+    best.map(|(bit_offset, free_text)| CpdlcMessage {
+        parser: "heuristic_7bit".to_string(),
+        bit_offset,
+        free_text,
+    })
+}
+
+fn decode_7bit(data: &[u8], bit_offset: u8) -> String {
+    let total_bits = data.len() * 8;
+    let mut out = String::new();
+    let mut bit = bit_offset as usize;
+
+    while bit + 7 <= total_bits {
+        let mut value: u8 = 0;
+        for i in 0..7 {
+            let absolute = bit + i;
+            let byte_idx = absolute / 8;
+            let bit_in_byte = 7 - (absolute % 8);
+            let b = (data[byte_idx] >> bit_in_byte) & 1;
+            value = (value << 1) | b;
+        }
+        let c = if value.is_ascii_graphic() || value == b' ' {
+            value as char
+        } else {
+            '.'
+        };
+        out.push(c);
+        bit += 7;
+    }
+
+    out
+}
+
+fn longest_cpdlc_text_run(decoded: &str) -> Option<String> {
+    fn allowed(c: char) -> bool {
+        c.is_ascii_uppercase()
+            || c.is_ascii_digit()
+            || matches!(c, ' ' | ',' | '.' | '/' | '-' | '\'' | ':' | '(' | ')')
+    }
+
+    let mut best = String::new();
+    let mut cur = String::new();
+
+    for c in decoded.chars() {
+        if allowed(c) {
+            cur.push(c);
+        } else {
+            let candidate = cur.trim_matches('.').trim();
+            if candidate.len() > best.len() && candidate.len() >= 16 && candidate.contains(' ') {
+                best = candidate.to_string();
+            }
+            cur.clear();
+        }
+    }
+
+    let candidate = cur.trim_matches('.').trim();
+    if candidate.len() > best.len() && candidate.len() >= 16 && candidate.contains(' ') {
+        best = candidate.to_string();
+    }
+
+    if best.is_empty() {
+        return None;
+    }
+
+    let cleaned = if let Some(idx) = best.find("..") {
+        best[..idx].trim().to_string()
+    } else {
+        best
+    };
+
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
     }
 }
 
@@ -615,10 +808,10 @@ fn cotp_tpdu_name(code: u8) -> &'static str {
 
 fn cotp_dr_reason(code: u8) -> &'static str {
     match code {
-        0   => "Reason not specified",
-        1   => "TSAP congestion",
-        2   => "Session entity not attached to TSAP",
-        3   => "Unknown address",
+        0 => "Reason not specified",
+        1 => "TSAP congestion",
+        2 => "Session entity not attached to TSAP",
+        3 => "Unknown address",
         128 => "Normal disconnect",
         129 => "Remote transport entity congestion",
         130 => "Connection negotiation failed",
@@ -628,6 +821,6 @@ fn cotp_dr_reason(code: u8) -> &'static str {
         135 => "Reference overflow",
         136 => "Connection request refused",
         138 => "Header or parameter length invalid",
-        _   => "Unknown",
+        _ => "Unknown",
     }
 }

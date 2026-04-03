@@ -2,6 +2,7 @@ use acars::decode::acars::{parse_acars_frame, MessageDirection};
 use acars::decode::adsc::parse_adsc_app_text;
 use acars::decode::avlc::parse_avlc_frame;
 use clap::{Parser, Subcommand, ValueEnum};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod demod;
 
@@ -83,7 +84,11 @@ fn main() -> anyhow::Result<()> {
         Command::Avlc { hex } => {
             let bytes = hex::decode(hex.trim())?;
             let frame = parse_avlc_frame(&bytes)?;
-            println!("{}", serde_json::to_string_pretty(&frame)?);
+            let mut obj = serde_json::to_value(&frame)?;
+            if let serde_json::Value::Object(ref mut m) = obj {
+                m.insert("raw_frame_hex".into(), bytes_to_hex(&bytes).into());
+            }
+            println!("{}", serde_json::to_string_pretty(&obj)?);
         }
 
         Command::Adsc { payload } => {
@@ -110,8 +115,8 @@ fn decode_file(
     sample_rate: u32,
     channels: &[u32],
 ) -> anyhow::Result<()> {
-    use desperado::IqFormat;
     use desperado::iqread::IqRead;
+    use desperado::IqFormat;
 
     // Each VDL2 channel gets its own demodulator.
     let mut demods: Vec<demod::Vdl2Channel> = channels
@@ -123,20 +128,44 @@ fn decode_file(
         .collect();
 
     let reader = IqRead::from_file(path, center_freq, sample_rate, 65536, IqFormat::Cu8)?;
+    let run_start = SystemTime::now();
+    let mut sample_index: u64 = 0;
 
     for chunk_result in reader {
         let chunk = chunk_result?;
         for sample in &chunk {
-            for d in &mut demods {
+            sample_index = sample_index.saturating_add(1);
+            let seconds_into_recording = sample_index as f64 / sample_rate as f64;
+            let frame_ts = run_start + Duration::from_secs_f64(seconds_into_recording);
+            let timestamp_unix = frame_ts
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or_default();
+            for (idx, d) in demods.iter_mut().enumerate() {
                 for demod_frame in d.process_sample(sample.re, sample.im) {
                     if let Ok(avlc) = parse_avlc_frame(&demod_frame.bytes) {
                         let snr_db = demod_frame.signal_dbfs - demod_frame.noise_dbfs;
+                        let channel_hz = channels[idx] as u64;
                         let mut obj = serde_json::to_value(&avlc)?;
                         if let serde_json::Value::Object(ref mut m) = obj {
                             m.insert("signal_dbfs".into(), demod_frame.signal_dbfs.into());
                             m.insert("noise_dbfs".into(), demod_frame.noise_dbfs.into());
                             m.insert("snr_db".into(), snr_db.into());
                             m.insert("ppm_error".into(), demod_frame.ppm_error.into());
+                            m.insert(
+                                "channel_mhz".into(),
+                                (channel_hz as f64 / 1_000_000.0).into(),
+                            );
+                            m.insert("sample_index".into(), sample_index.into());
+                            m.insert(
+                                "seconds_into_recording".into(),
+                                seconds_into_recording.into(),
+                            );
+                            m.insert("timestamp_unix".into(), timestamp_unix.into());
+                            m.insert(
+                                "raw_frame_hex".into(),
+                                bytes_to_hex(&demod_frame.bytes).into(),
+                            );
                         }
                         println!("{}", serde_json::to_string(&obj)?);
                     }
@@ -146,4 +175,12 @@ fn decode_file(
     }
 
     Ok(())
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join("")
 }

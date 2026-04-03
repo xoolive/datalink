@@ -18,8 +18,8 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::decode::acars::{parse_acars_frame, AcarsMessage, MessageDirection};
-use crate::decode::xid::{parse_xid, XidMessage};
 use crate::decode::x25::{parse_x25_packet, X25Packet};
+use crate::decode::xid::{parse_xid, XidMessage};
 use crate::decode::{DecodeError, DecodeResult};
 
 /// Minimum valid AVLC frame length (4 dst + 4 src + 1 lcf + 2 fcs).
@@ -36,10 +36,10 @@ pub const ADDRTYPE_ALL: u8 = 7;
 
 // ─── Serde helpers for hex byte arrays ──────────────────────────────────────
 
-/// Serialize `Vec<u8>` as a space-separated hex string.
+/// Serialize `Vec<u8>` as a contiguous hex string.
 pub fn serialize_bytes_hex<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
-    let hex: Vec<String> = v.iter().map(|b| format!("{:02x}", b)).collect();
-    s.serialize_str(&hex.join(" "))
+    let hex: String = v.iter().map(|b| format!("{:02x}", b)).collect();
+    s.serialize_str(&hex)
 }
 
 /// Serialize `Vec<u8>` as hex (for use in enum variants).
@@ -48,15 +48,20 @@ pub fn serialize_bytes_hex_variant<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S
 }
 
 /// Serialize `Option<Vec<u8>>` as optional hex string.
-pub fn serialize_opt_bytes_hex<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+pub fn serialize_opt_bytes_hex<S: Serializer>(
+    v: &Option<Vec<u8>>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
     match v {
         Some(b) => serialize_bytes_hex(b, s),
         None => s.serialize_none(),
     }
 }
 
-/// Deserialize `Option<Vec<u8>>` — accepts null, a space-separated hex string, or a JSON byte array.
-pub fn deserialize_opt_bytes_hex<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+/// Deserialize `Option<Vec<u8>>` — accepts null, a hex string, or a JSON byte array.
+pub fn deserialize_opt_bytes_hex<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Vec<u8>>, D::Error> {
     use serde::de::{self, SeqAccess, Visitor};
 
     struct OptBytesVisitor;
@@ -84,9 +89,7 @@ pub fn deserialize_opt_bytes_hex<'de, D: Deserializer<'de>>(d: D) -> Result<Opti
                     write!(f, "a hex string or byte array")
                 }
                 fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-                    v.split_whitespace()
-                        .map(|h| u8::from_str_radix(h, 16).map_err(|e| E::custom(e.to_string())))
-                        .collect()
+                    parse_hex_bytes(v).map_err(|e| E::custom(e.to_string()))
                 }
                 fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
                     let mut out = Vec::new();
@@ -101,6 +104,65 @@ pub fn deserialize_opt_bytes_hex<'de, D: Deserializer<'de>>(d: D) -> Result<Opti
     }
 
     d.deserialize_option(OptBytesVisitor)
+}
+
+fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
+    let cleaned: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    if cleaned.is_empty() {
+        return Ok(Vec::new());
+    }
+    if cleaned.len() % 2 != 0 {
+        return Err("hex string must have an even number of digits".to_string());
+    }
+
+    let mut out = Vec::with_capacity(cleaned.len() / 2);
+    for i in (0..cleaned.len()).step_by(2) {
+        let byte = u8::from_str_radix(&cleaned[i..i + 2], 16)
+            .map_err(|e| format!("invalid hex at offset {i}: {e}"))?;
+        out.push(byte);
+    }
+    Ok(out)
+}
+
+pub fn serialize_addr_hex<S: Serializer>(v: &u32, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&format!("{:06X}", v))
+}
+
+pub fn deserialize_addr_hex<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    use serde::de::{self, Visitor};
+
+    struct AddrVisitor;
+
+    impl<'de> Visitor<'de> for AddrVisitor {
+        type Value = u32;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "hex string or integer address")
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            u32::try_from(v).map_err(|_| E::custom("address out of range"))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            if v < 0 {
+                return Err(E::custom("address must be non-negative"));
+            }
+            u32::try_from(v as u64).map_err(|_| E::custom("address out of range"))
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            let trimmed = v.trim();
+            let no_prefix = trimmed
+                .strip_prefix("0x")
+                .or_else(|| trimmed.strip_prefix("0X"))
+                .unwrap_or(trimmed);
+            u32::from_str_radix(no_prefix, 16)
+                .map_err(|e| E::custom(format!("invalid hex address: {e}")))
+        }
+    }
+
+    d.deserialize_any(AddrVisitor)
 }
 
 // ─── AVLC address ───────────────────────────────────────────────────────────
@@ -118,6 +180,8 @@ fn addr_station_type(addr_type: u8) -> &'static str {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AvlcAddr {
     /// 24-bit ICAO aircraft address or ground-station id (hex).
+    #[serde(serialize_with = "serialize_addr_hex")]
+    #[serde(deserialize_with = "deserialize_addr_hex")]
     pub addr: u32,
     /// Address type: 1=aircraft, 4=GS_ADM, 5=GS_DEL, 7=all.
     pub addr_type: u8,
@@ -286,11 +350,7 @@ pub fn parse_avlc_frame(buf: &[u8]) -> DecodeResult<AvlcFrame> {
     let fcs_ok = crc16_ccitt(buf, 0xFFFF) == GOOD_FCS;
 
     // Strip FCS bytes when present so that payload extraction is correct.
-    let content = if fcs_ok {
-        &buf[..buf.len() - 2]
-    } else {
-        buf
-    };
+    let content = if fcs_ok { &buf[..buf.len() - 2] } else { buf };
 
     if content.len() < 9 {
         return Err(DecodeError::FrameTooShort(buf.len()));
@@ -308,13 +368,10 @@ pub fn parse_avlc_frame(buf: &[u8]) -> DecodeResult<AvlcFrame> {
 
     let payload = if fcs_ok {
         match &lcf {
-            AvlcLcf::I { .. } => {
-                Some(decode_i_payload(payload_bytes, &src))
-            }
+            AvlcLcf::I { .. } => Some(decode_i_payload(payload_bytes, &src)),
             AvlcLcf::U { mfunc, pf, .. } if *mfunc == 0x2B => {
                 // XID frame
-                parse_xid(src.status, *pf, payload_bytes)
-                    .map(AvlcPayload::Xid)
+                parse_xid(src.status, *pf, payload_bytes).map(AvlcPayload::Xid)
             }
             _ => None,
         }
@@ -322,7 +379,15 @@ pub fn parse_avlc_frame(buf: &[u8]) -> DecodeResult<AvlcFrame> {
         None
     };
 
-    Ok(AvlcFrame { dst, src, cr, ag_status, lcf, fcs_ok, payload })
+    Ok(AvlcFrame {
+        dst,
+        src,
+        cr,
+        ag_status,
+        lcf,
+        fcs_ok,
+        payload,
+    })
 }
 
 fn decode_i_payload(bytes: &[u8], src: &AvlcAddr) -> AvlcPayload {
