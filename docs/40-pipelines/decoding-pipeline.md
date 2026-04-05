@@ -131,5 +131,5 @@ Notes:
 - X.25/COTP reassembly parity is not complete yet.
 - `acars131` classic POA VHF ACARS frontend is implemented in an initial form; validation against reference IQ datasets is still pending.
 
-For protocol placement and coverage tables, see `docs/architecture.md`.
+For protocol placement and coverage tables, see `docs/00-overview/architecture.md`.
 For roadmap and implementation tasks, see `plan.md`.

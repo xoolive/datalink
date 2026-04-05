@@ -1,0 +1,71 @@
+/* Clean, minimal styling for datalink docs */
+
+:root {
+    --content-max-width: 900px;
+    --sidebar-width: 300px;
+}
+
+/* Tighter line height for better readability */
+.content {
+    line-height: 1.6;
+    max-width: var(--content-max-width);
+}
+
+/* Code blocks with better contrast */
+pre {
+    border-radius: 4px;
+    padding: 1em;
+}
+
+/* Tables */
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1em 0;
+}
+
+table th {
+    background-color: var(--table-header-bg);
+    font-weight: 600;
+    text-align: left;
+}
+
+table th,
+table td {
+    padding: 0.5em 1em;
+    border: 1px solid var(--table-border-color);
+}
+
+/* Cleaner headings */
+h1, h2, h3, h4 {
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+}
+
+h1 {
+    border-bottom: 2px solid var(--links);
+    padding-bottom: 0.3em;
+}
+
+/* Inline code */
+code {
+    padding: 0.1em 0.3em;
+    border-radius: 3px;
+}
+
+/* Lists */
+ul, ol {
+    padding-left: 2em;
+}
+
+li {
+    margin: 0.3em 0;
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--quote-border);
+    padding-left: 1em;
+    margin: 1em 0;
+    color: var(--quote-color);
+}

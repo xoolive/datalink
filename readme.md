@@ -26,8 +26,10 @@ This project sits between two established reference points:
 In practice:
 
 - `dumpvdl2` is the primary behavior benchmark for AVLC/X.25 framing choices.
+- `vdlm2dec` is an additional VDL2 operational reference from the same ecosystem.
 - `libacars` is the app-layer semantics reference and fallback strategy model.
 - `acarsdec`/`JAERO` are operational references (filters, routing, output shape).
+- `dumphfdl` is the primary HFDL reference (HF bearer context and long-haul operations).
 
 `acars` is not a direct port of libacars. It is a Rust-native implementation with
 libacars-compatible behavior where implemented, and partial overlap at this stage.
@@ -76,6 +78,8 @@ consistent output schema with bearer metadata.
 
 For implementation details and comparison notes, see `plan.md`.
 
-For high-level documentation, start with `docs/index.md`.
+For high-level documentation, start with `docs/00-overview/README.md`.
 
-For protocol/layer orientation, see `docs/architecture.md`.
+The docs navigation index is at `docs/index.md`.
+
+For protocol/layer orientation, see `docs/00-overview/architecture.md`.
