@@ -7,6 +7,7 @@ name = "acars"
 version = "0.1.0"
 dependencies = [
  "deku",
+ "desperado",
  "hex",
  "serde",
  "serde_json",

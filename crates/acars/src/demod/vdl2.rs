@@ -23,6 +23,10 @@ use std::f32::consts::PI;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
+use desperado::dsp::chebyshev::Chebyshev2Lpf;
+use desperado::dsp::downsample::EveryN;
+use desperado::dsp::nco::Nco;
+
 // ─── Physical-layer constants ───────────────────────────────────────────────
 
 pub const SYMBOL_RATE: u32 = 10_500;
@@ -55,7 +59,6 @@ const RS_K: usize = 249;
 
 const INP_LPF_CUTOFF_HZ: f32 = 8_000.0;
 const INP_LPF_RIPPLE: f32 = 0.5; // percent
-const INP_LPF_NPOLES: usize = 2;
 
 // ─── D8PSK preamble phases (cumulative, radians) ───────────────────────────
 
@@ -97,117 +100,6 @@ const SYNDTABLE: [u32; 32] = [
     0x00000010, 0x00010000, 0x00804000, 0x00008000, 0x00808000, 0x00004000, 0x00002000, 0x01010000,
     0x00001000, 0x00000800, 0x00000400, 0x00000200, 0x00000100, 0x00000080, 0x00000040, 0x00000020,
 ];
-
-// ─── Chebyshev 2-pole lowpass filter ────────────────────────────────────────
-
-/// Compute feed-forward (A) and feedback (B) coefficients for a Chebyshev
-/// type-I lowpass IIR filter with `npoles` poles.
-///
-/// Ported from Smith's "Scientist and Engineer's Guide to DSP", as implemented
-/// in dumpvdl2 `chebyshev.c`.
-fn chebyshev_lpf_init(cutoff_freq: f32, ripple_pct: f32, npoles: usize) -> ([f32; 3], [f32; 3]) {
-    assert!(npoles == 2, "only 2-pole filter implemented");
-    assert!((npoles & 1) == 0);
-
-    let mut a = [0.0f32; 5];
-    let mut b = [0.0f32; 5];
-    a[2] = 1.0;
-    b[2] = 1.0;
-
-    for p in 1..=(npoles / 2) {
-        let (aa, bb) = chebyshev_calc_pole(p, cutoff_freq, ripple_pct, npoles);
-        let ta = a;
-        let tb = b;
-        for i in 2..5 {
-            a[i] = aa[0] * ta[i] + aa[1] * ta[i - 1] + aa[2] * ta[i - 2];
-            b[i] = tb[i] - bb[1] * tb[i - 1] - bb[2] * tb[i - 2];
-        }
-    }
-
-    b[2] = 0.0;
-    let mut out_a = [0.0f32; 3];
-    let mut out_b = [0.0f32; 3];
-    for i in 0..3 {
-        out_a[i] = a[i + 2];
-        out_b[i] = -b[i + 2];
-    }
-    out_b[0] = 0.0;
-
-    let sa: f32 = out_a.iter().sum();
-    let sb: f32 = out_b.iter().sum();
-    let gain = sa / (1.0 - sb);
-    for x in &mut out_a {
-        *x /= gain;
-    }
-    (out_a, out_b)
-}
-
-/// Compute the biquad coefficients for the p-th pole.
-fn chebyshev_calc_pole(p: usize, cutoff: f32, ripple: f32, npoles: usize) -> ([f32; 3], [f32; 3]) {
-    let angle = PI / (2.0 * npoles as f32) + (p as f32 - 1.0) * PI / npoles as f32;
-    let (ip, rp_raw) = angle.sin_cos();
-    let mut rp = -rp_raw;
-
-    if ripple != 0.0 {
-        let es = ((100.0 / (100.0 - ripple)).powi(2) - 1.0).sqrt();
-        let vx = (1.0 / npoles as f32) * ((1.0 / es) + ((1.0 / (es * es)) + 1.0).sqrt()).ln();
-        let kx = (1.0 / npoles as f32) * ((1.0 / es) + ((1.0 / (es * es)) - 1.0).sqrt()).ln();
-        let kx_val = (kx.exp() + (-kx).exp()) / 2.0;
-        rp *= ((vx.exp() - (-vx).exp()) / 2.0) / kx_val;
-        let ip_new = ip * ((vx.exp() + (-vx).exp()) / 2.0) / kx_val;
-        let _ = ip_new; // ip_new not used again (C code updates ip but doesn't reassign rp's ip part)
-                        // Actually, dumpvdl2 does modify ip in-place too:
-                        // ip *= ((expf(vx) + expf(-vx)) / 2.f) / kx;
-                        // We handle this as a local computation below.
-    }
-
-    // Recompute with ripple-modified rp and ip
-    let (ip_mod, rp_mod) = if ripple != 0.0 {
-        let es = ((100.0 / (100.0 - ripple)).powi(2) - 1.0).sqrt();
-        let vx = (1.0 / npoles as f32) * ((1.0 / es) + ((1.0 / (es * es)) + 1.0).sqrt()).ln();
-        let kx = (1.0 / npoles as f32) * ((1.0 / es) + ((1.0 / (es * es)) - 1.0).sqrt()).ln();
-        let kx_val = (kx.exp() + (-kx).exp()) / 2.0;
-        let sinh_vx = (vx.exp() - (-vx).exp()) / 2.0;
-        let cosh_vx = (vx.exp() + (-vx).exp()) / 2.0;
-        (ip * cosh_vx / kx_val, -rp_raw * sinh_vx / kx_val)
-    } else {
-        (ip, rp)
-    };
-
-    let t = 2.0 * (0.5f32).tan();
-    let w = 2.0 * PI * cutoff;
-    let m = rp_mod * rp_mod + ip_mod * ip_mod;
-    let d = 4.0 - 4.0 * rp_mod * t + m * t * t;
-    let x0 = t * t / d;
-    let x1 = 2.0 * x0;
-    let x2 = x0;
-    let y1 = (8.0 - 2.0 * m * t * t) / d;
-    let y2 = (-4.0 - 4.0 * rp_mod * t - m * t * t) / d;
-
-    let k = (0.5 - w / 2.0).sin() / (0.5 + w / 2.0).sin();
-    let d2 = 1.0 + y1 * k - y2 * k * k;
-
-    let aa = [
-        (x0 - x1 * k + x2 * k * k) / d2,
-        (-2.0 * x0 * k + x1 + x1 * k * k - 2.0 * x2 * k) / d2,
-        (x0 * k * k - x1 * k + x2) / d2,
-    ];
-    let bb = [
-        0.0,
-        (2.0 * k + y1 + y1 * k * k - 2.0 * y2 * k) / d2,
-        (-(k * k) - y1 * k + y2) / d2,
-    ];
-    (aa, bb)
-}
-
-/// 2-pole Chebyshev IIR filter applied to real signal.
-///
-/// `xn` = input history [x(n), x(n-1), x(n-2)]
-/// `yn` = output history [y(n-1), y(n-2)] (updated in-place)
-#[inline]
-fn lpf_step(a: &[f32; 3], b: &[f32; 3], xn: &[f32; 3], yn: &[f32; 2]) -> f32 {
-    a[0] * xn[0] + a[1] * xn[1] + a[2] * xn[2] + b[1] * yn[0] + b[2] * yn[1]
-}
 
 // ─── Reed-Solomon RS(255,249) decoder ───────────────────────────────────────
 // Ported from Phil Karn's libfec (LGPL), parameters: GF(2^8) poly=0x187,
@@ -481,21 +373,15 @@ struct DemodTrace {
 
 /// Per-channel VDL2 demodulator state.
 pub struct Vdl2Channel {
-    // Lowpass filter
-    lpf_a: [f32; 3],
-    lpf_b: [f32; 3],
-    re_in: [f32; 3],
-    re_out: [f32; 2],
-    im_in: [f32; 3],
-    im_out: [f32; 2],
+    // Lowpass filters
+    lpf_re: Chebyshev2Lpf,
+    lpf_im: Chebyshev2Lpf,
 
-    // Downmix NCO
-    downmix_phi: f32,
-    downmix_dphi: f32,
+    // Optional downmix NCO
+    downmix_nco: Option<Nco>,
 
     // Decimation
-    oversample: u32,
-    oversample_cnt: u32,
+    decimate: EveryN,
 
     // Phase circular buffer for frame sync
     syncbuf: Vec<f32>,
@@ -554,17 +440,15 @@ impl Vdl2Channel {
     /// * `offset_hz`   — frequency offset = channel_freq − center_freq.
     /// * `freq_hz`     — absolute channel frequency in Hz (used for ppm computation).
     pub fn new(sample_rate: f32, offset_hz: f32, freq_hz: f32) -> Self {
-        let (lpf_a, lpf_b) = chebyshev_lpf_init(
-            INP_LPF_CUTOFF_HZ / sample_rate,
-            INP_LPF_RIPPLE,
-            INP_LPF_NPOLES,
-        );
+        let lpf_re = Chebyshev2Lpf::new(INP_LPF_CUTOFF_HZ / sample_rate, INP_LPF_RIPPLE);
+        let lpf_im = Chebyshev2Lpf::new(INP_LPF_CUTOFF_HZ / sample_rate, INP_LPF_RIPPLE);
 
         let oversample = (sample_rate / (SYMBOL_RATE * SPS) as f32).round() as u32;
-        let downmix_dphi = if offset_hz.abs() > 1.0 {
-            -2.0 * PI * offset_hz / sample_rate
+        let decimate = EveryN::new(oversample);
+        let downmix_nco = if offset_hz.abs() > 1.0 {
+            Some(Nco::new(offset_hz as f64, sample_rate as f64))
         } else {
-            0.0
+            None
         };
 
         // Pre-compute linear regression X values and denominator.
@@ -581,16 +465,10 @@ impl Vdl2Channel {
         }
 
         Self {
-            lpf_a,
-            lpf_b,
-            re_in: [0.0; 3],
-            re_out: [0.0; 2],
-            im_in: [0.0; 3],
-            im_out: [0.0; 2],
-            downmix_phi: 0.0,
-            downmix_dphi,
-            oversample,
-            oversample_cnt: 0,
+            lpf_re,
+            lpf_im,
+            downmix_nco,
+            decimate,
             syncbuf: vec![0.0; SYNC_BUFLEN],
             syncbuf_idx: 0,
             sclk: 0,
@@ -649,35 +527,21 @@ impl Vdl2Channel {
     pub fn process_sample(&mut self, mut re: f32, mut im: f32) -> Vec<DemodFrame> {
         self.sample_index = self.sample_index.saturating_add(1);
         // Optional downmix.
-        if self.downmix_dphi != 0.0 {
-            let (s, c) = self.downmix_phi.sin_cos();
-            let re2 = re * c - im * s;
-            let im2 = re * s + im * c;
+        if let Some(nco) = self.downmix_nco.as_mut() {
+            let (re2, im2) = nco.mix_down_complex(re, im);
             re = re2;
             im = im2;
-            self.downmix_phi += self.downmix_dphi;
-            if self.downmix_phi > PI {
-                self.downmix_phi -= 2.0 * PI;
-            } else if self.downmix_phi < -PI {
-                self.downmix_phi += 2.0 * PI;
-            }
+            nco.step();
         }
 
         // Chebyshev LPF (direct form I, 2-pole).
-        self.re_in = [re, self.re_in[0], self.re_in[1]];
-        let lp_re = lpf_step(&self.lpf_a, &self.lpf_b, &self.re_in, &self.re_out);
-        self.re_out = [lp_re, self.re_out[0]];
-
-        self.im_in = [im, self.im_in[0], self.im_in[1]];
-        let lp_im = lpf_step(&self.lpf_a, &self.lpf_b, &self.im_in, &self.im_out);
-        self.im_out = [lp_im, self.im_out[0]];
+        let lp_re = self.lpf_re.step(re);
+        let lp_im = self.lpf_im.step(im);
 
         // Decimation.
-        self.oversample_cnt += 1;
-        if self.oversample_cnt < self.oversample {
+        if !self.decimate.keep() {
             return Vec::new();
         }
-        self.oversample_cnt = 0;
 
         self.demod(lp_re, lp_im)
     }

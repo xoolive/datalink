@@ -13,6 +13,8 @@ Design direction: demodulation logic is kept in-project and shared through Rust 
 the `acars` crate as frontends mature.
 
 Current status: VDL2 demod core is now shared from `crates/acars/src/demod/vdl2.rs` and used by `vdl136`.
+Reusable DSP primitives are sourced from `../desperado` where appropriate (currently NCO and
+Chebyshev filter helpers).
 
 ## Positioning
 
