@@ -2,6 +2,23 @@
 
 Core decoding crate for ACARS, VDL2, ADS-C, and CPDLC payloads.
 
+It is shared by:
+
+- `vdl136` (VDL2 demod frontend),
+- `datalink` (payload decoder CLI),
+- future frontends such as `acars131`.
+
+Current module split includes:
+
+- `src/demod/vdl2.rs` for reusable VDL2 demodulation,
+- `src/decode/*` for protocol decoding layers.
+
+Design intent:
+
+- keep parser behavior close to `dumpvdl2`/`libacars` where practical,
+- expose strongly typed Rust structures for downstream tooling,
+- preserve stable JSON-facing conventions while expanding decode depth.
+
 Initial implementation includes:
 
 - ACARS frame parsing from octets (post-SOH, with trailing DEL)

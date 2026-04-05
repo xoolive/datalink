@@ -303,6 +303,72 @@ fn opensky_adsc_samples_cover_all_tag_types() {
     assert_eq!(seen, expected, "ADS-C tag coverage fixture mismatch");
 }
 
+#[test]
+fn h1_wrapped_adsc_vectors_parse_after_normalization() {
+    let data = include_str!("fixtures/h1_sublabel_mfi.txt");
+
+    for line in data
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(
+            fields.len(),
+            7,
+            "unexpected fixture column count for line: {line}"
+        );
+
+        let name = fields[0];
+        let label = fields[1];
+        let direction = parse_direction(fields[2]);
+        let text = fields[3];
+
+        if label != "H1" || !text.contains(".ADS.") {
+            continue;
+        }
+
+        let (offset, _, _) = extract_sublabel_and_mfi(label, direction, text.as_bytes())
+            .unwrap_or_else(|e| panic!("{name}: extract failed: {e}"));
+        let payload = &text[offset..];
+        let normalized = if payload.starts_with('/') {
+            payload.to_string()
+        } else {
+            format!("/{payload}")
+        };
+
+        parse_adsc_app_text(&normalized)
+            .unwrap_or_else(|e| panic!("{name}: normalized ADS-C parse failed: {e}"));
+    }
+}
+
+#[test]
+fn cpdlc_vectors_are_rejected_by_adsc_parser() {
+    let data = include_str!("fixtures/acars_app_payloads.txt");
+
+    for line in data
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(
+            fields.len(),
+            5,
+            "unexpected fixture column count for line: {line}"
+        );
+
+        let name = fields[0];
+        let text = fields[3];
+        let prefix = fields[4];
+        let is_cpdlc_like = prefix.contains(".AT1.") || prefix.contains(".CR1.");
+        if !is_cpdlc_like {
+            continue;
+        }
+
+        let parsed = parse_adsc_app_text(text);
+        assert!(parsed.is_err(), "{name}: CPDLC-like sample parsed as ADS-C");
+    }
+}
+
 fn none_if_dash(value: &str) -> Option<&str> {
     if value == "-" {
         None

@@ -9,7 +9,16 @@ dependencies = [
  "deku",
  "hex",
  "serde",
+ "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "acars131"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
 ]
 
 [[package]]
@@ -192,6 +201,17 @@ dependencies = [
  "darling_core",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "datalink"
+version = "0.1.0"
+dependencies = [
+ "acars",
+ "anyhow",
+ "clap",
+ "hex",
+ "serde_json",
 ]
 
 [[package]]
@@ -961,7 +981,6 @@ dependencies = [
  "anyhow",
  "clap",
  "desperado",
- "hex",
  "serde_json",
 ]
 

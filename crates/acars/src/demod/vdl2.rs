@@ -20,6 +20,8 @@
 //! Ported from dumpvdl2 (GPL-2+, © Tomasz Lemiech).
 
 use std::f32::consts::PI;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 
 // ─── Physical-layer constants ───────────────────────────────────────────────
 
@@ -36,7 +38,7 @@ const PREAMBLE_SYMS: usize = 16;
 const SYNC_BUFLEN: usize = PREAMBLE_SYMS * SPS as usize;
 /// Frame-sync checks are performed every SYNC_SKIP decimated samples.
 const SYNC_SKIP: u32 = 3;
-const SYNC_THRESHOLD: f32 = 4.0;
+const DEFAULT_SYNC_THRESHOLD: f32 = 4.0;
 const MAG_LP: f32 = 0.9;
 const NF_LP: f32 = 0.85;
 
@@ -471,6 +473,12 @@ pub struct DemodFrame {
     pub ppm_error: f32,
 }
 
+struct DemodTrace {
+    writer: BufWriter<File>,
+    window_start_sec: Option<f64>,
+    window_end_sec: Option<f64>,
+}
+
 /// Per-channel VDL2 demodulator state.
 pub struct Vdl2Channel {
     // Lowpass filter
@@ -533,6 +541,10 @@ pub struct Vdl2Channel {
 
     // Channel frequency (Hz) — used for ppm calculation.
     freq_hz: f32,
+    sample_rate_hz: f32,
+    sample_index: u64,
+    trace: Option<DemodTrace>,
+    sync_threshold: f32,
 }
 
 impl Vdl2Channel {
@@ -606,13 +618,36 @@ impl Vdl2Channel {
             lr_denom,
             rs: RsDecoder::new(),
             freq_hz,
+            sample_rate_hz: sample_rate,
+            sample_index: 0,
+            trace: None,
+            sync_threshold: DEFAULT_SYNC_THRESHOLD,
         }
+    }
+
+    pub fn set_sync_threshold(&mut self, threshold: f32) {
+        self.sync_threshold = threshold;
+    }
+
+    pub fn enable_trace(
+        &mut self,
+        path: &str,
+        window_start_sec: Option<f64>,
+        window_end_sec: Option<f64>,
+    ) -> std::io::Result<()> {
+        self.trace = Some(DemodTrace {
+            writer: BufWriter::new(File::create(path)?),
+            window_start_sec,
+            window_end_sec,
+        });
+        Ok(())
     }
 
     /// Feed one raw I/Q sample.
     ///
     /// Returns a list of decoded frames (possibly empty).
     pub fn process_sample(&mut self, mut re: f32, mut im: f32) -> Vec<DemodFrame> {
+        self.sample_index = self.sample_index.saturating_add(1);
         // Optional downmix.
         if self.downmix_dphi != 0.0 {
             let (s, c) = self.downmix_phi.sin_cos();
@@ -676,6 +711,11 @@ impl Vdl2Channel {
                 }
 
                 if self.got_sync() {
+                    self.trace_event(serde_json::json!({
+                        "event": "sync_found",
+                        "sample_index": self.sample_index,
+                        "seconds_into_recording": self.seconds_into_recording(),
+                    }));
                     self.demod_state = DemodState::Sync;
                 }
                 Vec::new()
@@ -766,7 +806,7 @@ impl Vdl2Channel {
             pherr0 += e * e;
         }
 
-        if self.pherr[1] < SYNC_THRESHOLD && pherr0 > self.pherr[1] {
+        if self.pherr[1] < self.sync_threshold && pherr0 > self.pherr[1] {
             // Preamble found. Use parabolic interpolation on the three pherr samples
             // to find the sub-sample timing of the pherr minimum (= sync point).
             // Called with x=0 (sclk was reset to 0 before got_sync), d=SYNC_SKIP.
@@ -886,6 +926,12 @@ impl Vdl2Channel {
 
                 let mut rs_tab = vec![[0u8; RS_N]; nb];
                 if deinterleave(&data_bytes, nb, RS_N, &mut rs_tab, RS_K, 0).is_err() {
+                    self.trace_event(serde_json::json!({
+                        "event": "deinterleave_data_error",
+                        "sample_index": self.sample_index,
+                        "seconds_into_recording": self.seconds_into_recording(),
+                        "datalen_bits": self.datalen,
+                    }));
                     self.demod_reset();
                     return Vec::new();
                 }
@@ -895,6 +941,12 @@ impl Vdl2Channel {
                     nb
                 };
                 if deinterleave(&fec_bytes, fec_rows, RS_N, &mut rs_tab, RS_NROOTS, RS_K).is_err() {
+                    self.trace_event(serde_json::json!({
+                        "event": "deinterleave_fec_error",
+                        "sample_index": self.sample_index,
+                        "seconds_into_recording": self.seconds_into_recording(),
+                        "datalen_bits": self.datalen,
+                    }));
                     self.demod_reset();
                     return Vec::new();
                 }
@@ -911,6 +963,13 @@ impl Vdl2Channel {
                     let erasures: Vec<usize> = (RS_K + n_fec..RS_N).take(erasure_cnt).collect();
 
                     if self.rs.decode(&mut rs_tab[r], &erasures).is_none() {
+                        self.trace_event(serde_json::json!({
+                            "event": "rs_decode_error",
+                            "sample_index": self.sample_index,
+                            "seconds_into_recording": self.seconds_into_recording(),
+                            "datalen_bits": self.datalen,
+                            "block": r,
+                        }));
                         self.demod_reset();
                         return Vec::new();
                     }
@@ -936,6 +995,15 @@ impl Vdl2Channel {
 
                 // HDLC bit-destuffing: extract one or more AVLC frames.
                 let raw_frames = hdlc_destuff(&bit_stream);
+                self.trace_event(serde_json::json!({
+                    "event": "burst_decoded",
+                    "sample_index": self.sample_index,
+                    "seconds_into_recording": self.seconds_into_recording(),
+                    "datalen_bits": self.datalen,
+                    "datalen_octets": self.datalen_octets,
+                    "num_blocks": self.num_blocks,
+                    "raw_frames": raw_frames.len(),
+                }));
 
                 // Capture signal metadata before reset clears frame_pwr.
                 let signal_dbfs = 10.0 * self.frame_pwr.max(1e-20_f32).log10();
@@ -960,6 +1028,27 @@ impl Vdl2Channel {
                 self.demod_reset();
                 Vec::new()
             }
+        }
+    }
+
+    fn seconds_into_recording(&self) -> f64 {
+        self.sample_index as f64 / self.sample_rate_hz as f64
+    }
+
+    fn trace_event(&mut self, event: serde_json::Value) {
+        let sec = self.seconds_into_recording();
+        if let Some(t) = self.trace.as_mut() {
+            if let Some(s) = t.window_start_sec {
+                if sec < s {
+                    return;
+                }
+            }
+            if let Some(e) = t.window_end_sec {
+                if sec > e {
+                    return;
+                }
+            }
+            let _ = writeln!(t.writer, "{}", event);
         }
     }
 
@@ -1091,10 +1180,16 @@ fn deinterleave(
     let mut col = offset;
     let last_row_end = last_row_len + offset;
     for (i, &b) in src.iter().enumerate() {
+        if col >= cols {
+            return Err(());
+        }
         if row == rows - 1 && col >= last_row_end {
             rs_tab[row][col] = 0x00;
             row = 0;
             col += 1;
+            if col >= cols {
+                return Err(());
+            }
         }
         rs_tab[row][col] = b;
         row += 1;

@@ -582,16 +582,28 @@ fn take<'a>(buf: &'a [u8], idx: &mut usize, count: usize) -> DecodeResult<&'a [u
 }
 
 fn find_registration_split(value: &str) -> Option<usize> {
+    let mut fallback: Option<usize> = None;
     for idx in 0..=value.len() {
+        let reg = &value[..idx];
         let payload = &value[idx..];
         if payload.len() >= 4
             && payload.len() % 2 == 0
             && payload.bytes().all(|b| b.is_ascii_hexdigit())
         {
-            return Some(idx);
+            if fallback.is_none() {
+                fallback = Some(idx);
+            }
+            let reg_len = reg.len();
+            if (6..=7).contains(&reg_len)
+                && reg
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
+            {
+                return Some(idx);
+            }
         }
     }
-    None
+    fallback
 }
 
 #[cfg(test)]

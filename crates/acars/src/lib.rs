@@ -1,6 +1,7 @@
 #![doc = include_str!("../readme.md")]
 
 pub mod decode;
+pub mod demod;
 
 pub mod prelude {
     pub use deku::prelude::*;

@@ -22,8 +22,10 @@ use crate::decode::x25::{parse_x25_packet, X25Packet};
 use crate::decode::xid::{parse_xid, XidMessage};
 use crate::decode::{DecodeError, DecodeResult};
 
-/// Minimum valid AVLC frame length (4 dst + 4 src + 1 lcf + 2 fcs).
-const MIN_AVLC_LEN: usize = 11;
+/// Minimum AVLC length without FCS (4 dst + 4 src + 1 lcf).
+const MIN_AVLC_NO_FCS_LEN: usize = 9;
+/// Minimum AVLC length with FCS (4 dst + 4 src + 1 lcf + 2 fcs).
+const MIN_AVLC_WITH_FCS_LEN: usize = 11;
 /// CRC-16/CCITT residual for a correctly received frame.
 const GOOD_FCS: u16 = 0xF0B8;
 
@@ -343,16 +345,17 @@ pub struct AvlcFrame {
 /// The parser checks the FCS and sets `fcs_ok` accordingly.  For I-frames with
 /// a good FCS, the ACARS or X.25 payload is decoded.
 pub fn parse_avlc_frame(buf: &[u8]) -> DecodeResult<AvlcFrame> {
-    if buf.len() < MIN_AVLC_LEN {
+    if buf.len() < MIN_AVLC_NO_FCS_LEN {
         return Err(DecodeError::FrameTooShort(buf.len()));
     }
 
-    let fcs_ok = crc16_ccitt(buf, 0xFFFF) == GOOD_FCS;
+    let has_fcs = buf.len() >= MIN_AVLC_WITH_FCS_LEN;
+    let fcs_ok = has_fcs && crc16_ccitt(buf, 0xFFFF) == GOOD_FCS;
 
-    // Strip FCS bytes when present so that payload extraction is correct.
+    // Strip FCS bytes only when CRC verifies.
     let content = if fcs_ok { &buf[..buf.len() - 2] } else { buf };
 
-    if content.len() < 9 {
+    if content.len() < MIN_AVLC_NO_FCS_LEN {
         return Err(DecodeError::FrameTooShort(buf.len()));
     }
 
@@ -366,7 +369,7 @@ pub fn parse_avlc_frame(buf: &[u8]) -> DecodeResult<AvlcFrame> {
     // A/G status: from dst.status (false = Airborne, true = On ground).
     let ag_status = if dst.status { "On ground" } else { "Airborne" }.to_string();
 
-    let payload = if fcs_ok {
+    let payload = if fcs_ok || !has_fcs {
         match &lcf {
             AvlcLcf::I { .. } => Some(decode_i_payload(payload_bytes, &src)),
             AvlcLcf::U { mfunc, pf, .. } if *mfunc == 0x2B => {
