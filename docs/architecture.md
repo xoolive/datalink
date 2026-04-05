@@ -12,7 +12,7 @@ Current project scope note:
 
 - `vdl136` is the current VDL2 frontend for the workspace.
 - `datalink` is the current payload-decoder app for demodulated frames/messages.
-- `acars131` is the planned classic VHF ACARS frontend.
+- `acars131` is the classic VHF ACARS frontend (initial implementation).
 - `acars` is the shared decode library (`crates/acars`).
 
 ```text
@@ -121,7 +121,7 @@ Notes:
 - ADS-C parsing: `crates/acars/src/decode/adsc.rs`
 - VDL2 frontend CLI: `crates/vdl136/src/main.rs` (`vdl136`)
 - Payload decoder CLI: `crates/datalink/src/main.rs` (`datalink`)
-- Classic ACARS frontend scaffold: `crates/acars131/src/main.rs` (`acars131`)
+- Classic ACARS frontend CLI: `crates/acars131/src/main.rs` (`acars131`)
 
 ## Positioning note
 

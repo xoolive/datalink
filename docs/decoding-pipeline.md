@@ -129,7 +129,7 @@ Notes:
 - App routing is still being expanded; full ARINC 622 IMI dispatch is not complete yet.
 - CPDLC decode on X.25/COTP path is still partial (heuristic/free-text oriented).
 - X.25/COTP reassembly parity is not complete yet.
-- Classic POA VHF ACARS frontend (`acars131`) is planned, not implemented.
+- `acars131` classic POA VHF ACARS frontend is implemented in an initial form; validation against reference IQ datasets is still pending.
 
 For protocol placement and coverage tables, see `docs/architecture.md`.
 For roadmap and implementation tasks, see `plan.md`.

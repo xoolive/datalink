@@ -9,7 +9,7 @@ Naming map used in this documentation:
 - `acars`: core decoding library (`crates/acars`)
 - `datalink`: decoder app for already demodulated ACARS/ARINC 622 payload messages
 - `vdl136`: VDL2 frontend for I/Q/SDR inputs
-- `acars131`: classic VHF ACARS frontend (planned)
+- `acars131`: classic VHF ACARS frontend (initial implementation)
 
 - It currently demodulates and decodes **VDL Mode 2 (VHF)** traffic through `vdl136`.
 - It then decodes higher-layer payloads through `acars` (AVLC, X.25, ACARS, ARINC 622 app envelopes).
@@ -35,7 +35,7 @@ compatibility goals where behavior is already implemented.
   - partial CPDLC extraction from X.25/COTP path
 
 - Out of scope for now:
-  - classic POA VHF ACARS demodulation (`acars131`, planned)
+  - parity-validated classic POA VHF ACARS demodulation (`acars131` is implemented but not yet validated on reference IQ datasets)
 
 ## Reference position
 

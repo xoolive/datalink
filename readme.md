@@ -7,7 +7,7 @@ Component layout:
 - `acars`: core decoding library (`crates/acars`)
 - `datalink`: payload decoder app for demodulated ACARS/ARINC 622 messages
 - `vdl136`: VDL2 frontend (I/Q and SDR inputs)
-- `acars131`: classic VHF ACARS frontend (planned)
+- `acars131`: classic VHF ACARS frontend (initial implementation)
 
 Design direction: demodulation logic is kept in-project and shared through Rust modules in
 the `acars` crate as frontends mature.
@@ -42,7 +42,7 @@ Current runtime pipeline focus:
 
 Out of scope today:
 
-- classic POA VHF ACARS demodulation via `acars131` (planned).
+- full parity-validated classic POA VHF ACARS demodulation (initial `acars131` implementation exists, validation pending).
 
 - ACARS frame decoding (header/text/CRC)
 - H1 sublabel/MFI extraction compatible with libacars behavior
@@ -69,7 +69,7 @@ Out of scope today:
 ## Frontend Roadmap
 
 - Current frontend: VDL Mode 2 over VHF (`vdl136`).
-- Planned frontend: classic POA VHF ACARS demodulation (`acars131`).
+- Current early frontend: classic POA VHF ACARS demodulation (`acars131`, needs dataset validation).
 
 All frontends are intended to feed the same shared decode core (`acars`) and emit a
 consistent output schema with bearer metadata.
