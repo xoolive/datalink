@@ -1,5 +1,6 @@
 pub mod acars;
 pub mod adsc;
+pub mod arinc622;
 pub mod avlc;
 pub mod x25;
 pub mod xid;
@@ -24,6 +25,8 @@ pub enum DecodeError {
     InvalidDirection,
     #[error("invalid ADS-C payload")]
     InvalidAdscPayload,
+    #[error("invalid ARINC 622 envelope: {0}")]
+    InvalidArinc622Envelope(String),
     #[error("deku parse error: {0}")]
     Deku(String),
     #[error("invalid VDL frame")]

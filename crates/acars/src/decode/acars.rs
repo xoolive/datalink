@@ -68,6 +68,8 @@ pub struct AcarsMessage {
     pub txt: String,
     pub direction: MessageDirection,
     pub reassembly: ReassemblyHint,
+    pub arinc622_envelope: Option<crate::decode::arinc622::Arinc622Envelope>,
+    pub app_payload: Option<crate::decode::arinc622::AppPayload>,
 }
 
 impl AcarsRawFrame {
@@ -153,6 +155,8 @@ pub fn parse_acars_frame(buf: &[u8], direction: MessageDirection) -> DecodeResul
                 txt: String::new(),
                 direction: parsed_direction,
                 reassembly,
+                arinc622_envelope: None,
+                app_payload: None,
             });
         }
         return Err(DecodeError::MissingDownlinkFields);
@@ -205,7 +209,27 @@ pub fn parse_acars_frame(buf: &[u8], direction: MessageDirection) -> DecodeResul
     if let Some(value) = extracted_mfi {
         mfi = Some(value);
     }
-    let txt = ascii_string(&txt[offset..]);
+    let txt_after_sublabel = &txt[offset..];
+    
+    // Attempt to parse ARINC 622 envelope if text starts with '/'
+    let (arinc622_envelope, app_payload, txt_after_envelope) = 
+        if !txt_after_sublabel.is_empty() && txt_after_sublabel[0] == b'/' {
+            match crate::decode::arinc622::parse_arinc622_envelope(&ascii_string(txt_after_sublabel)) {
+                Ok(envelope) => {
+                    let app_payload = crate::decode::arinc622::dispatch_by_imi(&envelope)?;
+                    // Text after envelope extraction is empty for app payloads
+                    (Some(envelope), Some(app_payload), &txt_after_sublabel[0..0])
+                }
+                Err(_) => {
+                    // Not a valid ARINC 622 envelope, treat as regular text
+                    (None, None, txt_after_sublabel)
+                }
+            }
+        } else {
+            (None, None, txt_after_sublabel)
+        };
+    
+    let txt = ascii_string(txt_after_envelope);
 
     Ok(AcarsMessage {
         crc_ok,
@@ -222,6 +246,8 @@ pub fn parse_acars_frame(buf: &[u8], direction: MessageDirection) -> DecodeResul
         txt,
         direction: parsed_direction,
         reassembly,
+        arinc622_envelope,
+        app_payload,
     })
 }
 
@@ -325,6 +351,8 @@ mod tests {
         assert_eq!(msg.message_number.as_deref(), Some("M09"));
         assert_eq!(msg.message_sequence, Some('A'));
         assert!(msg.txt.starts_with("ONN01LO02DM"));
+        assert!(msg.arinc622_envelope.is_none());
+        assert!(msg.app_payload.is_none());
     }
 
     #[test]
