@@ -7,10 +7,24 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 
+[features]
+default = ["rtlsdr", "airspy", "hackrf", "soapy"]
+sdr = ["dep:desperado"]
+rtlsdr = ["sdr", "desperado/rtlsdr"]
+airspy = ["sdr", "desperado/airspy"]
+hackrf = ["sdr", "desperado/hackrf"]
+soapy = ["sdr", "desperado/soapy"]
+
 [dependencies]
 anyhow = "1"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
 acars = { path = "../acars" }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-desperado = { path = "../../../desperado/crates/desperado" }
+desperado = { version = "0.4.1", optional = true, features = ["resampler"] }
 hound = "3.5"
+dirs = "6"
+tokio = { version = "1", features = ["full"] }
+toml = "0.9"
+url = "2.5"
+futures-util = "0.3"

@@ -1,6 +1,6 @@
 use acars::decode::acars::{parse_acars_frame, MessageDirection};
-use acars::decode::adsc::parse_adsc_app_text;
 use acars::decode::avlc::parse_avlc_frame;
+use acars::decode::payload::arinc622::adsc::parse_adsc_app_text;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
             let frame = parse_avlc_frame(&bytes)?;
             let mut obj = serde_json::to_value(&frame)?;
             if let serde_json::Value::Object(ref mut m) = obj {
-                m.insert("raw_frame_hex".into(), bytes_to_hex(&bytes).into());
+                m.insert("frame".into(), bytes_to_hex(&bytes).into());
             }
             println!("{}", serde_json::to_string_pretty(&obj)?);
         }

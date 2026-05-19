@@ -5,8 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-// ─── Packet type constants ────────────────────────────────────────────────────
-
 const GFI_X25_MOD8: u8 = 0x1;
 #[allow(dead_code)]
 const X25_DATA: u8 = 0x00;
@@ -31,8 +29,6 @@ const COTP_TPDU_EA: u8 = 0x20;
 const COTP_TPDU_RJ: u8 = 0x50;
 const COTP_TPDU_ER: u8 = 0x70;
 
-// ─── Output types ────────────────────────────────────────────────────────────
-
 /// One X.25 packet with decoded header and inner protocol layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct X25Packet {
@@ -55,7 +51,7 @@ pub struct X25Packet {
 #[serde(rename_all = "snake_case")]
 pub enum X25Inner {
     ClnpCompressed(ClnpCompressedPdu),
-    #[serde(serialize_with = "crate::decode::avlc::serialize_bytes_hex_variant")]
+    #[serde(serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant")]
     Unknown(Vec<u8>),
 }
 
@@ -78,7 +74,7 @@ pub struct ClnpCompressedPdu {
 pub enum ClnpInner {
     Idrp(IdrpPdu),
     Cotp(Vec<CotpPdu>),
-    #[serde(serialize_with = "crate::decode::avlc::serialize_bytes_hex_variant")]
+    #[serde(serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant")]
     Unknown(Vec<u8>),
 }
 
@@ -120,8 +116,8 @@ pub struct CotpPdu {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub params: Vec<CotpVarParam>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "crate::decode::avlc::serialize_opt_bytes_hex")]
-    #[serde(deserialize_with = "crate::decode::avlc::deserialize_opt_bytes_hex")]
+    #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
+    #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub user_data: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpdlc: Option<CpdlcMessage>,
@@ -145,12 +141,10 @@ pub struct CotpVarParam {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CotpParamValue {
-    #[serde(serialize_with = "crate::decode::avlc::serialize_bytes_hex_variant")]
+    #[serde(serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant")]
     Bytes(Vec<u8>),
     Uint(u64),
 }
-
-// ─── Main entry point ─────────────────────────────────────────────────────────
 
 /// Parse an X.25 payload (the bytes after the AVLC header, not including FCS).
 pub fn parse_x25_packet(buf: &[u8]) -> X25Packet {
@@ -249,8 +243,6 @@ pub fn parse_x25_packet(buf: &[u8]) -> X25Packet {
     }
 }
 
-// ─── X.25 user-data dispatch ──────────────────────────────────────────────────
-
 fn parse_x25_user_data(buf: &[u8]) -> X25Inner {
     if buf.is_empty() {
         return X25Inner::Unknown(vec![]);
@@ -267,8 +259,6 @@ fn parse_x25_user_data(buf: &[u8]) -> X25Inner {
     }
     X25Inner::Unknown(buf.to_vec())
 }
-
-// ─── Compressed CLNP ──────────────────────────────────────────────────────────
 
 fn parse_clnp_compressed(buf: &[u8]) -> ClnpCompressedPdu {
     const CLNP_MIN: usize = 4;
@@ -355,8 +345,6 @@ fn parse_clnp_compressed(buf: &[u8]) -> ClnpCompressedPdu {
     }
 }
 
-// ─── CLNP payload dispatch ───────────────────────────────────────────────────
-
 fn parse_clnp_payload(buf: &[u8]) -> ClnpInner {
     if buf.is_empty() {
         return ClnpInner::Unknown(vec![]);
@@ -373,8 +361,6 @@ fn parse_clnp_payload(buf: &[u8]) -> ClnpInner {
     }
     ClnpInner::Unknown(buf.to_vec())
 }
-
-// ─── IDRP ────────────────────────────────────────────────────────────────────
 
 fn parse_idrp(buf: &[u8]) -> Option<IdrpPdu> {
     if buf.len() < BISPDU_HDR_LEN {
@@ -407,8 +393,6 @@ fn parse_idrp(buf: &[u8]) -> Option<IdrpPdu> {
         credit_avail: cavail,
     })
 }
-
-// ─── COTP concatenated TPDUs ─────────────────────────────────────────────────
 
 fn parse_cotp_concatenated(buf: &[u8]) -> Vec<CotpPdu> {
     let mut out = Vec::new();
@@ -787,8 +771,6 @@ fn longest_cpdlc_text_run(decoded: &str) -> Option<String> {
         Some(cleaned)
     }
 }
-
-// ─── Name tables ─────────────────────────────────────────────────────────────
 
 fn cotp_tpdu_name(code: u8) -> &'static str {
     match code {

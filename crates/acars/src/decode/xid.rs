@@ -13,29 +13,25 @@
 
 use serde::{Deserialize, Serialize};
 
-// ─── XID type table ──────────────────────────────────────────────────────────
-
 /// XID type names, indexed by `(cr<<3)|(pf<<2)|(h<<1)|r`.
 static XID_NAMES: [(&str, &str); 16] = [
-    ("",            ""),
+    ("", ""),
     ("XID_CMD_LCR", "Link Connection Refused"),
-    ("XID_CMD_HO",  "Handoff Request / Broadcast Handoff"),
-    ("GSIF",        "Ground Station Information Frame"),
-    ("XID_CMD_LE",  "Link Establishment"),
-    ("",            ""),
-    ("XID_CMD_HO",  "Handoff Initiation"),
+    ("XID_CMD_HO", "Handoff Request / Broadcast Handoff"),
+    ("GSIF", "Ground Station Information Frame"),
+    ("XID_CMD_LE", "Link Establishment"),
+    ("", ""),
+    ("XID_CMD_HO", "Handoff Initiation"),
     ("XID_CMD_LPM", "Link Parameter Modification"),
-    ("",            ""),
-    ("",            ""),
-    ("",            ""),
-    ("",            ""),
-    ("XID_RSP_LE",  "Link Establishment Response"),
+    ("", ""),
+    ("", ""),
+    ("", ""),
+    ("", ""),
+    ("XID_RSP_LE", "Link Establishment Response"),
     ("XID_RSP_LCR", "Link Connection Refused Response"),
-    ("XID_RSP_HO",  "Handoff Response"),
+    ("XID_RSP_HO", "Handoff Response"),
     ("XID_RSP_LPM", "Link Parameter Modification Response"),
 ];
-
-// ─── Output types ────────────────────────────────────────────────────────────
 
 /// One entry in the frequency support list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +55,7 @@ pub struct GsLocation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawTlv {
     pub typecode: u8,
-    #[serde(serialize_with = "crate::decode::avlc::serialize_bytes_hex")]
+    #[serde(serialize_with = "crate::decode::helpers::serialize_bytes_hex")]
     pub data: Vec<u8>,
 }
 
@@ -69,12 +65,12 @@ pub struct XidPubParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub param_set_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "crate::decode::avlc::serialize_opt_bytes_hex")]
-    #[serde(deserialize_with = "crate::decode::avlc::deserialize_opt_bytes_hex")]
+    #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
+    #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub procedure_classes: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "crate::decode::avlc::serialize_opt_bytes_hex")]
-    #[serde(deserialize_with = "crate::decode::avlc::deserialize_opt_bytes_hex")]
+    #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
+    #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub hdlc_options: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub other: Vec<RawTlv>,
@@ -86,20 +82,20 @@ pub struct XidVdlParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub param_set_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "crate::decode::avlc::serialize_opt_bytes_hex")]
-    #[serde(deserialize_with = "crate::decode::avlc::deserialize_opt_bytes_hex")]
+    #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
+    #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub avlc_specific_options: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub freq_support_list: Vec<FreqSupport>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "crate::decode::avlc::serialize_opt_bytes_hex")]
-    #[serde(deserialize_with = "crate::decode::avlc::deserialize_opt_bytes_hex")]
+    #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
+    #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub timer_t4: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub airport_coverage: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "crate::decode::avlc::serialize_opt_bytes_hex")]
-    #[serde(deserialize_with = "crate::decode::avlc::deserialize_opt_bytes_hex")]
+    #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
+    #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub atn_router_nets: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub system_mask: Vec<String>,
@@ -118,8 +114,6 @@ pub struct XidMessage {
     pub pub_params: Option<XidPubParams>,
     pub vdl_params: XidVdlParams,
 }
-
-// ─── Parser ──────────────────────────────────────────────────────────────────
 
 /// Parse an XID payload.
 ///
@@ -178,15 +172,16 @@ pub fn parse_xid(cr: bool, pf: bool, buf: &[u8]) -> Option<XidMessage> {
     })
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
 fn parse_pub_params(buf: &[u8]) -> XidPubParams {
     let mut p = XidPubParams::default();
     for_each_tlv(buf, |typecode, data| match typecode {
         0x01 => p.param_set_id = bytes_to_ascii(data),
         0x02 => p.procedure_classes = Some(data.to_vec()),
         0x03 => p.hdlc_options = Some(data.to_vec()),
-        _ => p.other.push(RawTlv { typecode, data: data.to_vec() }),
+        _ => p.other.push(RawTlv {
+            typecode,
+            data: data.to_vec(),
+        }),
     });
     p
 }
@@ -202,7 +197,10 @@ fn parse_vdl_params(buf: &[u8]) -> XidVdlParams {
         0xC4 => p.atn_router_nets = Some(data.to_vec()),
         0xC5 => p.system_mask = parse_system_mask(data),
         0xC8 => p.gs_location = parse_gs_location(data),
-        _ => p.other.push(RawTlv { typecode, data: data.to_vec() }),
+        _ => p.other.push(RawTlv {
+            typecode,
+            data: data.to_vec(),
+        }),
     });
     p
 }
@@ -223,10 +221,21 @@ fn for_each_tlv<F: FnMut(u8, &[u8])>(buf: &[u8], mut f: F) {
 }
 
 fn bytes_to_ascii(b: &[u8]) -> Option<String> {
-    let s: String = b.iter()
-        .map(|&c| if c.is_ascii_graphic() || c == b' ' { c as char } else { '.' })
+    let s: String = b
+        .iter()
+        .map(|&c| {
+            if c.is_ascii_graphic() || c == b' ' {
+                c as char
+            } else {
+                '.'
+            }
+        })
         .collect();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 /// Parse the frequency support list (6 bytes per entry).
@@ -254,7 +263,7 @@ fn parse_vdl2_frequency(buf: &[u8]) -> (f32, &'static str) {
     let modulations = buf[0] >> 4;
     let freq_raw = u16::from_be_bytes([buf[0], buf[1]]) & 0x0FFF;
     let mut freq_khz = (freq_raw as u32 + 10000) * 10;
-    if freq_khz % 25 != 0 {
+    if !freq_khz.is_multiple_of(25) {
         freq_khz += 25 - freq_khz % 25;
     }
     let freq_mhz = freq_khz as f32 / 1000.0;

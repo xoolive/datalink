@@ -1,9 +1,27 @@
+//! ACARS frame parsing.
+//!
+//! `AcarsMessage` implements `DekuReader<'_, MessageDirection>` to allow decoding
+//! directly via the deku API.  The direction is passed as context because it may
+//! not always be determinable from the frame alone.
+//!
+//! ## Entry points
+//!
+//! ```text
+//! // With known direction (preferred)
+//! let msg = AcarsMessage::from_bytes_with_direction(buf, MessageDirection::AirToGround)?;
+//!
+//! // With unknown direction (inferred from block_id)
+//! let (_, msg) = AcarsMessage::from_bytes((buf, 0))?;
+//!
+//! // Via TryFrom (unknown direction, whole-slice)
+//! let msg = AcarsMessage::try_from(buf)?;
+//! ```
+
 use deku::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::decode::{DecodeError, DecodeResult};
 
-const ACARS_PREAMBLE_LEN: usize = 16;
 const DEL: u8 = 0x7f;
 const STX: u8 = 0x02;
 const ETX: u8 = 0x03;
@@ -11,6 +29,7 @@ const ETB: u8 = 0x17;
 const ACK: u8 = 0x06;
 const NAK: u8 = 0x15;
 
+/// Fixed 11-byte ACARS preamble (after DEL is consumed).
 #[derive(Debug, DekuRead)]
 struct AcarsPreamble {
     mode: u8,
@@ -20,6 +39,7 @@ struct AcarsPreamble {
     block_id: u8,
 }
 
+/// 10-byte downlink text header (present after STX for downlink blocks).
 #[derive(Debug, DekuRead)]
 struct DownlinkTextHeader {
     message_number: [u8; 3],
@@ -27,72 +47,284 @@ struct DownlinkTextHeader {
     flight_id: [u8; 6],
 }
 
+/// Direction of an ACARS message relative to the aircraft.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MessageDirection {
+    /// Direction could not be determined from the frame alone.
     Unknown,
+    /// Ground-to-air (uplink): ground station transmitting to the aircraft.
+    #[serde(rename = "UL")]
     GroundToAir,
+    /// Air-to-ground (downlink): aircraft transmitting to the ground station.
+    #[serde(rename = "DL")]
     AirToGround,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// Acknowledgement status byte from the ACARS preamble.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 pub enum AckType {
+    /// Positive acknowledgement (`ACK`, 0x06).
     Ack,
+    /// Negative acknowledgement (`NAK`, 0x15).
     Nak,
+    /// Any other value, preserved as a character for diagnostics.
     Other(char),
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ReassemblyHint {
-    FinalBlock,
-    MoreBlocks,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AcarsRawFrame {
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AcarsMessage {
-    pub crc_ok: bool,
-    pub mode: char,
-    pub reg: String,
-    pub ack: AckType,
-    pub label: String,
-    pub block_id: char,
-    pub message_number: Option<String>,
-    pub message_sequence: Option<char>,
-    pub flight_id: Option<String>,
-    pub sublabel: Option<String>,
-    pub mfi: Option<String>,
-    pub txt: String,
-    pub direction: MessageDirection,
-    pub reassembly: ReassemblyHint,
-    pub arinc622_envelope: Option<crate::decode::arinc622::Arinc622Envelope>,
-    pub app_payload: Option<crate::decode::arinc622::AppPayload>,
-}
-
-impl AcarsRawFrame {
-    pub fn parse(&self, direction: MessageDirection) -> DecodeResult<AcarsMessage> {
-        parse_acars_frame(&self.bytes, direction)
+impl Serialize for AckType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Ack => serializer.serialize_str("ACK"),
+            Self::Nak => serializer.serialize_str("NAK"),
+            Self::Other(c) => serializer.serialize_str(&c.to_string()),
+        }
     }
 }
 
-pub fn parse_acars_frame(buf: &[u8], direction: MessageDirection) -> DecodeResult<AcarsMessage> {
-    if buf.len() < ACARS_PREAMBLE_LEN {
+fn serialize_reassembly_block_end<S>(
+    reassembly: &ReassemblyHint,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_bool(matches!(reassembly, ReassemblyHint::FinalBlock))
+}
+
+fn deserialize_reassembly_block_end<'de, D>(deserializer: D) -> Result<ReassemblyHint, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(if bool::deserialize(deserializer)? {
+        ReassemblyHint::FinalBlock
+    } else {
+        ReassemblyHint::MoreBlocks
+    })
+}
+
+fn normalize_tail(raw: &[u8; 7]) -> String {
+    ascii_string(raw)
+        .trim_matches(|c| c == '\0' || c == ' ')
+        .trim_start_matches('.')
+        .to_string()
+}
+
+/// ACARS block identifier, determining message direction and session sequence.
+///
+/// The block ID is a single ASCII byte:
+/// - `'0'`–`'9'` — downlink (aircraft→ground); the digit is the session-level
+///   block sequence number (cycles 0–9 per VDL link session).
+/// - Any letter — uplink (ground→aircraft).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BlockId {
+    /// Downlink block; the value is the session sequence number (0–9).
+    #[serde(rename = "DL")]
+    Downlink(u8),
+    /// Uplink block; the character is the raw block identifier letter.
+    #[serde(rename = "UL")]
+    Uplink(char),
+}
+
+impl BlockId {
+    pub fn from_byte(b: u8) -> Self {
+        let c = b as char;
+        if c.is_ascii_digit() {
+            Self::Downlink(c as u8 - b'0')
+        } else {
+            Self::Uplink(if b == 0 { ' ' } else { c })
+        }
+    }
+
+    /// Whether this is a downlink block (aircraft transmitting).
+    pub fn is_downlink(self) -> bool {
+        matches!(self, Self::Downlink(_))
+    }
+}
+
+/// Whether this ACARS block is the last (or only) block of a multi-block message.
+///
+/// ACARS messages longer than ~220 bytes are split into blocks. Each block
+/// carries an `ETB` (End of Transmission Block, 0x17) terminator except the
+/// last, which carries `ETX` (End of Text, 0x03).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReassemblyHint {
+    /// `ETX` terminator — last or only block; `txt` is the complete message text.
+    #[serde(rename = "ETX")]
+    FinalBlock,
+    /// `ETB` terminator — intermediate block; more blocks will follow with the same
+    /// `(reg, label, sublabel, msg_nb)` key.
+    #[serde(rename = "ETB")]
+    MoreBlocks,
+}
+
+/// A decoded ACARS message.
+///
+/// ACARS (Aircraft Communications Addressing and Reporting System) is the primary
+/// VHF datalink standard for civil aviation. A message consists of a fixed-width
+/// preamble, an optional downlink text header, and a free-form text body.
+///
+/// ## Frame layout (simplified)
+///
+/// ```text
+/// [DEL] [mode] [reg×7] [ack] [label×2] [block_id]
+///       [message_number×3] [message_sequence] [flight_id×6]  -- downlink only
+///       [STX] <text> [ETX|ETB] [CRC×2] [DEL]
+/// ```
+///
+/// ## DekuRead
+///
+/// `AcarsMessage` implements `DekuReader<'_, MessageDirection>` manually because:
+/// - Parity bits must be stripped from every byte before field parsing.
+/// - The text body is sentinel-terminated (`ETX`/`ETB`), not length-prefixed.
+/// - The CRC check covers the whole preprocessed buffer.
+/// - The downlink text header is conditional on `block_id`.
+/// - App-layer dispatch is post-parse logic.
+///
+/// Use `from_bytes_with_direction` when direction is known, or `try_from` /
+/// `from_bytes` when it should be inferred from `block_id`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AcarsMessage {
+    /// ACARS mode character (byte 0 of the preamble).
+    pub mode: char,
+    /// Aircraft registration/tail number, normalized without ACARS leading dot or padding.
+    #[serde(rename = "tail")]
+    pub reg: String,
+    /// Acknowledgement field from the preamble.
+    pub ack: AckType,
+    /// Two-character ACARS label identifying the application or message type.
+    pub label: String,
+    /// Block identifier: direction and session sequence number.
+    pub block_id: BlockId,
+    /// Uplink/downlink message number (downlink messages only), e.g. `"M25"`, `"S93"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg_nb: Option<String>,
+    /// Block sequence character within a multi-block message (downlink only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<char>,
+    /// Airline-assigned flight identifier (downlink messages only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flight_id: Option<String>,
+    /// H1-label sublabel, extracted from the text body before app dispatch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sublabel: Option<String>,
+    /// Decoded text body of the ACARS message.
+    #[serde(rename = "text")]
+    pub txt: String,
+    /// Direction of the message.
+    pub direction: MessageDirection,
+    /// Whether this is the last block (`FinalBlock`) or intermediate (`MoreBlocks`).
+    #[serde(
+        rename = "block_end",
+        serialize_with = "serialize_reassembly_block_end",
+        deserialize_with = "deserialize_reassembly_block_end"
+    )]
+    pub reassembly: ReassemblyHint,
+    /// Decoded application-layer payload — exactly one variant per message.
+    #[serde(rename = "data")]
+    pub app: crate::decode::payload::AcarsAppPayload,
+}
+
+// ─── DekuReader + DekuContainerRead + TryFrom ─────────────────────────────────
+
+/// `AcarsMessage` implements `DekuReader<'_, MessageDirection>` manually.
+/// The direction context is used to resolve ambiguous block_id cases and to
+/// correctly parse the H1 sublabel/MFI fields.
+///
+/// When direction is unknown, use `DekuContainerRead::from_bytes((buf, 0))` or
+/// `TryFrom<&[u8]>`, both of which pass `MessageDirection::Unknown`.
+impl<'a> DekuReader<'a, MessageDirection> for AcarsMessage {
+    fn from_reader_with_ctx<R: std::io::Read + std::io::Seek>(
+        reader: &mut deku::reader::Reader<R>,
+        direction: MessageDirection,
+    ) -> Result<Self, DekuError> {
+        // Drain the full frame from the reader
+        let mut raw = Vec::<u8>::new();
+        <deku::reader::Reader<R> as AsMut<R>>::as_mut(reader)
+            .read_to_end(&mut raw)
+            .map_err(|e| DekuError::Io(e.kind()))?;
+        decode_acars_bytes(&raw, direction).map_err(|e| DekuError::Parse(e.to_string().into()))
+    }
+}
+
+impl<'a> DekuReader<'a, ()> for AcarsMessage {
+    fn from_reader_with_ctx<R: std::io::Read + std::io::Seek>(
+        reader: &mut deku::reader::Reader<R>,
+        _ctx: (),
+    ) -> Result<Self, DekuError> {
+        <Self as DekuReader<'a, MessageDirection>>::from_reader_with_ctx(
+            reader,
+            MessageDirection::Unknown,
+        )
+    }
+}
+
+impl<'a> DekuContainerRead<'a> for AcarsMessage {
+    fn from_reader<R: std::io::Read + std::io::Seek>(
+        input: (&'a mut R, usize),
+    ) -> Result<(usize, Self), DekuError>
+    where
+        Self: Sized,
+    {
+        let mut reader = deku::reader::Reader::new(input.0);
+        let val = <Self as DekuReader<'_, ()>>::from_reader_with_ctx(&mut reader, ())?;
+        Ok((reader.bits_read, val))
+    }
+
+    fn from_bytes(input: (&'a [u8], usize)) -> Result<((&'a [u8], usize), Self), DekuError>
+    where
+        Self: Sized,
+    {
+        let buf = input.0;
+        let mut cursor = std::io::Cursor::new(buf);
+        let mut reader = deku::reader::Reader::new(&mut cursor);
+        let val = <Self as DekuReader<'_, ()>>::from_reader_with_ctx(&mut reader, ())?;
+        let bytes_read = reader.bits_read / 8;
+        Ok(((buf.get(bytes_read..).unwrap_or(&[]), 0), val))
+    }
+}
+
+impl TryFrom<&[u8]> for AcarsMessage {
+    type Error = DekuError;
+    fn try_from(buf: &[u8]) -> Result<Self, DekuError> {
+        <Self as DekuContainerRead>::from_bytes((buf, 0)).map(|(_, v)| v)
+    }
+}
+
+impl AcarsMessage {
+    /// Parse from raw bytes with an explicit direction.
+    ///
+    /// This is the preferred entry point when the bearer layer already knows the
+    /// message direction (e.g. from the AVLC source address C/R bit).
+    pub fn from_bytes_with_direction(
+        buf: &[u8],
+        direction: MessageDirection,
+    ) -> DecodeResult<Self> {
+        decode_acars_bytes(buf, direction)
+    }
+}
+
+fn decode_acars_bytes(buf: &[u8], direction: MessageDirection) -> DecodeResult<AcarsMessage> {
+    if buf.len() < 13 {
         return Err(DecodeError::FrameTooShort(buf.len()));
     }
     if buf.last().copied() != Some(DEL) {
         return Err(DecodeError::MissingDel);
     }
 
-    let mut len = buf.len() - 1;
-    let crc_ok = crc16_ccitt_zero(buf, len);
+    let mut len = buf.len() - 1; // strip trailing DEL
+                                 // CRC check before any decoding
+    if !crc16_ccitt_zero(buf, len) {
+        return Err(DecodeError::CrcFail);
+    }
     if len < 2 {
         return Err(DecodeError::FrameTooShort(buf.len()));
     }
-    len -= 2;
+    len -= 2; // strip 2-byte CRC
 
+    // Strip parity bits (bit 7) from every byte
     let mut without_parity: Vec<u8> = buf[..len].iter().map(|b| b & 0x7f).collect();
 
     let reassembly = match without_parity.last().copied() {
@@ -102,16 +334,12 @@ pub fn parse_acars_frame(buf: &[u8], direction: MessageDirection) -> DecodeResul
     };
     without_parity.pop();
 
-    let ((mut remaining, bit_offset), preamble) = AcarsPreamble::from_bytes((&without_parity, 0))
+    // Parse fixed preamble with deku
+    let ((mut remaining, _), preamble) = AcarsPreamble::from_bytes((&without_parity, 0))
         .map_err(|e| DecodeError::Deku(e.to_string()))?;
-    if bit_offset != 0 {
-        return Err(DecodeError::Deku(
-            "unexpected non-byte-aligned ACARS preamble".to_string(),
-        ));
-    }
 
     let mode = preamble.mode as char;
-    let reg = ascii_string(&preamble.reg);
+    let reg = normalize_tail(&preamble.reg);
     let ack = map_ack(preamble.ack);
 
     let label = {
@@ -122,14 +350,11 @@ pub fn parse_acars_frame(buf: &[u8], direction: MessageDirection) -> DecodeResul
         ascii_string(&bytes)
     };
 
-    let mut block_id = preamble.block_id as char;
-    if block_id == '\0' {
-        block_id = ' ';
-    }
+    let block_id = BlockId::from_byte(preamble.block_id);
 
-    let parsed_direction = match direction {
+    let direction = match direction {
         MessageDirection::Unknown => {
-            if is_downlink_block(block_id) {
+            if block_id.is_downlink() {
                 MessageDirection::AirToGround
             } else {
                 MessageDirection::GroundToAir
@@ -138,25 +363,23 @@ pub fn parse_acars_frame(buf: &[u8], direction: MessageDirection) -> DecodeResul
         known => known,
     };
 
+    // Empty body: valid only for uplink ack frames
     if remaining.is_empty() {
-        if !is_downlink_block(block_id) {
+        if !block_id.is_downlink() {
             return Ok(AcarsMessage {
-                crc_ok,
                 mode,
                 reg,
                 ack,
                 label,
                 block_id,
-                message_number: None,
-                message_sequence: None,
+                msg_nb: None,
+                sequence: None,
                 flight_id: None,
                 sublabel: None,
-                mfi: None,
                 txt: String::new(),
-                direction: parsed_direction,
+                direction,
                 reassembly,
-                arinc622_envelope: None,
-                app_payload: None,
+                app: crate::decode::payload::AcarsAppPayload::None,
             });
         }
         return Err(DecodeError::MissingDownlinkFields);
@@ -174,81 +397,107 @@ pub fn parse_acars_frame(buf: &[u8], direction: MessageDirection) -> DecodeResul
         }
     }
 
-    let mut message_number = None;
-    let mut message_sequence = None;
+    let mut msg_nb = None;
+    let mut sequence = None;
     let mut flight_id = None;
     let mut payload = text_bytes.as_slice();
 
-    if is_downlink_block(block_id) {
+    // Downlink text header (conditional on block_id)
+    if block_id.is_downlink() {
         if payload.len() < 10 {
             return Err(DecodeError::MissingDownlinkFields);
         }
-
-        let ((rest, bit_offset), downlink) = DownlinkTextHeader::from_bytes((payload, 0))
+        let ((rest, _), downlink) = DownlinkTextHeader::from_bytes((payload, 0))
             .map_err(|e| DecodeError::Deku(e.to_string()))?;
-        if bit_offset != 0 {
-            return Err(DecodeError::Deku(
-                "unexpected non-byte-aligned downlink header".to_string(),
-            ));
-        }
-
-        message_number = Some(ascii_string(&downlink.message_number));
-        message_sequence = Some(downlink.message_sequence as char);
+        msg_nb = Some(ascii_string(&downlink.message_number));
+        sequence = Some(downlink.message_sequence as char);
         flight_id = Some(ascii_string(&downlink.flight_id));
         payload = rest;
     }
 
-    let mut sublabel = None;
-    let mut mfi = None;
-    let txt = payload;
-    let (offset, extracted_sublabel, extracted_mfi) =
-        extract_sublabel_and_mfi(&label, parsed_direction, txt)?;
-    if let Some(value) = extracted_sublabel {
-        sublabel = Some(value);
-    }
-    if let Some(value) = extracted_mfi {
-        mfi = Some(value);
-    }
-    let txt_after_sublabel = &txt[offset..];
-    
-    // Attempt to parse ARINC 622 envelope if text starts with '/'
-    let (arinc622_envelope, app_payload, txt_after_envelope) = 
-        if !txt_after_sublabel.is_empty() && txt_after_sublabel[0] == b'/' {
-            match crate::decode::arinc622::parse_arinc622_envelope(&ascii_string(txt_after_sublabel)) {
-                Ok(envelope) => {
-                    let app_payload = crate::decode::arinc622::dispatch_by_imi(&envelope)?;
-                    // Text after envelope extraction is empty for app payloads
-                    (Some(envelope), Some(app_payload), &txt_after_sublabel[0..0])
-                }
-                Err(_) => {
-                    // Not a valid ARINC 622 envelope, treat as regular text
-                    (None, None, txt_after_sublabel)
-                }
+    // Sublabel/MFI extraction (mfi extracted but not stored in AcarsMessage)
+    let (offset, sublabel, _mfi) = extract_sublabel_and_mfi(&label, direction, payload)?;
+    let txt_after_sublabel = &payload[offset..];
+
+    // App-layer dispatch
+    use crate::decode::payload::AcarsAppPayload;
+
+    let txt;
+
+    let app = if !txt_after_sublabel.is_empty() && txt_after_sublabel[0] == b'/' {
+        match crate::decode::payload::arinc622::parse(&ascii_string(txt_after_sublabel)) {
+            Ok(message) => {
+                txt = String::new();
+                AcarsAppPayload::Arinc622(message)
             }
-        } else {
-            (None, None, txt_after_sublabel)
-        };
-    
-    let txt = ascii_string(txt_after_envelope);
+            Err(_) => {
+                txt = ascii_string(txt_after_sublabel);
+                dispatch_by_label(&label, sublabel.as_deref(), &txt)
+            }
+        }
+    } else {
+        txt = ascii_string(txt_after_sublabel);
+        dispatch_by_label(&label, sublabel.as_deref(), &txt)
+    };
 
     Ok(AcarsMessage {
-        crc_ok,
         mode,
         reg,
         ack,
         label,
         block_id,
-        message_number,
-        message_sequence,
+        msg_nb,
+        sequence,
         flight_id,
         sublabel,
-        mfi,
         txt,
-        direction: parsed_direction,
+        direction,
         reassembly,
-        arinc622_envelope,
-        app_payload,
+        app,
     })
+}
+
+fn dispatch_by_label(
+    label: &str,
+    sublabel: Option<&str>,
+    txt: &str,
+) -> crate::decode::payload::AcarsAppPayload {
+    use crate::decode::payload::AcarsAppPayload;
+    if txt.is_empty() {
+        return AcarsAppPayload::None;
+    }
+    match label {
+        "MA" => crate::decode::payload::miam::parse_miam(txt)
+            .map(AcarsAppPayload::Miam)
+            .unwrap_or_else(|_| AcarsAppPayload::Text(txt.to_string())),
+        "SA" => crate::decode::payload::media_advisory::parse_media_advisory(txt)
+            .map(AcarsAppPayload::MediaAdvisory)
+            .unwrap_or_else(|_| AcarsAppPayload::Text(txt.to_string())),
+        "SQ" => crate::decode::payload::sq::parse_squitter(txt)
+            .map(AcarsAppPayload::Squitter)
+            .unwrap_or_else(|_| AcarsAppPayload::Text(txt.to_string())),
+        "80" => crate::decode::payload::aoc80::parse_label80(txt)
+            .map(AcarsAppPayload::AocReport)
+            .unwrap_or(AcarsAppPayload::Text(txt.to_string())),
+        "H1" if sublabel == Some("T1") => {
+            if crate::decode::payload::ohma::is_ohma(txt) {
+                crate::decode::payload::ohma::parse_ohma(txt)
+                    .map(AcarsAppPayload::Ohma)
+                    .unwrap_or_else(|_| AcarsAppPayload::Text(txt.to_string()))
+            } else {
+                AcarsAppPayload::Text(txt.to_string())
+            }
+        }
+        _ => AcarsAppPayload::Text(txt.to_string()),
+    }
+}
+
+/// Parse an ACARS frame with an explicit direction.
+///
+/// Thin wrapper around `AcarsMessage::from_bytes_with_direction`.
+/// Prefer the deku API directly in new code.
+pub fn parse_acars_frame(buf: &[u8], direction: MessageDirection) -> DecodeResult<AcarsMessage> {
+    AcarsMessage::from_bytes_with_direction(buf, direction)
 }
 
 pub fn extract_sublabel_and_mfi(
@@ -262,7 +511,6 @@ pub fn extract_sublabel_and_mfi(
     if direction == MessageDirection::Unknown {
         return Err(DecodeError::InvalidDirection);
     }
-
     if &label[..2] != "H1" {
         return Ok((0, None, None));
     }
@@ -310,10 +558,6 @@ fn ascii_string(bytes: &[u8]) -> String {
     bytes.iter().map(|b| *b as char).collect()
 }
 
-fn is_downlink_block(block_id: char) -> bool {
-    block_id.is_ascii_digit()
-}
-
 fn crc16_ccitt_zero(buf: &[u8], len: usize) -> bool {
     let mut crc: u16 = 0;
     for byte in &buf[..len] {
@@ -343,16 +587,27 @@ mod tests {
             0xb0, 0x32, 0x38, 0x83, 0xdf, 0xcb, 0x7f,
         ];
 
-        let msg = parse_acars_frame(&bytes, MessageDirection::AirToGround).unwrap();
-        assert!(msg.crc_ok);
-        assert_eq!(msg.label, "23");
-        assert_eq!(msg.block_id, '3');
-        assert_eq!(msg.flight_id.as_deref(), Some("LO02DM"));
-        assert_eq!(msg.message_number.as_deref(), Some("M09"));
-        assert_eq!(msg.message_sequence, Some('A'));
-        assert!(msg.txt.starts_with("ONN01LO02DM"));
-        assert!(msg.arinc622_envelope.is_none());
-        assert!(msg.app_payload.is_none());
+        // Test all three entry points give the same result
+        let msg1 = AcarsMessage::from_bytes_with_direction(&bytes, MessageDirection::AirToGround)
+            .expect("from_bytes_with_direction");
+        let msg2 = AcarsMessage::try_from(bytes.as_slice()).expect("try_from (unknown dir)");
+        let (_, msg3) = AcarsMessage::from_bytes((&bytes, 0)).expect("from_bytes");
+
+        assert_eq!(msg1.label, "23");
+        assert_eq!(msg1.block_id, BlockId::Downlink(3));
+        assert_eq!(msg1.flight_id.as_deref(), Some("LO02DM"));
+        assert_eq!(msg1.msg_nb.as_deref(), Some("M09"));
+        assert_eq!(msg1.sequence, Some('A'));
+        assert!(msg1.txt.starts_with("ONN01LO02DM"));
+        assert!(matches!(
+            msg1.app,
+            crate::decode::payload::AcarsAppPayload::Text(_)
+        ));
+
+        // All entry points agree on the decoded fields
+        assert_eq!(msg1.label, msg2.label);
+        assert_eq!(msg1.label, msg3.label);
+        assert_eq!(msg1.flight_id, msg2.flight_id);
     }
 
     #[test]

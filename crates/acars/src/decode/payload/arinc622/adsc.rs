@@ -1,15 +1,16 @@
 use deku::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::decode::payload::PayloadError;
 use crate::decode::{DecodeError, DecodeResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AdscMessage {
+    /// Ground station address that requested this ADS-C report.
     pub atsu_address: String,
+    /// Aircraft registration (e.g. `"A7-ANR"`).
     pub registration: String,
-    pub payload_hex: String,
-    pub payload_no_crc_hex: String,
-    pub crc_hex: String,
+    /// Decoded ADS-C tag list.
     pub tags: Vec<AdscTag>,
 }
 
@@ -282,46 +283,46 @@ struct NoncomplianceGroupHeaderRaw {
 pub fn parse_adsc_app_text(txt: &str) -> DecodeResult<AdscMessage> {
     let text = txt.trim();
     if !text.starts_with('/') {
-        return Err(DecodeError::InvalidAdscPayload);
+        return Err(DecodeError::InvalidPayload(PayloadError::Adsc));
     }
 
     let marker = ".ADS.";
-    let marker_idx = text.find(marker).ok_or(DecodeError::InvalidAdscPayload)?;
+    let marker_idx = text
+        .find(marker)
+        .ok_or(DecodeError::InvalidPayload(PayloadError::Adsc))?;
     if marker_idx < 2 {
-        return Err(DecodeError::InvalidAdscPayload);
+        return Err(DecodeError::InvalidPayload(PayloadError::Adsc));
     }
 
     let atsu = &text[1..marker_idx];
     if atsu.is_empty() {
-        return Err(DecodeError::InvalidAdscPayload);
+        return Err(DecodeError::InvalidPayload(PayloadError::Adsc));
     }
 
     let reg_plus_payload = text[marker_idx + marker.len()..].trim_start_matches('.');
-    let split_at =
-        find_registration_split(reg_plus_payload).ok_or(DecodeError::InvalidAdscPayload)?;
+    let split_at = find_registration_split(reg_plus_payload)
+        .ok_or(DecodeError::InvalidPayload(PayloadError::Adsc))?;
     let registration = reg_plus_payload[..split_at].to_string();
     let payload_hex = reg_plus_payload[split_at..].to_ascii_uppercase();
-    if payload_hex.len() < 4 || payload_hex.len() % 2 != 0 {
-        return Err(DecodeError::InvalidAdscPayload);
+    if payload_hex.len() < 4 || !payload_hex.len().is_multiple_of(2) {
+        return Err(DecodeError::InvalidPayload(PayloadError::Adsc));
     }
 
     let crc_start = payload_hex.len() - 4;
     let payload_no_crc_hex = payload_hex[..crc_start].to_string();
-    let crc_hex = payload_hex[crc_start..].to_string();
+
     let tags = parse_adsc_payload_hex(&payload_no_crc_hex)?;
 
     Ok(AdscMessage {
         atsu_address: atsu.to_string(),
         registration,
-        payload_hex,
-        payload_no_crc_hex,
-        crc_hex,
         tags,
     })
 }
 
 pub fn parse_adsc_payload_hex(payload_no_crc_hex: &str) -> DecodeResult<Vec<AdscTag>> {
-    let bytes = hex::decode(payload_no_crc_hex).map_err(|_| DecodeError::InvalidAdscPayload)?;
+    let bytes = hex::decode(payload_no_crc_hex)
+        .map_err(|_| DecodeError::InvalidPayload(PayloadError::Adsc))?;
     parse_adsc_payload_bytes(&bytes)
 }
 
@@ -494,7 +495,7 @@ pub fn parse_adsc_payload_bytes(buf: &[u8]) -> DecodeResult<Vec<AdscTag>> {
                     eta_seconds: raw.eta_seconds,
                 }));
             }
-            _ => return Err(DecodeError::InvalidAdscPayload),
+            _ => return Err(DecodeError::InvalidPayload(PayloadError::Adsc)),
         }
     }
 
@@ -574,7 +575,7 @@ fn decode_temperature(value: i16) -> f64 {
 
 fn take<'a>(buf: &'a [u8], idx: &mut usize, count: usize) -> DecodeResult<&'a [u8]> {
     if *idx + count > buf.len() {
-        return Err(DecodeError::InvalidAdscPayload);
+        return Err(DecodeError::InvalidPayload(PayloadError::Adsc));
     }
     let out = &buf[*idx..*idx + count];
     *idx += count;
@@ -587,7 +588,7 @@ fn find_registration_split(value: &str) -> Option<usize> {
         let reg = &value[..idx];
         let payload = &value[idx..];
         if payload.len() >= 4
-            && payload.len() % 2 == 0
+            && payload.len().is_multiple_of(2)
             && payload.bytes().all(|b| b.is_ascii_hexdigit())
         {
             if fallback.is_none() {
@@ -619,7 +620,6 @@ mod tests {
 
         assert_eq!(msg.atsu_address, "BDOCAYA");
         assert_eq!(msg.registration, "A7-ANR");
-        assert_eq!(msg.crc_hex, "A626");
         assert!(!msg.tags.is_empty());
         assert_eq!(msg.tags[0].id(), 7);
     }

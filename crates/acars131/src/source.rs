@@ -1,0 +1,336 @@
+use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+use url::Url;
+
+pub const DEFAULT_CENTER_FREQ: u32 = 131_700_000;
+pub const DEFAULT_SAMPLE_RATE: u32 = 1_050_000;
+pub const DEFAULT_CHANNELS: &[u32] = &[131_525_000, 131_725_000, 131_825_000];
+pub const DEFAULT_CHUNK_SIZE: usize = 65_536;
+
+#[cfg(feature = "sdr")]
+use desperado::{Gain, IqFormat};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase", untagged)]
+pub enum Address {
+    #[cfg(feature = "sdr")]
+    File { file: String },
+    #[cfg(feature = "rtlsdr")]
+    Rtlsdr {
+        device: Option<usize>,
+        serial: Option<String>,
+    },
+    #[cfg(feature = "airspy")]
+    Airspy {
+        device: Option<usize>,
+        serial: Option<String>,
+    },
+    #[cfg(feature = "hackrf")]
+    Hackrf { device: Option<usize> },
+    #[cfg(feature = "soapy")]
+    Soapy { soapy: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Source {
+    #[serde(flatten)]
+    pub address: Address,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub center_freq: Option<u32>,
+    #[serde(default)]
+    pub sample_rate: Option<u32>,
+    #[serde(default, alias = "channel")]
+    pub channels: Option<Vec<u32>>,
+    #[cfg(feature = "sdr")]
+    #[serde(default)]
+    pub gain: Option<f64>,
+    #[cfg(feature = "sdr")]
+    #[serde(default)]
+    pub bias_tee: Option<bool>,
+    #[cfg(feature = "sdr")]
+    #[serde(default, alias = "rf_amp")]
+    pub amp_enable: Option<bool>,
+    #[cfg(feature = "sdr")]
+    #[serde(default, alias = "if_gain")]
+    pub lna_gain: Option<f64>,
+    #[cfg(feature = "sdr")]
+    #[serde(default, alias = "bb_gain")]
+    pub vga_gain: Option<f64>,
+    #[cfg(feature = "sdr")]
+    #[serde(default, alias = "iq_format")]
+    pub format: Option<String>,
+}
+
+impl Source {
+    pub fn center_freq(&self) -> u32 {
+        self.center_freq.unwrap_or(DEFAULT_CENTER_FREQ)
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE)
+    }
+
+    pub fn channels(&self) -> Vec<u32> {
+        self.channels
+            .clone()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| DEFAULT_CHANNELS.to_vec())
+    }
+
+    #[cfg(feature = "sdr")]
+    pub fn iq_format(&self) -> IqFormat {
+        self.format
+            .as_deref()
+            .unwrap_or("cu8")
+            .parse()
+            .unwrap_or(IqFormat::Cu8)
+    }
+
+    #[cfg(feature = "sdr")]
+    pub fn gain(&self, default: f64) -> Gain {
+        self.gain.map(Gain::Manual).unwrap_or(Gain::Manual(default))
+    }
+}
+
+impl FromStr for Source {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let default = Url::parse("file://").unwrap();
+        let url = default.join(s).map_err(|e| e.to_string())?;
+        let address = match url.scheme() {
+            #[cfg(feature = "sdr")]
+            "file" => {
+                let file = if let Some(host) = url.host_str() {
+                    format!("{}{}", host, url.path())
+                } else {
+                    url.path().to_string()
+                };
+                Address::File { file }
+            }
+            #[cfg(feature = "rtlsdr")]
+            "rtlsdr" => {
+                let host = url.host_str().unwrap_or("");
+                if host.is_empty() {
+                    Address::Rtlsdr {
+                        device: Some(0),
+                        serial: None,
+                    }
+                } else if let Ok(device) = host.parse::<usize>() {
+                    Address::Rtlsdr {
+                        device: Some(device),
+                        serial: None,
+                    }
+                } else if let Some(serial) = host.strip_prefix("serial=") {
+                    Address::Rtlsdr {
+                        device: None,
+                        serial: Some(serial.to_string()),
+                    }
+                } else {
+                    Address::Rtlsdr {
+                        device: Some(0),
+                        serial: None,
+                    }
+                }
+            }
+            #[cfg(feature = "airspy")]
+            "airspy" => {
+                let host = url.host_str().unwrap_or("");
+                if host.is_empty() {
+                    Address::Airspy {
+                        device: Some(0),
+                        serial: None,
+                    }
+                } else if let Ok(device) = host.parse::<usize>() {
+                    Address::Airspy {
+                        device: Some(device),
+                        serial: None,
+                    }
+                } else if let Some(serial) = host.strip_prefix("serial=") {
+                    Address::Airspy {
+                        device: None,
+                        serial: Some(serial.to_string()),
+                    }
+                } else {
+                    Address::Airspy {
+                        device: Some(0),
+                        serial: None,
+                    }
+                }
+            }
+            #[cfg(feature = "hackrf")]
+            "hackrf" => {
+                let device = url
+                    .host_str()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .or(Some(0));
+                Address::Hackrf { device }
+            }
+            #[cfg(feature = "soapy")]
+            "soapy" => Address::Soapy {
+                soapy: url.host_str().unwrap_or("").to_string(),
+            },
+            other => return Err(format!("unsupported source scheme: {other}")),
+        };
+
+        let mut source = Source {
+            address,
+            name: None,
+            center_freq: None,
+            sample_rate: None,
+            channels: None,
+            #[cfg(feature = "sdr")]
+            gain: None,
+            #[cfg(feature = "sdr")]
+            bias_tee: None,
+            #[cfg(feature = "sdr")]
+            amp_enable: None,
+            #[cfg(feature = "sdr")]
+            lna_gain: None,
+            #[cfg(feature = "sdr")]
+            vga_gain: None,
+            #[cfg(feature = "sdr")]
+            format: None,
+        };
+
+        if let Some(query) = url.query() {
+            for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+                match key.as_ref() {
+                    "name" => source.name = Some(value.into_owned()),
+                    "center_freq" | "freq" => source.center_freq = parse_hz(&value),
+                    "sample_rate" | "rate" => source.sample_rate = parse_hz(&value),
+                    "channel" | "channels" => {
+                        let parsed: Vec<u32> = value.split(',').filter_map(parse_hz).collect();
+                        if !parsed.is_empty() {
+                            source.channels.get_or_insert_with(Vec::new).extend(parsed);
+                        }
+                    }
+                    #[cfg(feature = "sdr")]
+                    "gain" => source.gain = value.parse::<f64>().ok(),
+                    #[cfg(feature = "sdr")]
+                    "bias_tee" => source.bias_tee = parse_bool(&value),
+                    #[cfg(feature = "sdr")]
+                    "amp_enable" | "rf_amp" => source.amp_enable = parse_bool(&value),
+                    #[cfg(feature = "sdr")]
+                    "lna_gain" | "if_gain" => source.lna_gain = value.parse::<f64>().ok(),
+                    #[cfg(feature = "sdr")]
+                    "vga_gain" | "bb_gain" => source.vga_gain = value.parse::<f64>().ok(),
+                    #[cfg(feature = "sdr")]
+                    "format" | "iq_format" => source.format = Some(value.into_owned()),
+                    _ if !key.is_empty() && value.is_empty() => {
+                        source.name = Some(key.into_owned())
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(source)
+    }
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_hz(value: impl AsRef<str>) -> Option<u32> {
+    let value = value.as_ref().trim();
+    let (num, mult) = match value.chars().last()? {
+        'k' | 'K' => (&value[..value.len() - 1], 1_000.0),
+        'm' | 'M' => (&value[..value.len() - 1], 1_000_000.0),
+        'g' | 'G' => (&value[..value.len() - 1], 1_000_000_000.0),
+        _ => (value, 1.0),
+    };
+    num.parse::<f64>().ok().map(|v| (v * mult).round() as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_file_url() {
+        let src: Source = "file:///tmp/acars.cu8?format=cu8&sample_rate=1050000&center_freq=131700000&channel=131725000".parse().unwrap();
+        assert_eq!(src.center_freq(), 131_700_000);
+        assert_eq!(src.sample_rate(), 1_050_000);
+        assert_eq!(src.channels(), vec![131_725_000]);
+    }
+
+    #[cfg(feature = "rtlsdr")]
+    #[test]
+    fn parse_rtlsdr_url() {
+        let src: Source = "rtlsdr://0?gain=40&bias_tee=true&channel=131.725M"
+            .parse()
+            .unwrap();
+        match src.address {
+            Address::Rtlsdr { device, .. } => assert_eq!(device, Some(0)),
+            _ => panic!("expected rtlsdr"),
+        }
+        assert_eq!(src.channels(), vec![131_725_000]);
+        assert_eq!(src.bias_tee, Some(true));
+    }
+
+    #[cfg(feature = "soapy")]
+    #[test]
+    fn parse_soapy_url() {
+        let src: Source = "soapy://driver=rtlsdr?gain=40&channel=131525000,131725000"
+            .parse()
+            .unwrap();
+        match &src.address {
+            Address::Soapy { soapy } => assert_eq!(soapy, "driver=rtlsdr"),
+            _ => panic!("expected soapy"),
+        }
+        assert_eq!(src.channels(), vec![131_525_000, 131_725_000]);
+    }
+
+    #[cfg(feature = "airspy")]
+    #[test]
+    fn parse_airspy_url() {
+        let src: Source = "airspy://0?sample_rate=6M&channel=131.725M"
+            .parse()
+            .unwrap();
+        match src.address {
+            Address::Airspy { device, .. } => assert_eq!(device, Some(0)),
+            _ => panic!("expected airspy"),
+        }
+        assert_eq!(src.sample_rate(), 6_000_000);
+        assert_eq!(src.channels(), vec![131_725_000]);
+    }
+
+    #[cfg(feature = "hackrf")]
+    #[test]
+    fn parse_hackrf_url() {
+        let src: Source =
+            "hackrf://0?center_freq=131.7M&channel=131.525M&rf_amp=true&if_gain=32&bb_gain=20"
+                .parse()
+                .unwrap();
+        match src.address {
+            Address::Hackrf { device } => assert_eq!(device, Some(0)),
+            _ => panic!("expected hackrf"),
+        }
+        assert_eq!(src.center_freq(), 131_700_000);
+        assert_eq!(src.channels(), vec![131_525_000]);
+        assert_eq!(src.amp_enable, Some(true));
+        assert_eq!(src.lna_gain, Some(32.0));
+        assert_eq!(src.vga_gain, Some(20.0));
+    }
+
+    #[test]
+    fn parse_toml_file_source() {
+        let text = r#"
+file = "~/captures/acars.cu8"
+format = "cu8"
+center_freq = 131700000
+sample_rate = 1050000
+channels = [131525000, 131725000]
+"#;
+        let src: Source = toml::from_str(text).unwrap();
+        assert_eq!(src.channels(), vec![131_525_000, 131_725_000]);
+    }
+}

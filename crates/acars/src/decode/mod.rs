@@ -1,10 +1,11 @@
 pub mod acars;
-pub mod adsc;
-pub mod arinc622;
 pub mod avlc;
+pub mod helpers;
+pub mod payload;
 pub mod x25;
 pub mod xid;
 
+use crate::decode::payload::PayloadError;
 use thiserror::Error;
 
 pub type DecodeResult<T> = Result<T, DecodeError>;
@@ -23,10 +24,10 @@ pub enum DecodeError {
     MissingDownlinkFields,
     #[error("invalid direction for requested operation")]
     InvalidDirection,
-    #[error("invalid ADS-C payload")]
-    InvalidAdscPayload,
-    #[error("invalid ARINC 622 envelope: {0}")]
-    InvalidArinc622Envelope(String),
+    #[error("ACARS CRC check failed")]
+    CrcFail,
+    #[error("invalid payload: {0}")]
+    InvalidPayload(#[from] PayloadError),
     #[error("deku parse error: {0}")]
     Deku(String),
     #[error("invalid VDL frame")]

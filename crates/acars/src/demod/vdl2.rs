@@ -27,8 +27,6 @@ use desperado::dsp::chebyshev::Chebyshev2Lpf;
 use desperado::dsp::downsample::EveryN;
 use desperado::dsp::nco::Nco;
 
-// ─── Physical-layer constants ───────────────────────────────────────────────
-
 pub const SYMBOL_RATE: u32 = 10_500;
 /// Samples per symbol in the decimated domain.
 const SPS: u32 = 10;
@@ -46,16 +44,12 @@ const DEFAULT_SYNC_THRESHOLD: f32 = 4.0;
 const MAG_LP: f32 = 0.9;
 const NF_LP: f32 = 0.85;
 
-// ─── Burst-layer constants ───────────────────────────────────────────────────
-
 const HDRFECLEN: u32 = 5;
 const TRLEN: u32 = 17;
 const HEADER_LEN: u32 = 3 + TRLEN + HDRFECLEN; // = 25 bits
 const LFSR_IV: u16 = 0x6959;
 const RS_N: usize = 255;
 const RS_K: usize = 249;
-
-// ─── LPF parameters ─────────────────────────────────────────────────────────
 
 const INP_LPF_CUTOFF_HZ: f32 = 8_000.0;
 const INP_LPF_RIPPLE: f32 = 0.5; // percent
@@ -84,8 +78,9 @@ const PR_PHASE: [f32; PREAMBLE_SYMS] = [
 /// Gray-code mapping for D8PSK symbol index → 3-bit value.
 const GRAYCODE: [u8; ARITY] = [0, 1, 3, 2, 6, 7, 5, 4];
 
-// ─── Header FEC (parity-check matrix and syndrome correction table) ─────────
+// ─── Header FEC (parity-check matrix and syndrome correction table)
 
+#[allow(clippy::unusual_byte_groupings)]
 const H: [u32; HDRFECLEN as usize] = [
     0b000_0000_0111_1111_1111_1100_00,
     0b001_1111_1000_0111_1111_1010_00,
@@ -101,7 +96,7 @@ const SYNDTABLE: [u32; 32] = [
     0x00001000, 0x00000800, 0x00000400, 0x00000200, 0x00000100, 0x00000080, 0x00000040, 0x00000020,
 ];
 
-// ─── Reed-Solomon RS(255,249) decoder ───────────────────────────────────────
+// ─── Reed-Solomon RS(255,249) decoder
 // Ported from Phil Karn's libfec (LGPL), parameters: GF(2^8) poly=0x187,
 // fcr=120, prim=1, nroots=6, pad=0.
 
@@ -117,6 +112,7 @@ struct RsDecoder {
     index_of: [u8; 256],
 }
 
+#[allow(clippy::needless_range_loop)]
 impl RsDecoder {
     fn new() -> Self {
         let mut alpha_to = [0u8; 256];
@@ -236,7 +232,7 @@ impl RsDecoder {
                     });
                 }
                 // C: if (2 * el <= r + no_eras - 1) — equivalent to 2*el+1 <= r+no_eras
-                if 2 * el + 1 <= r + no_eras {
+                if 2 * el < r + no_eras {
                     el = r + no_eras - el;
                     for i in 0..=RS_NROOTS {
                         b[i] = if lambda[i] == 0 {
@@ -338,8 +334,6 @@ impl RsDecoder {
     }
 }
 
-// ─── Demodulator state machine ───────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DemodState {
     Init,
@@ -433,6 +427,7 @@ pub struct Vdl2Channel {
     sync_threshold: f32,
 }
 
+#[allow(clippy::needless_range_loop)]
 impl Vdl2Channel {
     /// Create a new channel demodulator.
     ///
@@ -747,7 +742,7 @@ impl Vdl2Channel {
                     return Vec::new();
                 }
 
-                self.datalen_octets = (self.datalen + 7) / 8;
+                self.datalen_octets = self.datalen.div_ceil(8);
                 self.num_blocks = self.datalen_octets / RS_K as u32;
                 self.fec_octets = self.num_blocks * RS_NROOTS as u32;
                 self.last_block_len_octets = self.datalen_octets % RS_K as u32;
@@ -843,7 +838,7 @@ impl Vdl2Channel {
 
                 // Truncate to datalen bits.
                 if (self.datalen as usize) < corrected_data.len() * 8 {
-                    corrected_data.truncate((self.datalen as usize + 7) / 8);
+                    corrected_data.truncate((self.datalen as usize).div_ceil(8));
                 }
 
                 // Build corrected bit stream for HDLC destuffing.
@@ -919,7 +914,7 @@ impl Vdl2Channel {
     /// LFSR descramble (x^15 + x + 1, initial value set before calling).
     fn lfsr_descramble(&mut self) {
         for i in self.bs_descrambler_pos..self.bs.len() {
-            let bit = ((self.lfsr >> 0) ^ (self.lfsr >> 14)) & 1;
+            let bit = (self.lfsr ^ (self.lfsr >> 14)) & 1;
             self.lfsr = (self.lfsr >> 1) | (bit << 14);
             self.bs[i] ^= bit as u8;
         }
@@ -932,7 +927,7 @@ impl Vdl2Channel {
         let mut syndrome = 0u32;
         for (i, &h) in H.iter().enumerate() {
             let row = *r & h;
-            syndrome |= (parity(row) as u32) << (HDRFECLEN as usize - 1 - i);
+            syndrome |= parity(row) << (HDRFECLEN as usize - 1 - i);
         }
         *r ^= SYNDTABLE[syndrome as usize];
         syndrome
@@ -957,16 +952,14 @@ impl Vdl2Channel {
             return None;
         }
         let mut out = vec![0u8; n];
-        for i in 0..n {
+        for (i, byte) in out.iter_mut().enumerate() {
             for j in 0..8 {
-                out[i] |= self.bs[start_bit + i * 8 + j] << j;
+                *byte |= self.bs[start_bit + i * 8 + j] << j;
             }
         }
         Some(out)
     }
 }
-
-// ─── Helper functions ────────────────────────────────────────────────────────
 
 /// Fit a parabola through three equally-spaced points and return the x-coordinate
 /// of its vertex. Ported from dumpvdl2 `calc_para_vertex`.
@@ -1011,7 +1004,7 @@ fn parity(mut v: u32) -> u32 {
 /// Number of FEC octets for a block whose data portion is `len` octets.
 fn get_fec_octetcount(len: u32) -> usize {
     match len {
-        0 | 1 | 2 => 0,
+        0..=2 => 0,
         3..=30 => 2,
         31..=67 => 4,
         _ => RS_NROOTS,
@@ -1024,7 +1017,7 @@ fn deinterleave(
     src: &[u8],
     rows: usize,
     cols: usize,
-    rs_tab: &mut Vec<[u8; RS_N]>,
+    rs_tab: &mut [[u8; RS_N]],
     fillwidth: usize,
     offset: usize,
 ) -> Result<(), ()> {
@@ -1109,7 +1102,7 @@ fn hdlc_destuff(bits: &[u8]) -> Vec<Vec<u8>> {
                         // Closing flag.
                         if frame_bits.len() > 8 {
                             let frame_bits_clean = &frame_bits[..frame_bits.len() - 8];
-                            if frame_bits_clean.len() % 8 == 0 {
+                            if frame_bits_clean.len().is_multiple_of(8) {
                                 let bytes = bits_to_bytes_lsbfirst(frame_bits_clean);
                                 if !bytes.is_empty() {
                                     frames.push(bytes);

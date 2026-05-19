@@ -1,201 +1,214 @@
 //! AVLC (Aeronautical VHF Link Control) frame parsing.
 //!
-//! VDL Mode 2 bearer layer: each AVLC frame carries either an ACARS payload
-//! (prefixed 0xFF 0xFF 0x01) or an X.25 packet.  Addresses are 28-bit values
-//! packed in HDLC-style LSB-first octets; they are assembled and then
-//! bit-reversed before extracting the address, type, and status fields.
+//! VDL Mode 2 bearer layer. Each AVLC frame carries either an ACARS payload
+//! (identified by the 3-byte header `0xFF 0xFF 0x01`) or an X.25 packet.
+//! Addresses are 28-bit values packed in HDLC-style LSB-first octets.
 //!
-//! Frame layout (after HDLC bit-destuffing, FCS still present):
+//! ## Frame layout (after HDLC bit-destuffing, FCS still present)
 //!
 //! ```text
-//! +-----------+-----------+-------+----------------+-------+
-//! | DST  (4B) | SRC  (4B) | LCF   | payload (n B)  | FCS   |
-//! +-----------+-----------+(1B)   +----------------+(2B)   +
+//! ┌─────────────┬─────────────┬───────┬─────────────────┬───────┐
+//! │  DST  (4 B) │  SRC  (4 B) │ LCF   │  payload (n B)  │ FCS   │
+//! │  28-bit addr│  28-bit addr│ (1 B) │                 │ (2 B) │
+//! └─────────────┴─────────────┴───────┴─────────────────┴───────┘
 //! ```
 //!
-//! References: dumpvdl2 `avlc.c`, VDL Mode 2 ICAO Annex 10.
+//! References: dumpvdl2 `avlc.c`, ICAO Doc 9776 (VDL Mode 2 SARPs).
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use deku::prelude::*;
+use serde::{Deserialize, Serialize};
 
-use crate::decode::acars::{parse_acars_frame, AcarsMessage, MessageDirection};
+use crate::decode::acars::{AcarsMessage, MessageDirection};
+use crate::decode::helpers::{
+    deserialize_addr_hex, serialize_addr_hex, serialize_bytes_hex_variant,
+};
 use crate::decode::x25::{parse_x25_packet, X25Packet};
 use crate::decode::xid::{parse_xid, XidMessage};
 use crate::decode::{DecodeError, DecodeResult};
 
-/// Minimum AVLC length without FCS (4 dst + 4 src + 1 lcf).
-const MIN_AVLC_NO_FCS_LEN: usize = 9;
-/// Minimum AVLC length with FCS (4 dst + 4 src + 1 lcf + 2 fcs).
-const MIN_AVLC_WITH_FCS_LEN: usize = 11;
-/// CRC-16/CCITT residual for a correctly received frame.
+/// CRC-16/CCITT good-frame residual (`0xF0B8`).
 const GOOD_FCS: u16 = 0xF0B8;
 
-// ─── Address types ──────────────────────────────────────────────────────────
-
-pub const ADDRTYPE_AIRCRAFT: u8 = 1;
-pub const ADDRTYPE_GS_ADM: u8 = 4;
-pub const ADDRTYPE_GS_DEL: u8 = 5;
-pub const ADDRTYPE_ALL: u8 = 7;
-
-// ─── Serde helpers for hex byte arrays ──────────────────────────────────────
-
-/// Serialize `Vec<u8>` as a contiguous hex string.
-pub fn serialize_bytes_hex<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
-    let hex: String = v.iter().map(|b| format!("{:02x}", b)).collect();
-    s.serialize_str(&hex)
+/// AVLC station address type, encoded as a 3-bit field in the 28-bit address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddrType {
+    /// Aircraft station (type 1).
+    Aircraft,
+    /// Ground station (types 4 and 5 — administration and delivery are both represented here).
+    GroundStation,
+    /// All-stations broadcast (type 7).
+    AllStations,
 }
 
-/// Serialize `Vec<u8>` as hex (for use in enum variants).
-pub fn serialize_bytes_hex_variant<S: Serializer>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
-    serialize_bytes_hex(v, s)
-}
-
-/// Serialize `Option<Vec<u8>>` as optional hex string.
-pub fn serialize_opt_bytes_hex<S: Serializer>(
-    v: &Option<Vec<u8>>,
-    s: S,
-) -> Result<S::Ok, S::Error> {
-    match v {
-        Some(b) => serialize_bytes_hex(b, s),
-        None => s.serialize_none(),
-    }
-}
-
-/// Deserialize `Option<Vec<u8>>` — accepts null, a hex string, or a JSON byte array.
-pub fn deserialize_opt_bytes_hex<'de, D: Deserializer<'de>>(
-    d: D,
-) -> Result<Option<Vec<u8>>, D::Error> {
-    use serde::de::{self, SeqAccess, Visitor};
-
-    struct OptBytesVisitor;
-
-    impl<'de> Visitor<'de> for OptBytesVisitor {
-        type Value = Option<Vec<u8>>;
-
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "null, a hex string, or a byte array")
-        }
-
-        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
-            struct BytesVisitor;
-            impl<'de> Visitor<'de> for BytesVisitor {
-                type Value = Vec<u8>;
-                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    write!(f, "a hex string or byte array")
-                }
-                fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-                    parse_hex_bytes(v).map_err(|e| E::custom(e.to_string()))
-                }
-                fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                    let mut out = Vec::new();
-                    while let Some(b) = seq.next_element::<u8>()? {
-                        out.push(b);
-                    }
-                    Ok(out)
-                }
-            }
-            d.deserialize_any(BytesVisitor).map(Some)
+impl AddrType {
+    fn from_bits(raw: u8) -> Self {
+        match raw {
+            1 => Self::Aircraft,
+            4 | 5 => Self::GroundStation,
+            7 => Self::AllStations,
+            _ => Self::Aircraft, // unknown: treat as aircraft for best-effort
         }
     }
 
-    d.deserialize_option(OptBytesVisitor)
-}
-
-fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
-    let cleaned: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-    if cleaned.is_empty() {
-        return Ok(Vec::new());
-    }
-    if cleaned.len() % 2 != 0 {
-        return Err("hex string must have an even number of digits".to_string());
+    /// Whether this is an aircraft address.
+    pub fn is_aircraft(self) -> bool {
+        matches!(self, Self::Aircraft)
     }
 
-    let mut out = Vec::with_capacity(cleaned.len() / 2);
-    for i in (0..cleaned.len()).step_by(2) {
-        let byte = u8::from_str_radix(&cleaned[i..i + 2], 16)
-            .map_err(|e| format!("invalid hex at offset {i}: {e}"))?;
-        out.push(byte);
-    }
-    Ok(out)
-}
-
-pub fn serialize_addr_hex<S: Serializer>(v: &u32, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(&format!("{:06X}", v))
-}
-
-pub fn deserialize_addr_hex<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
-    use serde::de::{self, Visitor};
-
-    struct AddrVisitor;
-
-    impl<'de> Visitor<'de> for AddrVisitor {
-        type Value = u32;
-
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "hex string or integer address")
-        }
-
-        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
-            u32::try_from(v).map_err(|_| E::custom("address out of range"))
-        }
-
-        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
-            if v < 0 {
-                return Err(E::custom("address must be non-negative"));
-            }
-            u32::try_from(v as u64).map_err(|_| E::custom("address out of range"))
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            let trimmed = v.trim();
-            let no_prefix = trimmed
-                .strip_prefix("0x")
-                .or_else(|| trimmed.strip_prefix("0X"))
-                .unwrap_or(trimmed);
-            u32::from_str_radix(no_prefix, 16)
-                .map_err(|e| E::custom(format!("invalid hex address: {e}")))
-        }
-    }
-
-    d.deserialize_any(AddrVisitor)
-}
-
-// ─── AVLC address ───────────────────────────────────────────────────────────
-
-fn addr_station_type(addr_type: u8) -> &'static str {
-    match addr_type {
-        1 => "Aircraft",
-        4 | 5 => "Ground station",
-        7 => "All stations",
-        _ => "reserved",
+    /// Whether this is a ground-station address.
+    pub fn is_ground(self) -> bool {
+        matches!(self, Self::GroundStation)
     }
 }
 
-/// Decoded AVLC address (28 bits packed as 24-bit address + 3-bit type + status).
+/// Frame role derived from the C/R bit in the source address.
+///
+/// In HDLC and AVLC, each station sets the C/R bit to indicate whether it is
+/// transmitting a **command** frame (the originator expects a response) or a
+/// **response** frame (answering a prior command).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameRole {
+    /// Sending station is issuing a command; a response is expected.
+    Command,
+    /// Sending station is responding to a prior command.
+    Response,
+}
+
+/// Aircraft/ground status derived from the A/G bit in the destination address.
+///
+/// For frames addressed to an aircraft, this bit reflects the aircraft's reported
+/// operational state at the time the frame was generated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AircraftGroundStatus {
+    /// Aircraft is airborne.
+    Airborne,
+    /// Aircraft is on the ground.
+    OnGround,
+}
+
+/// S-frame supervisory function code.
+///
+/// Encodes the 2-bit supervisory function field (bits 3:2 of the LCF byte).
+/// Used in `AvlcLcf::S` frames to acknowledge I-frames and manage flow control
+/// within the modulo-8 sliding-window ARQ scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SFunc {
+    /// Receive Ready (RR) — all I-frames up to `recv_seq - 1` received OK;
+    /// ready to accept more starting at `recv_seq`.
+    ReceiveReady,
+    /// Receive Not Ready (RNR) — acknowledges up to `recv_seq - 1` but
+    /// requests the sender to stop transmitting I-frames until further notice.
+    ReceiveNotReady,
+    /// Reject (REJ) — acknowledges up to `recv_seq - 1` but requests
+    /// go-back-N retransmission from `recv_seq` onwards.
+    Reject,
+    /// Selective Reject (SREJ) — requests retransmission of a single
+    /// specific I-frame (`recv_seq` only), while others remain buffered.
+    SelectiveReject,
+}
+
+/// Decoded payload carried inside an AVLC I-frame or XID U-frame.
+///
+/// I-frames carry either ACARS (identified by the `0xFF 0xFF 0x01` header) or
+/// X.25 packets. XID U-frames carry a Ground Station Information Frame (GSIF)
+/// or link negotiation message. All other U-frame and S-frame payloads are not
+/// carried here (they have no application-layer content).
+///
+/// ## Memory note
+///
+/// `Acars` boxes the `AcarsMessage` and `XidMessage` to avoid blowing up the
+/// enum size, since they are substantially larger than the other variants.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AvlcPayload {
+    /// ACARS application message, decoded from I-frame payload starting `0xFF 0xFF 0x01`.
+    Acars(Box<AcarsMessage>),
+    /// X.25 packet (all other I-frame payloads).
+    X25(X25Packet),
+    /// XID / Ground Station Information Frame from a U-frame with `mfunc = 0x2B`.
+    Xid(Box<XidMessage>),
+    /// I-frame payload that could not be decoded; raw bytes preserved.
+    #[serde(serialize_with = "serialize_bytes_hex_variant")]
+    Unknown(Vec<u8>),
+}
+
+/// A fully decoded AVLC frame.
+///
+/// AVLC is the link layer for VDL Mode 2. This struct captures the addressing,
+/// frame type, FCS result, and — for I-frames and XID U-frames — the decoded
+/// application payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvlcFrame {
+    /// Destination station address.
+    pub dst: AvlcAddr,
+    /// Source station address.
+    pub src: AvlcAddr,
+    /// Frame role: `Command` or `Response`, derived from the C/R bit in `src`.
+    pub role: FrameRole,
+    /// Aircraft/ground status, derived from the A/G bit in `dst`.
+    ///
+    /// `Some` only when `dst` is an aircraft address (type 1). `None` for
+    /// ground-station or broadcast destinations where the A/G bit has no meaning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ag_status: Option<AircraftGroundStatus>,
+    /// Link Control Field: I-frame, S-frame, or U-frame with sequence numbers.
+    pub lcf: AvlcLcf,
+    /// Whether the frame passed the CRC-16/CCITT FCS check.
+    ///
+    /// `false` means the frame was received with bit errors. Other fields are
+    /// populated (best-effort) but should be treated as unreliable. The
+    /// application payload (`payload`) is `None` for FCS-failed frames.
+    #[serde(skip)]
+    pub fcs_ok: bool,
+    /// Decoded application payload.
+    ///
+    /// Present only for I-frames and XID U-frames with a passing FCS.
+    /// `None` for S-frames, non-XID U-frames, or FCS failures.
+    #[serde(flatten)]
+    pub payload: Option<AvlcPayload>,
+}
+
+/// Decoded AVLC address (28 bits: 24-bit station id + 3-bit type + 1 status bit).
+///
+/// The raw wire encoding is 4 HDLC-style octets with LSB-first bit packing and
+/// per-octet EA (end-address) bits. `DekuRead` is implemented manually to handle
+/// the bit-reversal that HDLC address encoding requires.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AvlcAddr {
-    /// 24-bit ICAO aircraft address or ground-station id (hex).
+    /// 24-bit station identifier (aircraft ICAO address or ground-station id).
+    ///
+    /// Serialised as a 6-digit uppercase hex string (e.g. `"2A3261"`).
     #[serde(serialize_with = "serialize_addr_hex")]
     #[serde(deserialize_with = "deserialize_addr_hex")]
-    pub addr: u32,
-    /// Address type: 1=aircraft, 4=GS_ADM, 5=GS_DEL, 7=all.
-    pub addr_type: u8,
-    /// Human-readable station type.
-    pub station_type: String,
-    /// Status bit: for aircraft = airborne(false)/on-ground(true).
-    /// For C/R interpretation, see `AvlcFrame.cr`.
+    pub icao24: u32,
+    /// Typed address category.
+    #[serde(rename = "type")]
+    pub addr_type: AddrType,
+    /// Raw status bit.
+    ///
+    /// For aircraft addresses: `false` = airborne, `true` = on ground.
+    /// For ground-station addresses: `false` = command, `true` = response
+    /// (used to derive `AvlcFrame.role`).
+    #[serde(skip)]
     pub status: bool,
 }
 
+impl<'a, Ctx> DekuReader<'a, Ctx> for AvlcAddr {
+    fn from_reader_with_ctx<R: std::io::Read + std::io::Seek>(
+        reader: &mut deku::reader::Reader<R>,
+        _ctx: Ctx,
+    ) -> Result<Self, DekuError> {
+        let b0 = u8::from_reader_with_ctx(reader, ())?;
+        let b1 = u8::from_reader_with_ctx(reader, ())?;
+        let b2 = u8::from_reader_with_ctx(reader, ())?;
+        let b3 = u8::from_reader_with_ctx(reader, ())?;
+        Ok(Self::from_raw([b0, b1, b2, b3]))
+    }
+}
+
 impl AvlcAddr {
-    fn parse(buf: &[u8; 4]) -> Self {
+    /// Parse from 4 raw HDLC address bytes (called by `DekuReader` and `parse_avlc_frame`).
+    pub(crate) fn from_raw(buf: [u8; 4]) -> Self {
         // HDLC address: each octet has EA bit at bit-0, address bits at bits 7:1.
         // Assemble the raw 28-bit value (LSB-first within each octet), then bit-reverse.
         let raw = ((buf[0] as u32) >> 1)
@@ -203,21 +216,308 @@ impl AvlcAddr {
             | ((buf[2] as u32) << 13)
             | (((buf[3] & 0xfe) as u32) << 20);
         let val = reverse_bits(raw, 28);
-        let addr_type = ((val >> 24) & 0x7) as u8;
+        let addr_type_raw = ((val >> 24) & 0x7) as u8;
+        let addr_type = AddrType::from_bits(addr_type_raw);
         Self {
-            addr: val & 0x00FF_FFFF,
+            icao24: val & 0x00FF_FFFF,
             addr_type,
-            station_type: addr_station_type(addr_type).to_string(),
             status: (val >> 27) & 0x1 == 1,
         }
     }
 
+    /// Returns `true` if this is an aircraft address.
     pub fn is_aircraft(&self) -> bool {
-        self.addr_type == ADDRTYPE_AIRCRAFT
+        self.addr_type.is_aircraft()
     }
 
+    /// Returns `true` if this is a ground-station address.
     pub fn is_ground(&self) -> bool {
-        self.addr_type == ADDRTYPE_GS_ADM || self.addr_type == ADDRTYPE_GS_DEL
+        self.addr_type.is_ground()
+    }
+}
+
+/// Link Control Field: encodes the AVLC frame type and sequence numbers.
+///
+/// The LCF is a single byte immediately following the two address fields.
+/// Its two least-significant bits determine the frame class:
+///
+/// ```text
+/// LCF bit 1:0   class   description
+///     x x x 0   I       Information frame — carries application payload
+///     x x 0 1   S       Supervisory frame — flow control, no payload
+///     x x 1 1   U       Unnumbered frame — connection management
+/// ```
+///
+/// ## Sequence numbers and the sliding window
+///
+/// AVLC uses a modulo-8 Go-Back-N ARQ. Both sides maintain:
+///
+/// - `send_seq` `N(S)`: the sequence number of the I-frame being sent.
+/// - `recv_seq` `N(R)`: a cumulative ACK — all I-frames with `N(S) < N(R)` have been
+///   received correctly. The sender may transmit up to 7 unacknowledged I-frames.
+///
+/// I-frames carry both; S-frames carry only `recv_seq` as a standalone ACK.
+///
+/// ## Poll/Final (P/F) bit
+///
+/// The same physical bit has different meanings depending on `role`:
+///
+/// | Frame role | Bit name | Meaning |
+/// |---|---|---|
+/// | `Command` | **Poll (P)** | Request immediate supervisory response from peer |
+/// | `Response` | **Final (F)** | This is the last response in a checkpoint sequence |
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub enum AvlcLcf {
+    /// Information frame (I-frame).
+    ///
+    /// Carries application payload (ACARS or X.25). The sender may have up to
+    /// 7 unacknowledged I-frames in flight simultaneously (modulo-8 window).
+    I {
+        /// Send sequence number `N(S)` of this I-frame (0–7).
+        ///
+        /// The receiver uses this to detect gaps and reorder out-of-sequence frames.
+        send_seq: u8,
+        /// Poll bit (P) when sent as a command; Final bit (F) as a response.
+        ///
+        /// `true` as a command requests the peer to respond immediately with its
+        /// current `recv_seq`. Typically set on the last I-frame of a burst.
+        poll: bool,
+        /// Receive sequence number `N(R)` — piggybacked cumulative ACK.
+        ///
+        /// Acknowledges all I-frames with `send_seq` in `[0, recv_seq)` modulo 8.
+        /// The remote sender may now slide its window forward accordingly.
+        recv_seq: u8,
+    },
+    /// Supervisory frame (S-frame).
+    ///
+    /// No payload. Sent when there is no I-frame available to piggyback the ACK
+    /// onto; also used for flow control (RNR) and retransmission requests (REJ/SREJ).
+    S {
+        /// Supervisory function — how the peer should react to `recv_seq`.
+        sfunc: SFunc,
+        /// Poll/Final bit — same semantics as in I-frames.
+        pf: bool,
+        /// Receive sequence number `N(R)` — see `AvlcLcf::I::recv_seq`.
+        recv_seq: u8,
+    },
+    /// Unnumbered frame (U-frame).
+    ///
+    /// No sequence numbers. Used for link setup and teardown:
+    ///
+    /// | Name  | Meaning |
+    /// |---|---|
+    /// | `SABM` | Set Asynchronous Balanced Mode — opens a connection |
+    /// | `UA`   | Unnumbered Acknowledgement — confirms SABM or DISC |
+    /// | `DM`   | Disconnected Mode — rejects or closes a connection |
+    /// | `DISC` | Disconnect — requests connection teardown |
+    /// | `XID`  | Exchange Identification — GSIF station capability negotiation |
+    /// | `FRMR` | Frame Reject — reports a framing error |
+    /// | `UI`   | Unnumbered Information — data without sequencing (rarely used in VDL2) |
+    U {
+        /// Human-readable name of the U-frame type (e.g. `"XID"`, `"SABM"`, `"UA"`).
+        name: String,
+        /// Raw 6-bit M-function field (bits 7:2 of the LCF byte after masking with `0x3B`).
+        ///
+        /// Identifies the U-frame command/response type at the bit level.
+        /// Prefer `name` for display; use `mfunc` for programmatic matching.
+        mfunc: u8,
+        /// Poll/Final bit — same semantics as in I- and S-frames.
+        pf: bool,
+    },
+}
+
+impl Serialize for AvlcLcf {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            AvlcLcf::I { .. } => "I",
+            AvlcLcf::S { .. } => "S",
+            AvlcLcf::U { .. } => "U",
+        })
+    }
+}
+
+// ─── DekuReader + DekuContainerRead + TryFrom for AvlcFrame ────────────────
+
+/// `AvlcFrame` implements `DekuReader`, `DekuContainerRead`, and `TryFrom<&[u8]>`
+/// manually because the frame layout requires FCS verification over the entire
+/// buffer and variable-length payload dispatch based on the LCF byte.
+///
+/// Use the standard deku entry point:
+/// ```text
+/// let (rest, frame) = AvlcFrame::from_bytes((buf, 0))?;  // returns remaining bytes
+/// let frame = AvlcFrame::try_from(buf)?;                  // consumes whole slice
+/// ```
+impl<'a, Ctx> DekuReader<'a, Ctx> for AvlcFrame {
+    fn from_reader_with_ctx<R: std::io::Read + std::io::Seek>(
+        reader: &mut deku::reader::Reader<R>,
+        _ctx: Ctx,
+    ) -> Result<Self, DekuError> {
+        // Read the 9 header bytes raw first — we need the original bytes for the
+        // FCS check since the HDLC address packing has overlapping bit assignments
+        // that make re-encoding from parsed fields unreliable.
+        let [d0, d1, d2, d3, s0, s1, s2, s3, lcf_byte] =
+            <[u8; 9]>::from_reader_with_ctx(reader, ())?;
+
+        let dst = AvlcAddr::from_raw([d0, d1, d2, d3]);
+        let src = AvlcAddr::from_raw([s0, s1, s2, s3]);
+
+        // Drain remaining bytes (payload + optional FCS) via the underlying reader.
+        let mut tail = Vec::<u8>::new();
+        <deku::reader::Reader<R> as AsMut<R>>::as_mut(reader)
+            .read_to_end(&mut tail)
+            .map_err(|e| DekuError::Io(e.kind()))?;
+
+        // FCS check: CRC over the full wire frame (original header bytes + tail).
+        let has_fcs = tail.len() >= 2;
+        let fcs_ok = has_fcs && {
+            let header = [d0, d1, d2, d3, s0, s1, s2, s3, lcf_byte];
+            let mut full = header.to_vec();
+            full.extend_from_slice(&tail);
+            crc16_ccitt(&full, 0xFFFF) == GOOD_FCS
+        };
+
+        let payload_bytes = if fcs_ok && has_fcs {
+            &tail[..tail.len() - 2]
+        } else {
+            &tail[..]
+        };
+
+        let lcf = parse_lcf(lcf_byte);
+        let role = if src.status {
+            FrameRole::Response
+        } else {
+            FrameRole::Command
+        };
+        let ag_status = if dst.addr_type.is_aircraft() {
+            Some(if dst.status {
+                AircraftGroundStatus::OnGround
+            } else {
+                AircraftGroundStatus::Airborne
+            })
+        } else {
+            None
+        };
+        let payload = if fcs_ok || !has_fcs {
+            match &lcf {
+                AvlcLcf::I { .. } => Some(decode_i_payload(payload_bytes, &src)),
+                AvlcLcf::U { mfunc, pf, .. } if *mfunc == 0x2B => {
+                    parse_xid(src.status, *pf, payload_bytes).map(|x| AvlcPayload::Xid(Box::new(x)))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        Ok(AvlcFrame {
+            dst,
+            src,
+            role,
+            ag_status,
+            lcf,
+            fcs_ok,
+            payload,
+        })
+    }
+}
+
+impl<'a> DekuContainerRead<'a> for AvlcFrame {
+    fn from_reader<R: std::io::Read + std::io::Seek>(
+        input: (&'a mut R, usize),
+    ) -> Result<(usize, Self), DekuError>
+    where
+        Self: Sized,
+    {
+        let mut reader = deku::reader::Reader::new(input.0);
+        let val = <Self as DekuReader<'_, ()>>::from_reader_with_ctx(&mut reader, ())?;
+        Ok((reader.bits_read, val))
+    }
+
+    fn from_bytes(input: (&'a [u8], usize)) -> Result<((&'a [u8], usize), Self), DekuError>
+    where
+        Self: Sized,
+    {
+        let buf = input.0;
+        let mut cursor = std::io::Cursor::new(buf);
+        let mut reader = deku::reader::Reader::new(&mut cursor);
+        let val = <Self as DekuReader<'_, ()>>::from_reader_with_ctx(&mut reader, ())?;
+        let bytes_read = reader.bits_read / 8;
+        Ok(((buf.get(bytes_read..).unwrap_or(&[]), 0), val))
+    }
+}
+
+impl TryFrom<&[u8]> for AvlcFrame {
+    type Error = DekuError;
+    fn try_from(buf: &[u8]) -> Result<Self, DekuError> {
+        <Self as DekuContainerRead>::from_bytes((buf, 0)).map(|(_, v)| v)
+    }
+}
+
+/// Parse an AVLC frame from raw bytes including the 2-byte FCS.
+///
+/// Thin wrapper around `AvlcFrame::try_from(buf)`. Prefer the deku idiom
+/// `AvlcFrame::try_from(buf)` or `AvlcFrame::from_bytes((buf, 0))` in new code.
+pub fn parse_avlc_frame(buf: &[u8]) -> DecodeResult<AvlcFrame> {
+    AvlcFrame::try_from(buf).map_err(|e| DecodeError::Deku(e.to_string()))
+}
+
+fn decode_i_payload(bytes: &[u8], src: &AvlcAddr) -> AvlcPayload {
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xFF && bytes[2] == 0x01 {
+        let direction = if src.is_aircraft() {
+            MessageDirection::AirToGround
+        } else {
+            MessageDirection::GroundToAir
+        };
+        match AcarsMessage::from_bytes_with_direction(&bytes[3..], direction) {
+            Ok(msg) => return AvlcPayload::Acars(Box::new(msg)),
+            Err(_) => return AvlcPayload::Unknown(bytes.to_vec()),
+        }
+    }
+    AvlcPayload::X25(parse_x25_packet(bytes))
+}
+
+fn parse_lcf(byte: u8) -> AvlcLcf {
+    if byte & 0x01 == 0 {
+        AvlcLcf::I {
+            send_seq: (byte >> 1) & 0x7,
+            poll: (byte >> 4) & 0x1 == 1,
+            recv_seq: (byte >> 5) & 0x7,
+        }
+    } else if byte & 0x03 == 0x01 {
+        let sfunc = match (byte >> 2) & 0x3 {
+            0 => SFunc::ReceiveReady,
+            1 => SFunc::ReceiveNotReady,
+            2 => SFunc::Reject,
+            _ => SFunc::SelectiveReject,
+        };
+        AvlcLcf::S {
+            sfunc,
+            pf: (byte >> 4) & 0x1 == 1,
+            recv_seq: (byte >> 5) & 0x7,
+        }
+    } else {
+        let mfunc_raw = byte >> 2;
+        let mfunc = mfunc_raw & 0x3b;
+        let pf = (mfunc_raw >> 2) & 0x1 == 1;
+        AvlcLcf::U {
+            name: u_frame_name(mfunc).to_string(),
+            mfunc,
+            pf,
+        }
+    }
+}
+
+fn u_frame_name(mfunc: u8) -> &'static str {
+    match mfunc {
+        0x00 => "UI",
+        0x03 => "DM",
+        0x10 => "DISC",
+        0x18 => "UA",
+        0x21 => "FRMR",
+        0x2B => "XID",
+        0x2C => "SABM",
+        0x38 => "TEST",
+        _ => "U",
     }
 }
 
@@ -236,183 +536,9 @@ fn reverse_bits(mut v: u32, numbits: u32) -> u32 {
     r >> (32 - numbits)
 }
 
-// ─── Link Control Field ─────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SFunc {
-    ReceiveReady,
-    ReceiveNotReady,
-    Reject,
-    SelectiveReject,
-}
-
-/// U-frame name lookup.
-fn u_frame_name(mfunc: u8) -> &'static str {
-    match mfunc {
-        0x00 => "UI",
-        0x03 => "DM",
-        0x10 => "DISC",
-        0x18 => "UA",
-        0x21 => "FRMR",
-        0x2B => "XID",
-        0x2C => "SABM",
-        0x38 => "TEST",
-        _ => "U",
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum AvlcLcf {
-    /// Information frame: carries payload.
-    I {
-        send_seq: u8,
-        poll: bool,
-        recv_seq: u8,
-    },
-    /// Supervisory frame: flow control, no payload.
-    S {
-        sfunc: SFunc,
-        pf: bool,
-        recv_seq: u8,
-    },
-    /// Unnumbered frame: connection management (XID, UA, DM, …).
-    U { name: String, mfunc: u8, pf: bool },
-}
-
-fn parse_lcf(byte: u8) -> AvlcLcf {
-    if byte & 0x01 == 0 {
-        // I-frame: [type:1][send_seq:3][poll:1][recv_seq:3]
-        AvlcLcf::I {
-            send_seq: (byte >> 1) & 0x7,
-            poll: (byte >> 4) & 0x1 == 1,
-            recv_seq: (byte >> 5) & 0x7,
-        }
-    } else if byte & 0x03 == 0x01 {
-        // S-frame: [type:2][sfunc:2][pf:1][recv_seq:3]
-        let sfunc = match (byte >> 2) & 0x3 {
-            0 => SFunc::ReceiveReady,
-            1 => SFunc::ReceiveNotReady,
-            2 => SFunc::Reject,
-            _ => SFunc::SelectiveReject,
-        };
-        AvlcLcf::S {
-            sfunc,
-            pf: (byte >> 4) & 0x1 == 1,
-            recv_seq: (byte >> 5) & 0x7,
-        }
-    } else {
-        // U-frame: [type:2][mfunc:6]
-        let mfunc_raw = byte >> 2;
-        let mfunc = mfunc_raw & 0x3b;
-        let pf = (mfunc_raw >> 2) & 0x1 == 1;
-        AvlcLcf::U {
-            name: u_frame_name(mfunc).to_string(),
-            mfunc,
-            pf,
-        }
-    }
-}
-
-// ─── Payload ────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AvlcPayload {
-    Acars(AcarsMessage),
-    X25(X25Packet),
-    Xid(XidMessage),
-    Unknown(Vec<u8>),
-}
-
-// ─── Frame ──────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AvlcFrame {
-    pub dst: AvlcAddr,
-    pub src: AvlcAddr,
-    /// "Command" or "Response" — from src address C/R status bit.
-    pub cr: String,
-    /// "Airborne" or "On ground" — from dst address A/G status bit.
-    pub ag_status: String,
-    pub lcf: AvlcLcf,
-    pub fcs_ok: bool,
-    /// Payload is `Some` only for I-frames (and XID U-frames) with a good FCS.
-    pub payload: Option<AvlcPayload>,
-}
-
-/// Parse an AVLC frame from raw bytes (including the 2-byte FCS at the end).
-///
-/// The bytes are the product of HDLC bit-destuffing and should include the FCS.
-/// The parser checks the FCS and sets `fcs_ok` accordingly.  For I-frames with
-/// a good FCS, the ACARS or X.25 payload is decoded.
-pub fn parse_avlc_frame(buf: &[u8]) -> DecodeResult<AvlcFrame> {
-    if buf.len() < MIN_AVLC_NO_FCS_LEN {
-        return Err(DecodeError::FrameTooShort(buf.len()));
-    }
-
-    let has_fcs = buf.len() >= MIN_AVLC_WITH_FCS_LEN;
-    let fcs_ok = has_fcs && crc16_ccitt(buf, 0xFFFF) == GOOD_FCS;
-
-    // Strip FCS bytes only when CRC verifies.
-    let content = if fcs_ok { &buf[..buf.len() - 2] } else { buf };
-
-    if content.len() < MIN_AVLC_NO_FCS_LEN {
-        return Err(DecodeError::FrameTooShort(buf.len()));
-    }
-
-    let dst = AvlcAddr::parse(content[0..4].try_into().unwrap());
-    let src = AvlcAddr::parse(content[4..8].try_into().unwrap());
-    let lcf = parse_lcf(content[8]);
-    let payload_bytes = &content[9..];
-
-    // C/R bit: from src.status (false = Command, true = Response).
-    let cr = if src.status { "Response" } else { "Command" }.to_string();
-    // A/G status: from dst.status (false = Airborne, true = On ground).
-    let ag_status = if dst.status { "On ground" } else { "Airborne" }.to_string();
-
-    let payload = if fcs_ok || !has_fcs {
-        match &lcf {
-            AvlcLcf::I { .. } => Some(decode_i_payload(payload_bytes, &src)),
-            AvlcLcf::U { mfunc, pf, .. } if *mfunc == 0x2B => {
-                // XID frame
-                parse_xid(src.status, *pf, payload_bytes).map(AvlcPayload::Xid)
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    Ok(AvlcFrame {
-        dst,
-        src,
-        cr,
-        ag_status,
-        lcf,
-        fcs_ok,
-        payload,
-    })
-}
-
-fn decode_i_payload(bytes: &[u8], src: &AvlcAddr) -> AvlcPayload {
-    // ACARS payload is identified by the 3-byte header 0xFF 0xFF 0x01.
-    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xFF && bytes[2] == 0x01 {
-        let direction = if src.is_aircraft() {
-            MessageDirection::AirToGround
-        } else {
-            MessageDirection::GroundToAir
-        };
-        match parse_acars_frame(&bytes[3..], direction) {
-            Ok(msg) => return AvlcPayload::Acars(msg),
-            Err(_) => return AvlcPayload::Unknown(bytes.to_vec()),
-        }
-    }
-    AvlcPayload::X25(parse_x25_packet(bytes))
-}
-
-// ─── CRC-16/CCITT ───────────────────────────────────────────────────────────
-
 /// CRC-16/CCITT (polynomial 0x1021), table-based, big-endian bit order.
-/// This is the variant used by AVLC (init=0xFFFF, good residual=0xF0B8).
+///
+/// Used by AVLC: init = 0xFFFF, good residual = `GOOD_FCS` (0xF0B8).
 fn crc16_ccitt(data: &[u8], init: u16) -> u16 {
     #[rustfmt::skip]
     static TABLE: [u16; 256] = [
