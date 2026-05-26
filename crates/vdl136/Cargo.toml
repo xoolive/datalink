@@ -27,3 +27,8 @@ tokio = { version = "1", features = ["full"] }
 toml = "0.9"
 url = "2.5"
 futures-util = "0.3"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+http = "1"
+tokio-rustls = { version = "0.26", features = ["ring"] }
+rustls = { version = "0.23", features = ["ring"] }
+webpki-roots = "0.26"

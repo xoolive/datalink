@@ -1,11 +1,15 @@
 mod source;
 
+use acars::decode::acars::MessageDirection;
 use acars::decode::avlc::parse_avlc_frame;
+use acars::decode::payload::arinc622;
 use acars::demod::resample::{maybe_resample, ResampleAdapter};
 use acars::demod::vdl2::{Vdl2Channel, SYMBOL_RATE};
 use clap::{Parser, Subcommand};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
+use http::Uri;
 use serde::Deserialize;
+use serde_json::Value;
 use source::{Address, Source, DEFAULT_CHUNK_SIZE};
 use std::fs::{create_dir_all, File};
 use std::io::{BufWriter, Write};
@@ -66,7 +70,7 @@ struct Options {
     #[arg(long, num_args = 1..)]
     #[serde(default)]
     channel: Option<Vec<u32>>,
-    /// Source URLs: file://, rtlsdr://, airspy://, hackrf://, soapy://
+    /// Source URLs: file://, rtlsdr://, airspy://, hackrf://, soapy://, airframes://, ws://, wss://
     #[serde(default)]
     sources: Vec<Source>,
     /// Legacy subcommands, e.g. `vdl136 file --file capture.cu8`
@@ -331,6 +335,10 @@ async fn decode_source(
     mut reject_writer: Option<&mut BufWriter<File>>,
     mut candidate_writer: Option<&mut BufWriter<File>>,
 ) -> anyhow::Result<DecodeStats> {
+    if matches!(src.address, Address::Websocket { .. }) {
+        return decode_websocket_source(src, source_index, output).await;
+    }
+
     let center_freq = src.center_freq();
     let raw_sample_rate = src.sample_rate();
     let channels = src.channels();
@@ -493,8 +501,268 @@ async fn decode_source(
     Ok(stats)
 }
 
+async fn decode_websocket_source(
+    src: &Source,
+    source_index: usize,
+    mut output: Option<&mut BufWriter<File>>,
+) -> anyhow::Result<DecodeStats> {
+    let Address::Websocket {
+        websocket,
+        token,
+        events,
+    } = &src.address
+    else {
+        unreachable!("decode_websocket_source called for non-websocket source")
+    };
+    let selected_events = events.clone().unwrap_or_else(|| vec!["message".to_string()]);
+    let capture_all = selected_events.iter().any(|event| event == "*");
+    let mut request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(websocket.as_str())?;
+    request.headers_mut().insert(
+        "Origin",
+        tokio_tungstenite::tungstenite::http::HeaderValue::from_static("https://app.airframes.io"),
+    );
+    let mut ws = websocket_connect(websocket, request).await?;
+    while let Some(message) = ws.next().await {
+        let message = message?;
+        if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+            if text.starts_with('0') {
+                break;
+            }
+        }
+    }
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(format!(
+        "40{}",
+        serde_json::to_string(&serde_json::json!({ "token": token.as_deref().unwrap_or("") }))?
+    )))
+    .await?;
+
+    let mut stats = DecodeStats::default();
+    while let Some(message) = ws.next().await {
+        let message = message?;
+        match message {
+            tokio_tungstenite::tungstenite::Message::Text(text) => {
+                for packet in text.split('\u{1e}') {
+                    if packet == "2" {
+                        ws.send(tokio_tungstenite::tungstenite::Message::Text("3".to_string()))
+                            .await?;
+                        continue;
+                    }
+                    let Some((event, payload)) = parse_socketio_event(packet) else {
+                        continue;
+                    };
+                    if !capture_all && !selected_events.iter().any(|wanted| wanted == &event) {
+                        continue;
+                    }
+                    stats.avlc_ok += 1;
+                    let record = websocket_record(src, source_index, &event, payload);
+                    let line = serde_json::to_string(&record)?;
+                    println!("{line}");
+                    if let Some(w) = output.as_mut() {
+                        writeln!(w, "{line}")?;
+                    }
+                }
+            }
+            tokio_tungstenite::tungstenite::Message::Ping(payload) => {
+                ws.send(tokio_tungstenite::tungstenite::Message::Pong(payload))
+                    .await?;
+            }
+            tokio_tungstenite::tungstenite::Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    Ok(stats)
+}
+
+fn parse_socketio_event(packet: &str) -> Option<(String, Value)> {
+    let json = packet.strip_prefix("42")?;
+    let value: Value = serde_json::from_str(json).ok()?;
+    let array = value.as_array()?;
+    let event = array.first()?.as_str()?.to_string();
+    let payload = if array.len() == 2 {
+        array[1].clone()
+    } else {
+        Value::Array(array.iter().skip(1).cloned().collect())
+    };
+    Some((event, payload))
+}
+
+fn websocket_record(src: &Source, source_index: usize, event: &str, payload: Value) -> Value {
+    let raw = payload.clone();
+    let decoded = if event == "message" {
+        decode_airframes_message(&payload)
+    } else {
+        None
+    };
+    serde_json::json!({
+        "source": src.label(),
+        "source_index": source_index,
+        "bearer": "websocket",
+        "event": event,
+        "raw": raw,
+        "decoded": decoded,
+    })
+}
+
+fn decode_airframes_message(payload: &Value) -> Option<Value> {
+    let row = if payload.is_array() {
+        payload.as_array()?.first()?
+    } else {
+        payload
+    };
+    let text = row.get("text").and_then(Value::as_str);
+    let label = row.get("label").and_then(Value::as_str).unwrap_or_default();
+    let link_direction = row.get("link_direction").and_then(Value::as_str);
+    let direction = infer_airframes_direction(label, link_direction);
+    let base = serde_json::json!({
+        "airframes_id": row.get("id").cloned().unwrap_or(Value::Null),
+        "label": label,
+        "tail": row.get("tail").cloned().unwrap_or(Value::Null),
+        "text": text,
+        "link_direction": link_direction,
+    });
+    let Some(text) = text else {
+        return Some(serde_json::json!({
+            "decoder": "airframes_row",
+            "ok": false,
+            "reason": "missing text",
+            "fields": base,
+        }));
+    };
+    let Some(normalized) = normalize_arinc622_text(text) else {
+        return Some(serde_json::json!({
+            "decoder": "airframes_row",
+            "ok": false,
+            "reason": "no arinc622 imi in text",
+            "fields": base,
+        }));
+    };
+    match arinc622::parse_with_direction(&normalized, direction) {
+        Ok(message) => Some(serde_json::json!({
+            "decoder": "arinc622",
+            "ok": true,
+            "fields": base,
+            "message": message,
+        })),
+        Err(err) => Some(serde_json::json!({
+            "decoder": "arinc622",
+            "ok": false,
+            "fields": base,
+            "error": err.to_string(),
+            "normalized_text": normalized,
+        })),
+    }
+}
+
+fn normalize_arinc622_text(text: &str) -> Option<String> {
+    if text.starts_with('/') {
+        return has_arinc622_imi(text).then(|| text.to_string());
+    }
+    for token in text.split_whitespace().rev() {
+        if has_arinc622_imi(token) {
+            return Some(format!("/{token}"));
+        }
+    }
+    None
+}
+
+fn has_arinc622_imi(text: &str) -> bool {
+    [".AT1.", ".CR1.", ".CC1.", ".DR1.", ".ADS."]
+        .iter()
+        .any(|needle| text.contains(needle))
+}
+
+fn infer_airframes_direction(label: &str, link_direction: Option<&str>) -> MessageDirection {
+    match label {
+        "AA" => MessageDirection::GroundToAir,
+        "BA" => MessageDirection::AirToGround,
+        _ => match link_direction {
+            Some("uplink") => MessageDirection::GroundToAir,
+            Some("downlink") => MessageDirection::AirToGround,
+            _ => MessageDirection::Unknown,
+        },
+    }
+}
+
+/// Connect to a websocket, routing through an HTTP CONNECT proxy if
+/// HTTPS_PROXY / https_proxy is set in the environment (matching the behaviour
+/// of the Python collection script).
+async fn websocket_connect(
+    url: &str,
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+) -> anyhow::Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+> {
+    let proxy_env = std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .ok();
+
+    if let Some(proxy_url) = proxy_env {
+        let proxy_uri: Uri = proxy_url.parse()?;
+        let proxy_host = proxy_uri
+            .host()
+            .ok_or_else(|| anyhow::anyhow!("proxy URL has no host"))?
+            .to_string();
+        let proxy_port = proxy_uri.port_u16().unwrap_or(8080);
+        let target_uri: Uri = url.parse()?;
+        let target_host = target_uri
+            .host()
+            .ok_or_else(|| anyhow::anyhow!("target URL has no host"))?
+            .to_string();
+        let target_port = target_uri.port_u16().unwrap_or(443);
+        let connect_target = format!("{target_host}:{target_port}");
+        let connect_req = format!(
+            "CONNECT {connect_target} HTTP/1.1\r\nHost: {connect_target}\r\nProxy-Connection: keep-alive\r\n\r\n"
+        );
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut tcp =
+            tokio::net::TcpStream::connect(format!("{proxy_host}:{proxy_port}")).await?;
+        tcp.write_all(connect_req.as_bytes()).await?;
+        let mut buf = [0u8; 4096];
+        let mut n = 0usize;
+        loop {
+            let r = tcp.read(&mut buf[n..]).await?;
+            if r == 0 { anyhow::bail!("proxy closed during CONNECT"); }
+            n += r;
+            if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") { break; }
+            if n >= buf.len() { anyhow::bail!("proxy CONNECT response too large"); }
+        }
+        let status_line = std::str::from_utf8(&buf[..n])?.lines().next().unwrap_or("").to_string();
+        if !status_line.contains("200") {
+            anyhow::bail!("proxy CONNECT failed: {status_line}");
+        }
+
+        // TLS-wrap the tunnelled TCP stream with rustls, then hand to tungstenite.
+        let root_store = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        // Install a CryptoProvider if none has been installed yet (required by rustls 0.23+).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let tls_config = std::sync::Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        );
+        let connector = tokio_rustls::TlsConnector::from(tls_config.clone());
+        let domain = rustls::pki_types::ServerName::try_from(target_host.clone())
+            .map_err(|e| anyhow::anyhow!("invalid TLS hostname {target_host}: {e}"))?;
+        let tls = connector.connect(domain, tcp).await?;
+        // Wrap the TlsStream in MaybeTlsStream so the return type matches the non-proxy path.
+        let maybe_tls = tokio_tungstenite::MaybeTlsStream::Rustls(tls);
+        let (ws, _) = tokio_tungstenite::client_async_with_config(
+            request,
+            maybe_tls,
+            None,
+        )
+        .await?;
+        Ok(ws)
+    } else {
+        Ok(tokio_tungstenite::connect_async(request).await?.0)
+    }
+}
+
 async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
-    use desperado::{DeviceConfig, IqAsyncSource};
+    use desperado::IqAsyncSource;
     let center_freq = src.center_freq();
     let sample_rate = src.sample_rate();
     match &src.address {
@@ -531,7 +799,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 bias_tee: src.bias_tee.unwrap_or(false),
                 freq_correction_ppm: 0,
             };
-            Ok(IqAsyncSource::from_device_config(&DeviceConfig::RtlSdr(cfg)).await?)
+            Ok(IqAsyncSource::from_device_config(&desperado::DeviceConfig::RtlSdr(cfg)).await?)
         }
         #[cfg(feature = "airspy")]
         Address::Airspy { device, serial } => {
@@ -552,7 +820,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 vga_gain: None,
                 gain_mode: desperado::airspy::AirspyGainMode::Sensitivity,
             };
-            Ok(IqAsyncSource::from_device_config(&DeviceConfig::Airspy(cfg)).await?)
+            Ok(IqAsyncSource::from_device_config(&desperado::DeviceConfig::Airspy(cfg)).await?)
         }
         #[cfg(feature = "hackrf")]
         Address::Hackrf { device } => {
@@ -564,7 +832,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 amp_enable: src.amp_enable.unwrap_or(false),
                 bias_tee: src.bias_tee.unwrap_or(false),
             };
-            Ok(IqAsyncSource::from_device_config(&DeviceConfig::HackRf(cfg)).await?)
+            Ok(IqAsyncSource::from_device_config(&desperado::DeviceConfig::HackRf(cfg)).await?)
         }
         #[cfg(feature = "soapy")]
         Address::Soapy { soapy } => {
@@ -576,7 +844,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 gain: src.gain(49.6),
                 bias_tee: src.bias_tee.unwrap_or(false),
             };
-            Ok(IqAsyncSource::from_device_config(&DeviceConfig::Soapy(cfg)).await?)
+            Ok(IqAsyncSource::from_device_config(&desperado::DeviceConfig::Soapy(cfg)).await?)
         }
         #[allow(unreachable_patterns)]
         _ => Err(anyhow::anyhow!("source type is not enabled in this build")),
@@ -605,6 +873,7 @@ fn hackrf_gain(src: &Source) -> desperado::Gain {
     }
 }
 
+#[cfg(feature = "airspy")]
 fn parse_airspy_serial(value: &str) -> anyhow::Result<u64> {
     if let Some(hex) = value
         .strip_prefix("0x")

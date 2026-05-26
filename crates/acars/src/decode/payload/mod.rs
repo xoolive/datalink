@@ -53,23 +53,23 @@ pub enum AcarsAppPayload {
     Arinc622(Arinc622Message),
 
     /// MIAM (Management of Integrated Avionics Maintenance) — label `MA` or `H1/T1`.
-    #[serde(rename="MIAM")]
+    #[serde(rename = "MIAM")]
     Miam(MiamMessage),
 
     /// OHMA (Boeing 737 MAX health monitoring) — label `H1` sublabel `T1`.
-    #[serde(rename="OHMA")]
+    #[serde(rename = "OHMA")]
     Ohma(OhmaMessage),
 
     /// ACARS `SA` Media Advisory — link established/lost notification.
-    #[serde(rename="SA")]
+    #[serde(rename = "SA")]
     MediaAdvisory(MediaAdvisory),
 
     /// ACARS `SQ` squitter / ground-station broadcast.
-    #[serde(rename="SQ")]
+    #[serde(rename = "SQ")]
     Squitter(SquitterMessage),
 
     /// ACARS label `80` AOC position/event report.
-    #[serde(rename="AOC80")]
+    #[serde(rename = "AOC80")]
     AocReport(AocMessage),
 
     /// Non-empty `text` with no structured decoder.

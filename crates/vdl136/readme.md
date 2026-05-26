@@ -12,6 +12,8 @@ vdl136 airspy://0?sample_rate=6000000&channel=136875000
 vdl136 hackrf://0?center_freq=136850000&rf_amp=true&if_gain=32&bb_gain=20&channel=136875000&channel=136975000
 vdl136 soapy://driver=rtlsdr?gain=40
 vdl136 file:///data/vdl2.cu8?format=cu8&sample_rate=1050000&center_freq=136850000
+vdl136 'airframes://live?event=message'
+vdl136 'wss://ws.airframes.io/socket.io/?EIO=4&transport=websocket'
 ```
 
 The legacy file form still works:
@@ -30,6 +32,7 @@ Common query parameters:
 - HackRF-specific gains: `amp_enable`/`rf_amp`, `lna_gain`/`if_gain`, `vga_gain`/`bb_gain`.
 - `format`: file IQ format (`cu8`, `cs8`, `cs16`, `cf32`).
 - `name`: source name added to output JSON.
+- WebSocket-specific: `token` for the Socket.IO auth payload and `event`/`events` for comma-separated Socket.IO event filters (`message` by default, `*` for all).
 
 Defaults:
 
@@ -88,6 +91,11 @@ Decoded AVLC frames are emitted as JSON lines. `vdl136` adds source and timing m
 - `timestamp_unix`
 - `raw_frame_hex`
 - demod quality fields: `signal_dbfs`, `noise_dbfs`, `snr_db`, `ppm_error`
+
+WebSocket sources emit JSON lines with both forms preserved:
+
+- `raw`: the original Socket.IO/Airframes event payload.
+- `decoded`: the Rust-side interpretation. For Airframes `message` events this includes selected row fields and, when the row text contains an ARINC 622 envelope, the native decoded ARINC 622/CPDLC/ADS-C payload. Rows that cannot be decoded still keep `raw` and include `decoded.ok = false` with a reason/error.
 
 Use `--output path.jsonl` to also write a JSONL copy to disk.
 

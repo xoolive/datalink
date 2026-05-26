@@ -495,3 +495,139 @@ fn end_to_end_acars_h1_arinc622_adsc_json_chain() {
         other => panic!("Expected Adsc payload, got {:?}", other),
     }
 }
+
+#[test]
+fn cpdlc_airframes_fixtures_parse_shallow() {
+    let data = include_str!("fixtures/cpdlc_airframes_1h.jsonl");
+    let mut count = 0usize;
+    let mut interpreted = 0usize;
+    for line in data.lines().filter(|line| !line.trim().is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row JSON");
+        let payload_hex = row["payload_hex"].as_str().expect("payload_hex");
+        let msg = acars::decode::payload::arinc622::cpdlc::parse_cpdlc_payload_hex(payload_hex)
+            .unwrap_or_else(|e| panic!("CPDLC fixture failed: {e}; row={line}"));
+        assert_eq!(msg.payload_len_bytes * 2, payload_hex.len());
+        if msg.downlink.is_some() || msg.uplink.is_some() {
+            interpreted += 1;
+        }
+        count += 1;
+    }
+    assert_eq!(count, 260);
+    assert!(
+        interpreted > 200,
+        "only {interpreted}/{count} fixtures interpreted"
+    );
+}
+
+#[test]
+fn cpdlc_24h_unsupported_body_regression_fixtures_decode() {
+    use acars::decode::payload::arinc622::{parse_with_direction, Payload};
+    use acars::decode::payload::arinc622::cpdlc::CpdlcElementBody;
+
+    let data = include_str!("fixtures/cpdlc_airframes_24h_unsupported_bodies.jsonl");
+    let mut rows = 0usize;
+    for line in data.lines().filter(|line| !line.trim().is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row JSON");
+        let expected = row["expected_element"].as_str().expect("expected_element");
+        let label = row["label"].as_str().unwrap_or_default();
+        let text = row["text"].as_str().expect("text");
+        let direction = match label {
+            "AA" => MessageDirection::GroundToAir,
+            "BA" => MessageDirection::AirToGround,
+            "H1" if text.contains("/AA ") => MessageDirection::GroundToAir,
+            "H1" if text.contains("/BA ") => MessageDirection::AirToGround,
+            _ => match row["link_direction"].as_str() {
+                Some("uplink") => MessageDirection::GroundToAir,
+                Some("downlink") => MessageDirection::AirToGround,
+                _ => MessageDirection::Unknown,
+            },
+        };
+        let normalized = normalize_arinc622_fixture_text(text);
+        let message = parse_with_direction(&normalized, direction)
+            .unwrap_or_else(|e| panic!("failed to parse {expected}: {e}; row={line}"));
+        let Payload::Cpdlc(cpdlc) = message.payload else {
+            panic!("{expected}: expected CPDLC payload");
+        };
+        let summaries = [cpdlc.uplink.as_ref(), cpdlc.downlink.as_ref()];
+        let element = summaries
+            .into_iter()
+            .flatten()
+            .flat_map(|summary| summary.elements.iter())
+            .find(|element| element.name == expected)
+            .unwrap_or_else(|| panic!("{expected}: element not found; row={line}"));
+        assert!(element.body.is_some(), "{expected}: body was not decoded");
+        assert!(
+            !matches!(element.body, Some(CpdlcElementBody::Unsupported)),
+            "{expected}: body is still unsupported"
+        );
+        if expected == "dM48PositionReport" {
+            assert!(
+                matches!(element.body, Some(CpdlcElementBody::PositionReport(_))),
+                "dM48PositionReport should decode as a structured position report"
+            );
+        }
+        if expected == "dM40RouteClearance" {
+            assert!(
+                matches!(element.body, Some(CpdlcElementBody::RouteClearance(_))),
+                "dM40RouteClearance should decode as a structured route clearance"
+            );
+        }
+        rows += 1;
+    }
+    assert_eq!(rows, 16);
+}
+
+#[test]
+fn cpdlc_control_messages_decode() {
+    use acars::decode::payload::arinc622::{parse_with_direction, Payload};
+    use acars::decode::payload::arinc622::cpdlc::CpdlcControlMessage;
+
+    let cases = [
+        (
+            "/RGNCAYA.CR1.A7-BTD20578128EB59B31AA01F",
+            MessageDirection::GroundToAir,
+            "connect_request",
+        ),
+        (
+            "/USADCXA.CC1.N7800861055BF6491093E2",
+            MessageDirection::AirToGround,
+            "connect_confirm",
+        ),
+        (
+            "/USADCXA.DR1.N900DU3AED",
+            MessageDirection::AirToGround,
+            "disconnect_request",
+        ),
+    ];
+
+    for (text, direction, expected) in cases {
+        let message = parse_with_direction(text, direction)
+            .unwrap_or_else(|e| panic!("control message failed: {e}; text={text}"));
+        let Payload::Cpdlc(cpdlc) = message.payload else {
+            panic!("expected CPDLC payload for {text}");
+        };
+        match (expected, cpdlc.control.as_ref()) {
+            ("connect_request", Some(CpdlcControlMessage::ConnectRequest { message })) => {
+                assert!(message.is_some(), "CR1 should carry a decoded uplink message");
+            }
+            ("connect_confirm", Some(CpdlcControlMessage::ConnectConfirm { .. })) => {}
+            ("disconnect_request", Some(CpdlcControlMessage::DisconnectRequest)) => {}
+            _ => panic!("wrong control decode for {text}: {:?}", cpdlc.control),
+        }
+    }
+}
+
+fn normalize_arinc622_fixture_text(text: &str) -> String {
+    if text.starts_with('/') {
+        return text.to_string();
+    }
+    for token in text.split_whitespace().rev() {
+        if [".AT1.", ".CR1.", ".CC1.", ".DR1.", ".ADS."]
+            .iter()
+            .any(|needle| token.contains(needle))
+        {
+            return format!("/{token}");
+        }
+    }
+    format!("/{text}")
+}

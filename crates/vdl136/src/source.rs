@@ -7,7 +7,7 @@ pub const DEFAULT_SAMPLE_RATE: u32 = 1_050_000;
 pub const DEFAULT_CHANNELS: &[u32] = &[136_875_000, 136_975_000];
 pub const DEFAULT_CHUNK_SIZE: usize = 65_536;
 
-use desperado::{Gain, IqFormat};
+use desperado::IqFormat;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", untagged)]
@@ -32,6 +32,13 @@ pub enum Address {
     #[cfg(feature = "soapy")]
     Soapy {
         soapy: String,
+    },
+    Websocket {
+        websocket: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        events: Option<Vec<String>>,
     },
 }
 
@@ -122,6 +129,7 @@ impl Source {
             Address::Hackrf { device } => format!("hackrf:{}", device.unwrap_or(0)),
             #[cfg(feature = "soapy")]
             Address::Soapy { soapy } => format!("soapy:{soapy}"),
+            Address::Websocket { websocket, .. } => format!("websocket:{websocket}"),
         }
     }
 
@@ -133,8 +141,11 @@ impl Source {
             .unwrap_or(IqFormat::Cu8)
     }
 
-    pub fn gain(&self, default: f64) -> Gain {
-        self.gain.map(Gain::Manual).unwrap_or(Gain::Manual(default))
+    #[cfg(feature = "sdr")]
+    pub fn gain(&self, default: f64) -> desperado::Gain {
+        self.gain
+            .map(desperado::Gain::Manual)
+            .unwrap_or(desperado::Gain::Manual(default))
     }
 }
 
@@ -215,6 +226,16 @@ impl FromStr for Source {
             "soapy" => Address::Soapy {
                 soapy: url.host_str().unwrap_or("").to_string(),
             },
+            "ws" | "wss" => Address::Websocket {
+                websocket: s.to_string(),
+                token: None,
+                events: None,
+            },
+            "airframes" => Address::Websocket {
+                websocket: "wss://ws.airframes.io/socket.io/?EIO=4&transport=websocket".to_string(),
+                token: None,
+                events: None,
+            },
             other => return Err(format!("unsupported source scheme: {other}")),
         };
 
@@ -250,6 +271,23 @@ impl FromStr for Source {
                     "lna_gain" | "if_gain" => source.lna_gain = value.parse::<f64>().ok(),
                     "vga_gain" | "bb_gain" => source.vga_gain = value.parse::<f64>().ok(),
                     "format" | "iq_format" => source.format = Some(value.into_owned()),
+                    "token" => {
+                        if let Address::Websocket { token, .. } = &mut source.address {
+                            *token = Some(value.into_owned());
+                        }
+                    }
+                    "event" | "events" => {
+                        if let Address::Websocket { events, .. } = &mut source.address {
+                            let parsed: Vec<String> = value
+                                .split(',')
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
+                                .collect();
+                            if !parsed.is_empty() {
+                                *events = Some(parsed);
+                            }
+                        }
+                    }
                     _ if !key.is_empty() && value.is_empty() => {
                         source.name = Some(key.into_owned())
                     }
@@ -347,5 +385,22 @@ channels = [136875000, 136975000]
 "#;
         let src: Source = toml::from_str(text).unwrap();
         assert_eq!(src.channels(), vec![136_875_000, 136_975_000]);
+    }
+
+    #[test]
+    fn parse_airframes_websocket_source() {
+        let src: Source = "airframes://live?event=message&token=test".parse().unwrap();
+        match src.address {
+            Address::Websocket {
+                websocket,
+                token,
+                events,
+            } => {
+                assert!(websocket.starts_with("wss://ws.airframes.io/"));
+                assert_eq!(token.as_deref(), Some("test"));
+                assert_eq!(events, Some(vec!["message".to_string()]));
+            }
+            _ => panic!("expected websocket"),
+        }
     }
 }

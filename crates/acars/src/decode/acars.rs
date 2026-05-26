@@ -425,7 +425,10 @@ fn decode_acars_bytes(buf: &[u8], direction: MessageDirection) -> DecodeResult<A
     let txt;
 
     let app = if !txt_after_sublabel.is_empty() && txt_after_sublabel[0] == b'/' {
-        match crate::decode::payload::arinc622::parse(&ascii_string(txt_after_sublabel)) {
+        match crate::decode::payload::arinc622::parse_with_direction(
+            &ascii_string(txt_after_sublabel),
+            direction,
+        ) {
             Ok(message) => {
                 txt = String::new();
                 AcarsAppPayload::Arinc622(message)

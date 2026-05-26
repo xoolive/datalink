@@ -1,4 +1,5 @@
 pub mod adsc;
+pub mod cpdlc;
 
 use deku::ctx::Order;
 use deku::no_std_io::{Read, Seek};
@@ -6,6 +7,7 @@ use deku::prelude::*;
 use deku::reader::Reader;
 use serde::{Deserialize, Serialize};
 
+use crate::decode::acars::MessageDirection;
 use crate::decode::payload::PayloadError;
 use crate::decode::{DecodeError, DecodeResult};
 
@@ -83,8 +85,8 @@ pub struct Message {
 pub enum Payload {
     /// ADS-C message with fully decoded tag list.
     Adsc(adsc::AdscMessage),
-    /// FANS-1/A CPDLC message — raw hex payload, awaiting ASN.1 UPER decoder.
-    Cpdlc { payload_hex: String },
+    /// FANS-1/A CPDLC message — shallow decoded header/element plus raw hex.
+    Cpdlc(Box<cpdlc::CpdlcMessage>),
     /// AOC message (`AB1`) — raw hex payload.
     Aoc { payload_hex: String },
     /// Unrecognised IMI — raw hex payload preserved for diagnostics.
@@ -175,22 +177,37 @@ fn read_tail<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Tail, DekuError> 
 }
 
 fn split_registration_and_payload(tail: &str) -> Result<Tail, String> {
-    const MIN_HEX_BYTES: usize = 6;
-    for i in 0..tail.len() {
+    // Disconnect/control messages may carry only a CRC after registration,
+    // while short CPDLC messages can be 3 payload bytes plus 2 CRC bytes. Keep
+    // preferring six-character registrations so hex-looking tails like JA797A
+    // still split correctly.
+    const MIN_HEX_BYTES: usize = 2;
+    const MIN_REG_LEN: usize = 2;
+    const MAX_REG_LEN: usize = 8;
+
+    // Registrations often end in hex-looking characters (e.g. JA797A, N29968),
+    // but most aircraft registrations in ARINC 622 samples are six characters.
+    // Prefer a six-character split when it leaves a valid hex payload, then fall
+    // back to the first valid split to avoid swallowing payload bytes.
+    let mut first_valid = None;
+    for i in MIN_REG_LEN..=tail.len().min(MAX_REG_LEN) {
         let remaining = &tail[i..];
         if remaining.len() >= MIN_HEX_BYTES * 2
             && remaining.len().is_multiple_of(2)
             && remaining.chars().all(|c| c.is_ascii_hexdigit())
-            && remaining
-                .chars()
-                .take(MIN_HEX_BYTES * 2)
-                .all(|c| c.is_ascii_hexdigit())
         {
-            return Ok(Tail {
-                registration: tail[..i].to_string(),
-                payload_hex_full: remaining.to_string(),
-            });
+            if i == 6 {
+                first_valid = Some(i);
+                break;
+            }
+            first_valid.get_or_insert(i);
         }
+    }
+    if let Some(i) = first_valid {
+        return Ok(Tail {
+            registration: tail[..i].to_string(),
+            payload_hex_full: tail[i..].to_string(),
+        });
     }
     Err("could not find hex payload after registration".to_string())
 }
@@ -205,6 +222,11 @@ impl TryFrom<&str> for Message {
 
 /// Parse and dispatch an ARINC 622 envelope.
 pub fn parse(text: &str) -> DecodeResult<Message> {
+    parse_with_direction(text, MessageDirection::Unknown)
+}
+
+/// Parse and dispatch an ARINC 622 envelope with known ACARS direction.
+pub fn parse_with_direction(text: &str, direction: MessageDirection) -> DecodeResult<Message> {
     let text = text.trim();
     let (_, raw) = RawMessage::from_bytes((text.as_bytes(), 0))
         .map_err(|e| DecodeError::InvalidPayload(PayloadError::Arinc622(e.to_string())))?;
@@ -221,10 +243,14 @@ pub fn parse(text: &str) -> DecodeResult<Message> {
     }
 
     let payload_hex_full = raw.tail.payload_hex_full;
-    if payload_hex_full.len() < 8 || !payload_hex_full.len().is_multiple_of(2) {
+    let min_payload_hex_len = match raw.imi {
+        Imi::Dr1 => 4,
+        _ => 8,
+    };
+    if payload_hex_full.len() < min_payload_hex_len || !payload_hex_full.len().is_multiple_of(2) {
         return Err(DecodeError::InvalidPayload(PayloadError::Arinc622(
             format!(
-                "payload must be even length and >= 8, got {}",
+                "payload must be even length and >= {min_payload_hex_len}, got {}",
                 payload_hex_full.len()
             ),
         )));
@@ -243,9 +269,21 @@ pub fn parse(text: &str) -> DecodeResult<Message> {
             registration: raw.tail.registration.clone(),
             tags: adsc::parse_adsc_payload_hex(payload_no_crc)?,
         }),
-        Imi::At1 | Imi::Cr1 | Imi::Cc1 | Imi::Dr1 => Payload::Cpdlc {
-            payload_hex: payload_no_crc.to_string(),
-        },
+        Imi::At1 => Payload::Cpdlc(Box::new(
+            cpdlc::parse_cpdlc_payload_hex_with_direction(payload_no_crc, direction)?,
+        )),
+        Imi::Cr1 => Payload::Cpdlc(Box::new(cpdlc::parse_cpdlc_control_payload_hex(
+            payload_no_crc,
+            cpdlc::CpdlcControlKind::ConnectRequest,
+        )?)),
+        Imi::Cc1 => Payload::Cpdlc(Box::new(cpdlc::parse_cpdlc_control_payload_hex(
+            payload_no_crc,
+            cpdlc::CpdlcControlKind::ConnectConfirm,
+        )?)),
+        Imi::Dr1 => Payload::Cpdlc(Box::new(cpdlc::parse_cpdlc_control_payload_hex(
+            payload_no_crc,
+            cpdlc::CpdlcControlKind::DisconnectRequest,
+        )?)),
         Imi::Ab1 => Payload::Aoc {
             payload_hex: payload_no_crc.to_string(),
         },
@@ -288,7 +326,7 @@ mod tests {
         let msg = parse(text).expect("should parse");
         assert_eq!(msg.imi, Imi::Cr1);
         assert_eq!(msg.registration, "N856DN");
-        assert!(matches!(msg.payload, Payload::Cpdlc { .. }));
+        assert!(matches!(msg.payload, Payload::Cpdlc(_)));
     }
 
     #[test]
@@ -341,7 +379,7 @@ mod tests {
         let text = "/ATLTWXA.CR1.N856DN203A3AA8E5C1A9323EDD";
         let msg = parse(text).expect("should parse");
         match msg.payload {
-            Payload::Cpdlc { payload_hex } => assert_eq!(payload_hex, "203A3AA8E5C1A932"),
+            Payload::Cpdlc(cpdlc) => assert_eq!(cpdlc.payload_hex, "203A3AA8E5C1A932"),
             other => panic!("expected Cpdlc, got {other:?}"),
         }
     }
