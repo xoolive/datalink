@@ -16,6 +16,7 @@ pub struct AdscMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AdscTag {
+    // ---- downlink (aircraft → ground) tags ----
     Acknowledgement { contract_number: u8 },
     NegativeAcknowledgement(AdscNegativeAcknowledgement),
     NoncomplianceNotification(AdscNoncomplianceNotification),
@@ -34,6 +35,36 @@ pub enum AdscTag {
     WaypointChangeEvent(AdscBasicReport),
     IntermediateProjection(AdscIntermediateProjection),
     FixedProjection(AdscFixedProjection),
+    // ---- uplink (ground → aircraft) tags ----
+    CancelAllContracts,
+    CancelContract { contract_number: u8 },
+    PeriodicContractRequest(AdscContractRequest),
+    EventContractRequest(AdscContractRequest),
+    EmergencyPeriodicContractRequest(AdscContractRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdscContractRequest {
+    pub contract_number: u8,
+    pub groups: Vec<AdscContractGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", tag = "type", content = "value")]
+pub enum AdscContractGroup {
+    ReportInterval { interval_secs: u32 },
+    FlightId { modulus: u8 },
+    PredictedRoute { modulus: u8 },
+    EarthReferenceData { modulus: u8 },
+    AirReferenceData { modulus: u8 },
+    MeteoData { modulus: u8 },
+    AirframeId { modulus: u8 },
+    LateralDeviationChange { threshold_nm: f64 },
+    VerticalSpeedChange { threshold_ft_per_min: i32 },
+    AltitudeRange { ceiling_ft: i32, floor_ft: i32 },
+    ReportWaypointChanges,
+    AircraftIntentData { modulus: u8, projection_time_mins: u8 },
+    Unknown { tag: u8 },
 }
 
 impl AdscTag {
@@ -57,6 +88,11 @@ impl AdscTag {
             Self::WaypointChangeEvent(_) => 20,
             Self::IntermediateProjection(_) => 22,
             Self::FixedProjection(_) => 23,
+            Self::CancelAllContracts => 1,
+            Self::CancelContract { .. } => 2,
+            Self::PeriodicContractRequest(_) => 7,
+            Self::EventContractRequest(_) => 8,
+            Self::EmergencyPeriodicContractRequest(_) => 9,
         }
     }
 }
@@ -280,7 +316,16 @@ struct NoncomplianceGroupHeaderRaw {
     parameter_count: u8,
 }
 
+use crate::decode::acars::MessageDirection;
+
 pub fn parse_adsc_app_text(txt: &str) -> DecodeResult<AdscMessage> {
+    parse_adsc_app_text_with_direction(txt, MessageDirection::Unknown)
+}
+
+pub fn parse_adsc_app_text_with_direction(
+    txt: &str,
+    direction: MessageDirection,
+) -> DecodeResult<AdscMessage> {
     let text = txt.trim();
     if !text.starts_with('/') {
         return Err(DecodeError::InvalidPayload(PayloadError::Adsc));
@@ -311,7 +356,7 @@ pub fn parse_adsc_app_text(txt: &str) -> DecodeResult<AdscMessage> {
     let crc_start = payload_hex.len() - 4;
     let payload_no_crc_hex = payload_hex[..crc_start].to_string();
 
-    let tags = parse_adsc_payload_hex(&payload_no_crc_hex)?;
+    let tags = parse_adsc_payload_hex_with_direction(&payload_no_crc_hex, direction)?;
 
     Ok(AdscMessage {
         atsu_address: atsu.to_string(),
@@ -321,18 +366,60 @@ pub fn parse_adsc_app_text(txt: &str) -> DecodeResult<AdscMessage> {
 }
 
 pub fn parse_adsc_payload_hex(payload_no_crc_hex: &str) -> DecodeResult<Vec<AdscTag>> {
+    parse_adsc_payload_hex_with_direction(payload_no_crc_hex, MessageDirection::Unknown)
+}
+
+pub fn parse_adsc_payload_hex_with_direction(
+    payload_no_crc_hex: &str,
+    direction: MessageDirection,
+) -> DecodeResult<Vec<AdscTag>> {
     let bytes = hex::decode(payload_no_crc_hex)
         .map_err(|_| DecodeError::InvalidPayload(PayloadError::Adsc))?;
-    parse_adsc_payload_bytes(&bytes)
+    parse_adsc_payload_bytes_with_direction(&bytes, direction)
 }
 
 pub fn parse_adsc_payload_bytes(buf: &[u8]) -> DecodeResult<Vec<AdscTag>> {
+    parse_adsc_payload_bytes_with_direction(buf, MessageDirection::Unknown)
+}
+
+pub fn parse_adsc_payload_bytes_with_direction(
+    buf: &[u8],
+    direction: MessageDirection,
+) -> DecodeResult<Vec<AdscTag>> {
+    // Uplink (ground-to-air) messages use a different tag table than downlink.
+    let is_uplink = direction == MessageDirection::GroundToAir;
     let mut idx = 0usize;
     let mut tags = Vec::new();
 
     while idx < buf.len() {
         let tag = buf[idx];
         idx += 1;
+
+        // Route through uplink tag table when direction is ground-to-air.
+        if is_uplink {
+            match tag {
+                1 => tags.push(AdscTag::CancelAllContracts),
+                2 => {
+                    let data = take(buf, &mut idx, 1)?;
+                    tags.push(AdscTag::CancelContract { contract_number: data[0] });
+                }
+                6 => {
+                    let data = take(buf, &mut idx, 1)?;
+                    tags.push(AdscTag::CancelContract { contract_number: data[0] });
+                }
+                7..=9 => {
+                    let req = parse_contract_request(buf, &mut idx)?;
+                    tags.push(match tag {
+                        7 => AdscTag::PeriodicContractRequest(req),
+                        8 => AdscTag::EventContractRequest(req),
+                        9 => AdscTag::EmergencyPeriodicContractRequest(req),
+                        _ => unreachable!(),
+                    });
+                }
+                _ => return Err(DecodeError::InvalidPayload(PayloadError::Adsc)),
+            }
+            continue;
+        }
 
         match tag {
             3 => {
@@ -502,6 +589,81 @@ pub fn parse_adsc_payload_bytes(buf: &[u8]) -> DecodeResult<Vec<AdscTag>> {
     Ok(tags)
 }
 
+fn parse_contract_request(buf: &[u8], idx: &mut usize) -> DecodeResult<AdscContractRequest> {
+    let contract_number = take(buf, idx, 1)?[0];
+    let mut groups = Vec::new();
+    // Request sub-tags follow until end of buffer or an unknown tag id appears
+    // (libacars stops at the first unrecognized request tag, treating it as the
+    // start of the next uplink tag).
+    const KNOWN_REQUEST_TAGS: &[u8] = &[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
+    while *idx < buf.len() {
+        let sub = buf[*idx];
+        if !KNOWN_REQUEST_TAGS.contains(&sub) {
+            break; // not a request tag — stop and let the outer loop handle it
+        }
+        *idx += 1;
+        let group = match sub {
+            10 => {
+                let b = take(buf, idx, 1)?[0];
+                AdscContractGroup::LateralDeviationChange {
+                    threshold_nm: b as f64 / 8.0,
+                }
+            }
+            11 => {
+                let b = take(buf, idx, 1)?[0];
+                let sf_raw = (b & 0xc0) >> 6;
+                let sf: u32 = match sf_raw { 2 => 8, 3 => 64, v => v as u32 };
+                let rate = (b & 0x3f) as u32;
+                AdscContractGroup::ReportInterval {
+                    interval_secs: sf * (rate + 1),
+                }
+            }
+            12 => AdscContractGroup::FlightId { modulus: take(buf, idx, 1)?[0] },
+            13 => AdscContractGroup::PredictedRoute { modulus: take(buf, idx, 1)?[0] },
+            14 => AdscContractGroup::EarthReferenceData { modulus: take(buf, idx, 1)?[0] },
+            15 => AdscContractGroup::AirReferenceData { modulus: take(buf, idx, 1)?[0] },
+            16 => AdscContractGroup::MeteoData { modulus: take(buf, idx, 1)?[0] },
+            17 => AdscContractGroup::AirframeId { modulus: take(buf, idx, 1)?[0] },
+            18 => {
+                let b = take(buf, idx, 1)?[0] as i8;
+                AdscContractGroup::VerticalSpeedChange {
+                    threshold_ft_per_min: b as i32 * 64,
+                }
+            }
+            19 => {
+                let data = take(buf, idx, 4)?;
+                let ceiling_raw = ((data[0] as u16) << 8) | data[1] as u16;
+                let floor_raw = ((data[2] as u16) << 8) | data[3] as u16;
+                AdscContractGroup::AltitudeRange {
+                    ceiling_ft: decode_altitude_u16(ceiling_raw),
+                    floor_ft: decode_altitude_u16(floor_raw),
+                }
+            }
+            20 => AdscContractGroup::ReportWaypointChanges,
+            21 => {
+                let data = take(buf, idx, 2)?;
+                AdscContractGroup::AircraftIntentData {
+                    modulus: data[0],
+                    projection_time_mins: data[1],
+                }
+            }
+            other => AdscContractGroup::Unknown { tag: other },
+        };
+        groups.push(group);
+    }
+    Ok(AdscContractRequest { contract_number, groups })
+}
+
+fn decode_altitude_u16(raw: u16) -> i32 {
+    // Same formula as `decode_altitude` but from a pre-assembled u16.
+    let unsigned = i32::from(raw as i16);
+    if unsigned < 0 {
+        (unsigned * 25).wrapping_sub(200)
+    } else {
+        unsigned * 25 - 200
+    }
+}
+
 fn decode_basic_report(data: &[u8]) -> DecodeResult<AdscBasicReport> {
     let (_, raw) =
         BasicReportRaw::from_bytes((data, 0)).map_err(|e| DecodeError::Deku(e.to_string()))?;
@@ -622,5 +784,71 @@ mod tests {
         assert_eq!(msg.registration, "A7-ANR");
         assert!(!msg.tags.is_empty());
         assert_eq!(msg.tags[0].id(), 7);
+    }
+
+    #[test]
+    fn parse_adsc_uplink_contract_request() {
+        use crate::decode::acars::MessageDirection;
+        // /UPGCAYA.ADS.B-324P07020BCD0D010E0110014BAA
+        // Tag 7 = periodic_contract_req, contract=2
+        // Sub-tags: 0x0B(11)=interval 0xCD, 0x0D(13)=predicted_route mod=1,
+        //           0x0E(14)=earth_ref mod=1, 0x10(16)=meteo mod=1
+        let msg = parse_adsc_app_text_with_direction(
+            "/UPGCAYA.ADS.B-324P07020BCD0D010E0110014BAA",
+            MessageDirection::GroundToAir,
+        )
+        .unwrap();
+        assert_eq!(msg.atsu_address, "UPGCAYA");
+        assert_eq!(msg.registration, "B-324P");
+        assert_eq!(msg.tags.len(), 1);
+        let AdscTag::PeriodicContractRequest(req) = &msg.tags[0] else {
+            panic!("expected PeriodicContractRequest, got {:?}", msg.tags[0]);
+        };
+        assert_eq!(req.contract_number, 2);
+        assert_eq!(req.groups.len(), 4);
+        assert!(matches!(
+            &req.groups[0],
+            AdscContractGroup::ReportInterval { interval_secs: 896 }
+        ));
+        assert!(matches!(
+            &req.groups[1],
+            AdscContractGroup::PredictedRoute { modulus: 1 }
+        ));
+        assert!(matches!(
+            &req.groups[2],
+            AdscContractGroup::EarthReferenceData { modulus: 1 }
+        ));
+        assert!(matches!(
+            &req.groups[3],
+            AdscContractGroup::MeteoData { modulus: 1 }
+        ));
+    }
+
+    #[test]
+    fn parse_adsc_uplink_multi_group() {
+        use crate::decode::acars::MessageDirection;
+        // /OAKODYA.ADS.N509DT07030B970C000D010E0110000F01150001B64C
+        // contract_num=3, groups: interval=192s, flight_id mod=0,
+        //   predicted_route mod=1, earth_ref mod=1, meteo mod=0, air_ref mod=1,
+        //   acft_intent_data(mod=0, proj=1)
+        let msg = parse_adsc_app_text_with_direction(
+            "/OAKODYA.ADS.N509DT07030B970C000D010E0110000F01150001B64C",
+            MessageDirection::GroundToAir,
+        )
+        .unwrap();
+        let AdscTag::PeriodicContractRequest(req) = &msg.tags[0] else {
+            panic!("expected PeriodicContractRequest");
+        };
+        assert_eq!(req.contract_number, 3);
+        assert_eq!(req.groups.len(), 7);
+        // interval: 0x97 -> sf=2->8, rate=0x17=23 -> 8*(23+1)=192
+        assert!(matches!(
+            &req.groups[0],
+            AdscContractGroup::ReportInterval { interval_secs: 192 }
+        ));
+        assert!(matches!(
+            req.groups.last().unwrap(),
+            AdscContractGroup::AircraftIntentData { modulus: 0, projection_time_mins: 1 }
+        ));
     }
 }

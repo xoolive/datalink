@@ -244,7 +244,10 @@ pub fn parse_with_direction(text: &str, direction: MessageDirection) -> DecodeRe
 
     let payload_hex_full = raw.tail.payload_hex_full;
     let min_payload_hex_len = match raw.imi {
+        // DR1 disconnect may have only CRC (2 bytes hex), ADS uplink contracts
+        // can be as short as 4 hex chars (2 payload bytes + 2 CRC).
         Imi::Dr1 => 4,
+        Imi::Ads => 4,
         _ => 8,
     };
     if payload_hex_full.len() < min_payload_hex_len || !payload_hex_full.len().is_multiple_of(2) {
@@ -267,7 +270,7 @@ pub fn parse_with_direction(text: &str, direction: MessageDirection) -> DecodeRe
         Imi::Ads => Payload::Adsc(adsc::AdscMessage {
             atsu_address: raw.atsu_address.clone(),
             registration: raw.tail.registration.clone(),
-            tags: adsc::parse_adsc_payload_hex(payload_no_crc)?,
+            tags: adsc::parse_adsc_payload_hex_with_direction(payload_no_crc, direction)?,
         }),
         Imi::At1 => Payload::Cpdlc(Box::new(
             cpdlc::parse_cpdlc_payload_hex_with_direction(payload_no_crc, direction)?,
