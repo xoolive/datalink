@@ -1057,8 +1057,8 @@ fn parse_element_body(
                 direction,
             })
         }
-        (PduKind::Uplink, 9 | 71) => Ok(CpdlcElementBody::Time(parse_time(bits)?)),
-        (PduKind::Uplink, 10 | 68 | 74 | 75 | 155) => {
+        (PduKind::Uplink, 7 | 9 | 69 | 71) => Ok(CpdlcElementBody::Time(parse_time(bits)?)),
+        (PduKind::Uplink, 8 | 10 | 68 | 74 | 75 | 155) => {
             Ok(CpdlcElementBody::Position(parse_position(bits)?))
         }
         (PduKind::Uplink, 73) => Err("predeparture clearance body is not decoded yet".to_string()),
@@ -1070,9 +1070,17 @@ fn parse_element_body(
                 ..route_clearance.with_position(position)
             }))
         }
+        (PduKind::Uplink, 83) => {
+            let position = parse_position(bits)?;
+            let route_clearance = parse_route_clearance(bits)?;
+            Ok(CpdlcElementBody::RouteClearance(RouteClearance {
+                remaining_bits: route_clearance.remaining_bits,
+                ..route_clearance.with_position(position)
+            }))
+        }
         (PduKind::Uplink, 80) => Ok(parse_route_clearance_body(bits, "uM80RouteClearance")),
         (PduKind::Uplink, 81) => Ok(CpdlcElementBody::ProcedureName(parse_procedure_name(bits)?)),
-        (PduKind::Uplink, 88) => {
+        (PduKind::Uplink, 77 | 88) => {
             let positions = [parse_position(bits)?, parse_position(bits)?];
             Ok(CpdlcElementBody::PositionPosition { positions })
         }
