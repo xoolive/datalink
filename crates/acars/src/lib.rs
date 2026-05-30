@@ -11,11 +11,11 @@ pub mod prelude {
         parse_avlc_frame, AvlcAddr, AvlcFrame, AvlcLcf, AvlcPayload, SFunc,
     };
     pub use crate::decode::payload::{
+        arinc620::squitter::{parse_squitter, SquitterLink, SquitterMessage},
         arinc622::{
             adsc::{parse_adsc_app_text, AdscMessage},
             Imi, Message as Arinc622Message, Payload as Arinc622Payload,
         },
-        sq::{parse_squitter, SquitterLink, SquitterMessage},
         AcarsAppPayload,
     };
     pub use crate::decode::{DecodeError, DecodeResult};

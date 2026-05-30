@@ -121,6 +121,10 @@ pub struct CotpPdu {
     pub user_data: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpdlc: Option<CpdlcMessage>,
+    /// ATN B1 CPDLC summary if the COTP DT payload decoded as an ATN message.
+    /// Uses the same element types as the FANS-1/A decoder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atn_cpdlc: Option<crate::decode::payload::arinc622::cpdlc::CpdlcPduSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,6 +472,7 @@ fn parse_cotp_tpdu(
         params: Vec::new(),
         user_data: None,
         cpdlc: None,
+        atn_cpdlc: None,
     };
 
     let mut var_part_offset: usize = 0;
@@ -594,6 +599,10 @@ fn parse_cotp_tpdu(
             pdu.user_data = Some(user_data.to_vec());
             if code == COTP_TPDU_DT {
                 pdu.cpdlc = parse_cpdlc_user_data(user_data);
+                pdu.atn_cpdlc = crate::decode::payload::atn_b1::decode_cotp_user_data(user_data)
+                    .map(|pdu| match pdu {
+                        crate::decode::payload::atn_b1::AtnB1Pdu::Cpdlc(summary) => summary,
+                    });
             }
         }
         user_data_end = full_buf.len();

@@ -106,10 +106,10 @@ struct CpdlcCatalog {
 }
 
 #[derive(Debug, Deserialize)]
-struct CpdlcElementInfo {
-    id: u16,
-    name: String,
-    template: Option<String>,
+pub struct CpdlcElementInfo {
+    pub id: u16,
+    pub name: String,
+    pub template: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -432,11 +432,21 @@ pub struct RouteClearance {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "value")]
 pub enum RouteInformation {
-    PublishedIdentifier { fix: String, position: Option<CpdlcPosition> },
-    LatitudeLongitude { latitude: f64, longitude: f64 },
+    PublishedIdentifier {
+        fix: String,
+        position: Option<CpdlcPosition>,
+    },
+    LatitudeLongitude {
+        latitude: f64,
+        longitude: f64,
+    },
     Airway(String),
-    Track { name: String },
-    Unsupported { choice: u8 },
+    Track {
+        name: String,
+    },
+    Unsupported {
+        choice: u8,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -809,7 +819,7 @@ pub fn parse_cpdlc_control_payload_hex(
 }
 
 #[derive(Debug, Clone, Copy)]
-enum PduKind {
+pub enum PduKind {
     Downlink,
     Uplink,
 }
@@ -1429,7 +1439,9 @@ fn parse_position_report(bits: &mut BitReader<'_>) -> Result<CpdlcPositionReport
         remaining_fuel: has_remaining_fuel
             .then(|| parse_remaining_fuel(bits))
             .transpose()?,
-        temperature: has_temperature.then(|| parse_temperature(bits)).transpose()?,
+        temperature: has_temperature
+            .then(|| parse_temperature(bits))
+            .transpose()?,
         winds: has_winds.then(|| parse_winds(bits)).transpose()?,
         turbulence: has_turbulence
             .then(|| bits.read_bits(2).map(|value| value as u8))
@@ -1471,7 +1483,9 @@ fn parse_remaining_fuel(bits: &mut BitReader<'_>) -> Result<CpdlcTime, String> {
 
 fn parse_temperature(bits: &mut BitReader<'_>) -> Result<CpdlcTemperature, String> {
     if bits.read_bool()? {
-        Ok(CpdlcTemperature::Fahrenheit(bits.read_bits(8)? as i16 - 105))
+        Ok(CpdlcTemperature::Fahrenheit(
+            bits.read_bits(8)? as i16 - 105,
+        ))
     } else {
         Ok(CpdlcTemperature::Celsius(bits.read_bits(7)? as i16 - 80))
     }
@@ -1748,8 +1762,26 @@ fn element_info(kind: PduKind, id: u16) -> Option<&'static CpdlcElementInfo> {
 fn cpdlc_catalog() -> &'static CpdlcCatalog {
     static CATALOG: OnceLock<CpdlcCatalog> = OnceLock::new();
     CATALOG.get_or_init(|| {
-        serde_json::from_str(include_str!("../../../../data/cpdlc.json"))
-            .expect("valid bundled CPDLC element catalog")
+        serde_json::from_str(include_str!("../../../../data/cpdlc_fans.json"))
+            .expect("valid bundled FANS-1/A CPDLC element catalog")
+    })
+}
+
+/// Look up an ATN B1 element by direction and numeric ID.
+pub fn atn_element_info(kind: PduKind, id: u16) -> Option<&'static CpdlcElementInfo> {
+    let catalog = atn_catalog();
+    let elements = match kind {
+        PduKind::Uplink => &catalog.uplink,
+        PduKind::Downlink => &catalog.downlink,
+    };
+    elements.iter().find(|info| info.id == id)
+}
+
+fn atn_catalog() -> &'static CpdlcCatalog {
+    static ATN_CATALOG: OnceLock<CpdlcCatalog> = OnceLock::new();
+    ATN_CATALOG.get_or_init(|| {
+        serde_json::from_str(include_str!("../../../../data/cpdlc_atn.json"))
+            .expect("valid bundled ATN B1 CPDLC element catalog")
     })
 }
 

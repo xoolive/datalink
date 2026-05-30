@@ -514,9 +514,14 @@ async fn decode_websocket_source(
     else {
         unreachable!("decode_websocket_source called for non-websocket source")
     };
-    let selected_events = events.clone().unwrap_or_else(|| vec!["message".to_string()]);
+    let selected_events = events
+        .clone()
+        .unwrap_or_else(|| vec!["message".to_string()]);
     let capture_all = selected_events.iter().any(|event| event == "*");
-    let mut request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(websocket.as_str())?;
+    let mut request =
+        tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+            websocket.as_str(),
+        )?;
     request.headers_mut().insert(
         "Origin",
         tokio_tungstenite::tungstenite::http::HeaderValue::from_static("https://app.airframes.io"),
@@ -543,8 +548,10 @@ async fn decode_websocket_source(
             tokio_tungstenite::tungstenite::Message::Text(text) => {
                 for packet in text.split('\u{1e}') {
                     if packet == "2" {
-                        ws.send(tokio_tungstenite::tungstenite::Message::Text("3".to_string()))
-                            .await?;
+                        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                            "3".to_string(),
+                        ))
+                        .await?;
                         continue;
                     }
                     let Some((event, payload)) = parse_socketio_event(packet) else {
@@ -715,19 +722,28 @@ async fn websocket_connect(
         );
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut tcp =
-            tokio::net::TcpStream::connect(format!("{proxy_host}:{proxy_port}")).await?;
+        let mut tcp = tokio::net::TcpStream::connect(format!("{proxy_host}:{proxy_port}")).await?;
         tcp.write_all(connect_req.as_bytes()).await?;
         let mut buf = [0u8; 4096];
         let mut n = 0usize;
         loop {
             let r = tcp.read(&mut buf[n..]).await?;
-            if r == 0 { anyhow::bail!("proxy closed during CONNECT"); }
+            if r == 0 {
+                anyhow::bail!("proxy closed during CONNECT");
+            }
             n += r;
-            if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") { break; }
-            if n >= buf.len() { anyhow::bail!("proxy CONNECT response too large"); }
+            if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+            if n >= buf.len() {
+                anyhow::bail!("proxy CONNECT response too large");
+            }
         }
-        let status_line = std::str::from_utf8(&buf[..n])?.lines().next().unwrap_or("").to_string();
+        let status_line = std::str::from_utf8(&buf[..n])?
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
         if !status_line.contains("200") {
             anyhow::bail!("proxy CONNECT failed: {status_line}");
         }
@@ -749,12 +765,7 @@ async fn websocket_connect(
         let tls = connector.connect(domain, tcp).await?;
         // Wrap the TlsStream in MaybeTlsStream so the return type matches the non-proxy path.
         let maybe_tls = tokio_tungstenite::MaybeTlsStream::Rustls(tls);
-        let (ws, _) = tokio_tungstenite::client_async_with_config(
-            request,
-            maybe_tls,
-            None,
-        )
-        .await?;
+        let (ws, _) = tokio_tungstenite::client_async_with_config(request, maybe_tls, None).await?;
         Ok(ws)
     } else {
         Ok(tokio_tungstenite::connect_async(request).await?.0)

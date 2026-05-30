@@ -8,7 +8,7 @@
 /// message_number 102. Each block carries an `ETB` terminator except the last (`ETX`).
 /// The `txt` fragments must be concatenated before OHMA decoding can succeed.
 use acars::decode::acars::ReassemblyHint;
-use acars::decode::payload::ohma::{is_ohma, parse_ohma};
+use acars::decode::payload::boeing::ohma::{is_ohma, parse_ohma};
 use acars::decode::payload::AcarsAppPayload;
 
 /// Raw AVLC frame bytes for each of the 4 OK-SWN H1/T1 blocks (msg_num=102).

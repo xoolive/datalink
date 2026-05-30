@@ -272,9 +272,10 @@ pub fn parse_with_direction(text: &str, direction: MessageDirection) -> DecodeRe
             registration: raw.tail.registration.clone(),
             tags: adsc::parse_adsc_payload_hex_with_direction(payload_no_crc, direction)?,
         }),
-        Imi::At1 => Payload::Cpdlc(Box::new(
-            cpdlc::parse_cpdlc_payload_hex_with_direction(payload_no_crc, direction)?,
-        )),
+        Imi::At1 => Payload::Cpdlc(Box::new(cpdlc::parse_cpdlc_payload_hex_with_direction(
+            payload_no_crc,
+            direction,
+        )?)),
         Imi::Cr1 => Payload::Cpdlc(Box::new(cpdlc::parse_cpdlc_control_payload_hex(
             payload_no_crc,
             cpdlc::CpdlcControlKind::ConnectRequest,

@@ -521,8 +521,8 @@ fn cpdlc_airframes_fixtures_parse_shallow() {
 
 #[test]
 fn cpdlc_24h_unsupported_body_regression_fixtures_decode() {
-    use acars::decode::payload::arinc622::{parse_with_direction, Payload};
     use acars::decode::payload::arinc622::cpdlc::CpdlcElementBody;
+    use acars::decode::payload::arinc622::{parse_with_direction, Payload};
 
     let data = include_str!("fixtures/cpdlc_airframes_24h_unsupported_bodies.jsonl");
     let mut rows = 0usize;
@@ -579,8 +579,8 @@ fn cpdlc_24h_unsupported_body_regression_fixtures_decode() {
 
 #[test]
 fn cpdlc_control_messages_decode() {
-    use acars::decode::payload::arinc622::{parse_with_direction, Payload};
     use acars::decode::payload::arinc622::cpdlc::CpdlcControlMessage;
+    use acars::decode::payload::arinc622::{parse_with_direction, Payload};
 
     let cases = [
         (
@@ -608,7 +608,10 @@ fn cpdlc_control_messages_decode() {
         };
         match (expected, cpdlc.control.as_ref()) {
             ("connect_request", Some(CpdlcControlMessage::ConnectRequest { message })) => {
-                assert!(message.is_some(), "CR1 should carry a decoded uplink message");
+                assert!(
+                    message.is_some(),
+                    "CR1 should carry a decoded uplink message"
+                );
             }
             ("connect_confirm", Some(CpdlcControlMessage::ConnectConfirm { .. })) => {}
             ("disconnect_request", Some(CpdlcControlMessage::DisconnectRequest)) => {}

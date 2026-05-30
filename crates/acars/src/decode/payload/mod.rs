@@ -1,28 +1,33 @@
-//! ACARS application-layer payload modules.
+//! Application-layer payload modules.
 //!
-//! All app-layer decoders live under this module. The top-level enum
-//! `AcarsAppPayload` is defined here and references the sub-modules.
+//! This module groups app protocols that sit above bearer/envelope decoders:
+//! ACARS label payloads, ARINC 622/FANS-1/A payloads, and ATN B1 payloads
+//! reached via VDL2 X.25/COTP/ULCS. The top-level `AcarsAppPayload` enum
+//! covers only payloads decoded from ACARS messages.
 //!
 //! Errors from any payload decoder are reported as `PayloadError`, which
 //! wraps into `DecodeError::InvalidPayload`.
 
-pub mod aoc80;
+pub mod aoc;
+pub mod arinc620;
 pub mod arinc622;
-pub mod media_advisory;
+pub mod arinc623;
+pub mod atn_b1;
+pub mod boeing;
 pub mod miam;
-pub mod ohma;
-pub mod sq;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use self::aoc80::AocMessage;
+use self::aoc::label80::AocMessage;
+use self::aoc::oooi::{OooiOffDestination, OooiOffReport};
+use self::arinc620::media_advisory::MediaAdvisory;
+use self::arinc620::squitter::SquitterMessage;
 use self::arinc622::Message as Arinc622Message;
 pub use self::arinc622::{Imi, Payload as Arinc622Payload};
-use self::media_advisory::MediaAdvisory;
+use self::arinc623::atis::AtisRequest;
+use self::boeing::ohma::OhmaMessage;
 use self::miam::MiamMessage;
-use self::ohma::OhmaMessage;
-use self::sq::SquitterMessage;
 
 /// Errors produced by payload-layer decoders (everything under `payload/`).
 ///
@@ -71,6 +76,22 @@ pub enum AcarsAppPayload {
     /// ACARS label `80` AOC position/event report.
     #[serde(rename = "AOC80")]
     AocReport(AocMessage),
+
+    /// ACARS label `Q0` — ACARS link test / keepalive. Payload is always empty.
+    #[serde(rename = "Q0")]
+    LinkTest,
+
+    /// ACARS label `QF` — OFF Destination Report (sent shortly after takeoff).
+    #[serde(rename = "QF")]
+    OooiOffDestination(OooiOffDestination),
+
+    /// ACARS label `QQ` — OFF Report, extended form with ICAO codes.
+    #[serde(rename = "QQ")]
+    OooiOffReport(OooiOffReport),
+
+    /// ACARS label `B9` — ATIS request (TI2 protocol, aircraft → ground).
+    #[serde(rename = "B9")]
+    AtisRequest(AtisRequest),
 
     /// Non-empty `text` with no structured decoder.
     Text(String),

@@ -52,19 +52,45 @@ pub struct AdscContractRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "type", content = "value")]
 pub enum AdscContractGroup {
-    ReportInterval { interval_secs: u32 },
-    FlightId { modulus: u8 },
-    PredictedRoute { modulus: u8 },
-    EarthReferenceData { modulus: u8 },
-    AirReferenceData { modulus: u8 },
-    MeteoData { modulus: u8 },
-    AirframeId { modulus: u8 },
-    LateralDeviationChange { threshold_nm: f64 },
-    VerticalSpeedChange { threshold_ft_per_min: i32 },
-    AltitudeRange { ceiling_ft: i32, floor_ft: i32 },
+    ReportInterval {
+        interval_secs: u32,
+    },
+    FlightId {
+        modulus: u8,
+    },
+    PredictedRoute {
+        modulus: u8,
+    },
+    EarthReferenceData {
+        modulus: u8,
+    },
+    AirReferenceData {
+        modulus: u8,
+    },
+    MeteoData {
+        modulus: u8,
+    },
+    AirframeId {
+        modulus: u8,
+    },
+    LateralDeviationChange {
+        threshold_nm: f64,
+    },
+    VerticalSpeedChange {
+        threshold_ft_per_min: i32,
+    },
+    AltitudeRange {
+        ceiling_ft: i32,
+        floor_ft: i32,
+    },
     ReportWaypointChanges,
-    AircraftIntentData { modulus: u8, projection_time_mins: u8 },
-    Unknown { tag: u8 },
+    AircraftIntentData {
+        modulus: u8,
+        projection_time_mins: u8,
+    },
+    Unknown {
+        tag: u8,
+    },
 }
 
 impl AdscTag {
@@ -401,11 +427,15 @@ pub fn parse_adsc_payload_bytes_with_direction(
                 1 => tags.push(AdscTag::CancelAllContracts),
                 2 => {
                     let data = take(buf, &mut idx, 1)?;
-                    tags.push(AdscTag::CancelContract { contract_number: data[0] });
+                    tags.push(AdscTag::CancelContract {
+                        contract_number: data[0],
+                    });
                 }
                 6 => {
                     let data = take(buf, &mut idx, 1)?;
-                    tags.push(AdscTag::CancelContract { contract_number: data[0] });
+                    tags.push(AdscTag::CancelContract {
+                        contract_number: data[0],
+                    });
                 }
                 7..=9 => {
                     let req = parse_contract_request(buf, &mut idx)?;
@@ -612,18 +642,34 @@ fn parse_contract_request(buf: &[u8], idx: &mut usize) -> DecodeResult<AdscContr
             11 => {
                 let b = take(buf, idx, 1)?[0];
                 let sf_raw = (b & 0xc0) >> 6;
-                let sf: u32 = match sf_raw { 2 => 8, 3 => 64, v => v as u32 };
+                let sf: u32 = match sf_raw {
+                    2 => 8,
+                    3 => 64,
+                    v => v as u32,
+                };
                 let rate = (b & 0x3f) as u32;
                 AdscContractGroup::ReportInterval {
                     interval_secs: sf * (rate + 1),
                 }
             }
-            12 => AdscContractGroup::FlightId { modulus: take(buf, idx, 1)?[0] },
-            13 => AdscContractGroup::PredictedRoute { modulus: take(buf, idx, 1)?[0] },
-            14 => AdscContractGroup::EarthReferenceData { modulus: take(buf, idx, 1)?[0] },
-            15 => AdscContractGroup::AirReferenceData { modulus: take(buf, idx, 1)?[0] },
-            16 => AdscContractGroup::MeteoData { modulus: take(buf, idx, 1)?[0] },
-            17 => AdscContractGroup::AirframeId { modulus: take(buf, idx, 1)?[0] },
+            12 => AdscContractGroup::FlightId {
+                modulus: take(buf, idx, 1)?[0],
+            },
+            13 => AdscContractGroup::PredictedRoute {
+                modulus: take(buf, idx, 1)?[0],
+            },
+            14 => AdscContractGroup::EarthReferenceData {
+                modulus: take(buf, idx, 1)?[0],
+            },
+            15 => AdscContractGroup::AirReferenceData {
+                modulus: take(buf, idx, 1)?[0],
+            },
+            16 => AdscContractGroup::MeteoData {
+                modulus: take(buf, idx, 1)?[0],
+            },
+            17 => AdscContractGroup::AirframeId {
+                modulus: take(buf, idx, 1)?[0],
+            },
             18 => {
                 let b = take(buf, idx, 1)?[0] as i8;
                 AdscContractGroup::VerticalSpeedChange {
@@ -651,7 +697,10 @@ fn parse_contract_request(buf: &[u8], idx: &mut usize) -> DecodeResult<AdscContr
         };
         groups.push(group);
     }
-    Ok(AdscContractRequest { contract_number, groups })
+    Ok(AdscContractRequest {
+        contract_number,
+        groups,
+    })
 }
 
 fn decode_altitude_u16(raw: u16) -> i32 {
@@ -848,7 +897,10 @@ mod tests {
         ));
         assert!(matches!(
             req.groups.last().unwrap(),
-            AdscContractGroup::AircraftIntentData { modulus: 0, projection_time_mins: 1 }
+            AdscContractGroup::AircraftIntentData {
+                modulus: 0,
+                projection_time_mins: 1
+            }
         ));
     }
 }

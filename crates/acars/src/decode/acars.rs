@@ -469,22 +469,50 @@ fn dispatch_by_label(
     if txt.is_empty() {
         return AcarsAppPayload::None;
     }
+    // Q0 = ACARS link test / keepalive; payload is always empty by spec.
+    if label == "Q0" {
+        return AcarsAppPayload::LinkTest;
+    }
     match label {
         "MA" => crate::decode::payload::miam::parse_miam(txt)
             .map(AcarsAppPayload::Miam)
             .unwrap_or_else(|_| AcarsAppPayload::Text(txt.to_string())),
-        "SA" => crate::decode::payload::media_advisory::parse_media_advisory(txt)
+        "SA" => crate::decode::payload::arinc620::media_advisory::parse_media_advisory(txt)
             .map(AcarsAppPayload::MediaAdvisory)
             .unwrap_or_else(|_| AcarsAppPayload::Text(txt.to_string())),
-        "SQ" => crate::decode::payload::sq::parse_squitter(txt)
+        "SQ" => crate::decode::payload::arinc620::squitter::parse_squitter(txt)
             .map(AcarsAppPayload::Squitter)
             .unwrap_or_else(|_| AcarsAppPayload::Text(txt.to_string())),
-        "80" => crate::decode::payload::aoc80::parse_label80(txt)
+        "80" => crate::decode::payload::aoc::label80::parse_label80(txt)
             .map(AcarsAppPayload::AocReport)
             .unwrap_or(AcarsAppPayload::Text(txt.to_string())),
+        // Q0 = ACARS link test / keepalive — payload is always empty by spec.
+        // If text is somehow present we still label it correctly.
+        "Q0" => AcarsAppPayload::LinkTest,
+        "QF" => crate::decode::payload::aoc::oooi::parse_qf(txt)
+            .map(AcarsAppPayload::OooiOffDestination)
+            .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
+        "QQ" => crate::decode::payload::aoc::oooi::parse_qq(txt)
+            .map(AcarsAppPayload::OooiOffReport)
+            .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
+        // A9 = ATIS relay (terminal information), RA = AOC command/response,
+        // C1 = fuel/loadsheet request. All are structured free-text with no
+        // further decoding at this layer — expose as Text so the raw content is
+        // preserved and visible in JSON output.
+        "A9" | "RA" | "C1" => AcarsAppPayload::Text(txt.to_string()),
+        // B9 = ATIS request from aircraft (ARINC 623 TI2 protocol).
+        "B9" => crate::decode::payload::arinc623::atis::parse_b9(txt)
+            .map(AcarsAppPayload::AtisRequest)
+            .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
+        // 16 = Boeing/airline position telemetry (heterogeneous airline-specific format).
+        // 32 = SkyWest/OO CSV position telemetry (airline-specific).
+        // 37 = Southwest/Delta/Spirit/Republic ops (partially obfuscated).
+        // 5Z = American/United AOC messages (/IR arrival info, /C* dispatch).
+        // Surface all as Text — no further structured decode at this layer.
+        "16" | "32" | "37" | "5Z" => AcarsAppPayload::Text(txt.to_string()),
         "H1" if sublabel == Some("T1") => {
-            if crate::decode::payload::ohma::is_ohma(txt) {
-                crate::decode::payload::ohma::parse_ohma(txt)
+            if crate::decode::payload::boeing::ohma::is_ohma(txt) {
+                crate::decode::payload::boeing::ohma::parse_ohma(txt)
                     .map(AcarsAppPayload::Ohma)
                     .unwrap_or_else(|_| AcarsAppPayload::Text(txt.to_string()))
             } else {
