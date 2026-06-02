@@ -23,6 +23,11 @@ struct Options {
     #[arg(short, long)]
     output: Option<String>,
 
+    /// Include the full nested decoder output under raw_decode
+    #[arg(long)]
+    #[serde(default)]
+    raw: bool,
+
     /// Print demod/decode counters to stderr at end
     #[arg(long)]
     #[serde(default)]
@@ -104,7 +109,13 @@ async fn main() -> anyhow::Result<()> {
 
     let mut total = DecodeStats::default();
     for src in options.sources.iter() {
-        let stats = decode_source(src, options.dump_demod_wav.as_deref(), output.as_mut()).await?;
+        let stats = decode_source(
+            src,
+            options.dump_demod_wav.as_deref(),
+            options.raw,
+            output.as_mut(),
+        )
+        .await?;
         total.demod_frames += stats.demod_frames;
         total.parsed_ok += stats.parsed_ok;
         total.parse_fail += stats.parse_fail;
@@ -151,6 +162,9 @@ fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
     if cli.output.is_some() {
         options.output = cli.output;
     }
+    if cli.raw {
+        options.raw = true;
+    }
     if cli.stats {
         options.stats = true;
     }
@@ -192,6 +206,7 @@ fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
 async fn decode_source(
     src: &Source,
     dump_demod_wav: Option<&str>,
+    raw: bool,
     mut output: Option<&mut std::io::BufWriter<std::fs::File>>,
 ) -> anyhow::Result<DecodeStats> {
     let center_freq = src.center_freq();
@@ -271,6 +286,7 @@ async fn decode_source(
                                         }),
                                     );
                                 }
+                                let obj = acars::decode::compact::compact_acars_value(obj, raw);
                                 let line = serde_json::to_string(&obj)?;
                                 println!("{line}");
                                 if let Some(writer) = output.as_mut() {

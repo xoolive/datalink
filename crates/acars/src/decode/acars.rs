@@ -460,6 +460,26 @@ fn decode_acars_bytes(buf: &[u8], direction: MessageDirection) -> DecodeResult<A
     })
 }
 
+/// Decode an ACARS text payload when frame-level parsing was performed elsewhere.
+///
+/// This is useful for feeds such as Airframes that provide ACARS label/text fields
+/// but not the original ACARS frame bytes. It handles ARINC 622 slash/dot payloads
+/// first, then falls back to label/sublabel-specific dispatch.
+pub fn decode_acars_text_payload(
+    label: &str,
+    sublabel: Option<&str>,
+    txt: &str,
+    direction: MessageDirection,
+) -> crate::decode::payload::AcarsAppPayload {
+    if !txt.is_empty() && txt.as_bytes()[0] == b'/' {
+        if let Ok(message) = crate::decode::payload::arinc622::parse_with_direction(txt, direction)
+        {
+            return crate::decode::payload::AcarsAppPayload::Arinc622(message);
+        }
+    }
+    dispatch_by_label(label, sublabel, txt)
+}
+
 fn dispatch_by_label(
     label: &str,
     sublabel: Option<&str>,
@@ -495,21 +515,39 @@ fn dispatch_by_label(
         "QQ" => crate::decode::payload::aoc::oooi::parse_qq(txt)
             .map(AcarsAppPayload::OooiOffReport)
             .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
-        // A9 = ATIS relay (terminal information), RA = AOC command/response,
-        // C1 = fuel/loadsheet request. All are structured free-text with no
-        // further decoding at this layer — expose as Text so the raw content is
-        // preserved and visible in JSON output.
-        "A9" | "RA" | "C1" => AcarsAppPayload::Text(txt.to_string()),
+        "A9" => crate::decode::payload::arinc623::atis::parse_a9(txt)
+            .map(AcarsAppPayload::AtisDelivery)
+            .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
+        "A0" | "B0" => crate::decode::payload::arinc622::afn::parse_afn(txt)
+            .map(AcarsAppPayload::Afn)
+            .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
+        "B1" => crate::decode::payload::arinc622::oceanic::parse_oceanic(txt)
+            .map(AcarsAppPayload::OceanicClearance)
+            .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
+        "RA" | "C1" => crate::decode::payload::aoc::weather::parse_weather_bundle(txt)
+            .map(AcarsAppPayload::Weather)
+            .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
         // B9 = ATIS request from aircraft (ARINC 623 TI2 protocol).
         "B9" => crate::decode::payload::arinc623::atis::parse_b9(txt)
             .map(AcarsAppPayload::AtisRequest)
             .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
-        // 16 = Boeing/airline position telemetry (heterogeneous airline-specific format).
-        // 32 = SkyWest/OO CSV position telemetry (airline-specific).
-        // 37 = Southwest/Delta/Spirit/Republic ops (partially obfuscated).
-        // 5Z = American/United AOC messages (/IR arrival info, /C* dispatch).
-        // Surface all as Text — no further structured decode at this layer.
-        "16" | "32" | "37" | "5Z" => AcarsAppPayload::Text(txt.to_string()),
+        "5Z" => crate::decode::payload::aoc::label5z::parse_label5z(txt)
+            .map(AcarsAppPayload::Label5z)
+            .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
+        "21" | "22" | "31" | "36" | "44" | "83" => {
+            crate::decode::payload::aoc::position::parse_aoc_position(label, txt)
+                .map(AcarsAppPayload::AocPosition)
+                .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string()))
+        }
+        "32" => crate::decode::payload::aoc::label32::parse_label32(txt)
+            .map(AcarsAppPayload::Label32)
+            .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
+        "16" => crate::decode::payload::aoc::label16::parse_label16(txt)
+            .map(AcarsAppPayload::Label16)
+            .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
+        "37" => crate::decode::payload::aoc::label37::parse_label37(txt)
+            .map(AcarsAppPayload::Label37)
+            .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
         "H1" if sublabel == Some("T1") => {
             if crate::decode::payload::boeing::ohma::is_ohma(txt) {
                 crate::decode::payload::boeing::ohma::parse_ohma(txt)

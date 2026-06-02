@@ -1,7 +1,9 @@
 use acars::decode::acars::{
-    extract_sublabel_and_mfi, parse_acars_frame, BlockId, MessageDirection,
+    decode_acars_text_payload, extract_sublabel_and_mfi, parse_acars_frame, BlockId,
+    MessageDirection,
 };
 use acars::decode::payload::arinc622::adsc::parse_adsc_app_text;
+use acars::decode::payload::AcarsAppPayload;
 use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -139,6 +141,202 @@ fn acars_app_payload_prefix_vectors_from_libacars_examples() {
             payload.starts_with(expected_prefix),
             "{name}: payload after offset does not start with expected prefix"
         );
+    }
+}
+
+#[test]
+fn p1_acars_payload_fixtures_decode() {
+    let data = include_str!("fixtures/acars_p1_payloads.jsonl");
+
+    for line in data.lines().filter(|line| !line.trim().is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row JSON");
+        let name = row["name"].as_str().expect("name");
+        let label = row["label"].as_str().expect("label");
+        let direction = parse_direction(row["direction"].as_str().expect("direction"));
+        let text = row["text"].as_str().expect("text");
+        let expected_variant = row["expected_variant"].as_str().expect("expected_variant");
+
+        let payload = decode_acars_text_payload(label, None, text, direction);
+        match (expected_variant, payload) {
+            ("AtisDelivery", AcarsAppPayload::AtisDelivery(msg)) => {
+                assert_eq!(msg.airport, row["expected_airport"], "{name}: airport");
+                assert_eq!(
+                    msg.atis_letter.as_deref(),
+                    row["expected_atis_letter"].as_str(),
+                    "{name}: atis letter"
+                );
+                assert_eq!(
+                    msg.issued_time.as_deref(),
+                    row["expected_issued_time"].as_str(),
+                    "{name}: issued time"
+                );
+            }
+            ("Afn", AcarsAppPayload::Afn(msg)) => {
+                assert_eq!(msg.facility, row["expected_facility"], "{name}: facility");
+                assert_eq!(
+                    msg.message_type, row["expected_message_type"],
+                    "{name}: message type"
+                );
+                assert_eq!(
+                    msg.registration.as_deref(),
+                    row["expected_registration"].as_str(),
+                    "{name}: registration"
+                );
+                if let Some(expected_icao24) = row["expected_icao24"].as_str() {
+                    assert_eq!(
+                        msg.icao24.as_deref(),
+                        Some(expected_icao24),
+                        "{name}: icao24"
+                    );
+                }
+                assert_eq!(
+                    msg.applications.len(),
+                    row["expected_app_count"].as_u64().unwrap() as usize,
+                    "{name}: app count"
+                );
+            }
+            ("OceanicClearance", AcarsAppPayload::OceanicClearance(msg)) => {
+                assert_eq!(msg.facility, row["expected_facility"], "{name}: facility");
+                assert_eq!(
+                    msg.clearance_type, row["expected_clearance_type"],
+                    "{name}: clearance type"
+                );
+                assert_eq!(
+                    msg.flight_id.as_deref(),
+                    row["expected_flight_id"].as_str(),
+                    "{name}: flight id"
+                );
+                assert_eq!(
+                    msg.entry_point.as_deref(),
+                    row["expected_entry_point"].as_str(),
+                    "{name}: entry point"
+                );
+            }
+            (expected, other) => panic!("{name}: expected {expected}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn p2_acars_payload_fixtures_decode() {
+    let data = include_str!("fixtures/acars_p2_payloads.jsonl");
+
+    for line in data.lines().filter(|line| !line.trim().is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row JSON");
+        let name = row["name"].as_str().expect("name");
+        let label = row["label"].as_str().expect("label");
+        let direction = parse_direction(row["direction"].as_str().expect("direction"));
+        let text = row["text"].as_str().expect("text");
+        let expected_variant = row["expected_variant"].as_str().expect("expected_variant");
+
+        let payload = decode_acars_text_payload(label, None, text, direction);
+        match (expected_variant, payload) {
+            ("Weather", AcarsAppPayload::Weather(msg)) => {
+                assert_eq!(
+                    msg.reports.len(),
+                    row["expected_report_count"].as_u64().unwrap() as usize,
+                    "{name}: report count"
+                );
+                assert_eq!(
+                    msg.reports[0].station, row["expected_first_station"],
+                    "{name}: first station"
+                );
+            }
+            ("Label5z", AcarsAppPayload::Label5z(msg)) => {
+                assert_eq!(
+                    msg.fields.len(),
+                    row["expected_field_count"].as_u64().unwrap() as usize,
+                    "{name}: field count"
+                );
+                let key = row["expected_key"].as_str().unwrap();
+                let field = msg.fields.iter().find(|f| f.key == key).expect("field");
+                assert_eq!(field.value, row["expected_value"], "{name}: value");
+            }
+            ("AocPosition", AcarsAppPayload::AocPosition(msg)) => {
+                if let Some(lat) = row["expected_lat"].as_f64() {
+                    assert!((msg.latitude.unwrap() - lat).abs() < 0.01, "{name}: lat");
+                }
+                if let Some(lon) = row["expected_lon"].as_f64() {
+                    assert!((msg.longitude.unwrap() - lon).abs() < 0.01, "{name}: lon");
+                }
+                if let Some(min_lat) = row["expected_lat_min"].as_f64() {
+                    assert!(msg.latitude.unwrap() > min_lat, "{name}: lat min");
+                }
+                if let Some(max_lon) = row["expected_lon_max"].as_f64() {
+                    assert!(msg.longitude.unwrap() < max_lon, "{name}: lon max");
+                }
+                if let Some(dep) = row["expected_departure"].as_str() {
+                    assert_eq!(msg.departure.as_deref(), Some(dep), "{name}: dep");
+                }
+                if let Some(dest) = row["expected_destination"].as_str() {
+                    assert_eq!(msg.destination.as_deref(), Some(dest), "{name}: dest");
+                }
+            }
+            (expected, other) => panic!("{name}: expected {expected}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn p3_acars_payload_fixtures_decode() {
+    let data = include_str!("fixtures/acars_p3_payloads.jsonl");
+
+    for line in data.lines().filter(|line| !line.trim().is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row JSON");
+        let name = row["name"].as_str().expect("name");
+        let label = row["label"].as_str().expect("label");
+        let direction = parse_direction(row["direction"].as_str().expect("direction"));
+        let text = row["text"].as_str().expect("text");
+        let expected_variant = row["expected_variant"].as_str().expect("expected_variant");
+
+        let payload = decode_acars_text_payload(label, None, text, direction);
+        match (expected_variant, payload) {
+            ("Label32", AcarsAppPayload::Label32(msg)) => {
+                assert_eq!(
+                    msg.timestamp.as_deref(),
+                    row["expected_timestamp"].as_str(),
+                    "{name}: timestamp"
+                );
+                assert!(
+                    (msg.latitude.unwrap() - row["expected_lat"].as_f64().unwrap()).abs() < 0.001,
+                    "{name}: lat"
+                );
+                assert!(
+                    (msg.longitude.unwrap() - row["expected_lon"].as_f64().unwrap()).abs() < 0.001,
+                    "{name}: lon"
+                );
+                assert_eq!(
+                    msg.altitude_ft,
+                    Some(row["expected_altitude"].as_i64().unwrap() as i32),
+                    "{name}: altitude"
+                );
+            }
+            ("Label16", AcarsAppPayload::Label16(msg)) => {
+                assert_eq!(
+                    msg.timestamp.as_deref(),
+                    row["expected_timestamp"].as_str(),
+                    "{name}: timestamp"
+                );
+                assert_eq!(
+                    msg.fields.len(),
+                    row["expected_field_count"].as_u64().unwrap() as usize,
+                    "{name}: field count"
+                );
+            }
+            ("Label37", AcarsAppPayload::Label37(msg)) => {
+                assert_eq!(
+                    msg.prefix.as_deref(),
+                    row["expected_prefix"].as_str(),
+                    "{name}: prefix"
+                );
+                assert_eq!(
+                    msg.line_count,
+                    row["expected_line_count"].as_u64().unwrap() as usize,
+                    "{name}: line count"
+                );
+            }
+            (expected, other) => panic!("{name}: expected {expected}, got {other:?}"),
+        }
     }
 }
 

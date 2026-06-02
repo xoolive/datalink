@@ -1,5 +1,7 @@
 pub mod adsc;
+pub mod afn;
 pub mod cpdlc;
+pub mod oceanic;
 
 use deku::ctx::Order;
 use deku::no_std_io::{Read, Seek};

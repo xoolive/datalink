@@ -16,6 +16,9 @@ enum Direction {
     about = "Decode demodulated ACARS/ARINC 622 payloads"
 )]
 struct Args {
+    /// Include the full nested decoder output under raw_decode
+    #[arg(long, global = true)]
+    raw: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -53,7 +56,9 @@ fn main() -> anyhow::Result<()> {
                 Direction::Downlink => MessageDirection::AirToGround,
             };
             let message = parse_acars_frame(&bytes, dir)?;
-            println!("{}", serde_json::to_string_pretty(&message)?);
+            let raw = serde_json::to_value(&message)?;
+            let out = acars::decode::compact::compact_acars_value(raw, args.raw);
+            println!("{}", serde_json::to_string_pretty(&out)?);
         }
         Command::Avlc { hex } => {
             let bytes = hex::decode(hex.trim())?;
@@ -62,11 +67,25 @@ fn main() -> anyhow::Result<()> {
             if let serde_json::Value::Object(ref mut m) = obj {
                 m.insert("frame".into(), bytes_to_hex(&bytes).into());
             }
-            println!("{}", serde_json::to_string_pretty(&obj)?);
+            let out = acars::decode::compact::compact_avlc_value(obj, args.raw);
+            println!("{}", serde_json::to_string_pretty(&out)?);
         }
         Command::Adsc { payload } => {
             let adsc = parse_adsc_app_text(payload.trim())?;
-            println!("{}", serde_json::to_string_pretty(&adsc)?);
+            let raw = serde_json::to_value(&adsc)?;
+            let mut out = serde_json::json!({
+                "path": "acars",
+                "protocol_stack": ["acars", "arinc622", "ads_c"],
+                "message_class": "app_message",
+                "summary": "ADS-C application payload",
+                "app": { "protocol": "ads_c", "standard": "ARINC 622", "payload": raw.clone() },
+            });
+            if args.raw {
+                out.as_object_mut()
+                    .unwrap()
+                    .insert("raw_decode".into(), raw);
+            }
+            println!("{}", serde_json::to_string_pretty(&out)?);
         }
     }
 

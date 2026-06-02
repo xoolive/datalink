@@ -12,6 +12,21 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A9: ATIS delivery from ground to aircraft (TI2 protocol).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AtisDelivery {
+    pub airport: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atis_letter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_time: Option<String>,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crc: Option<String>,
+}
+
 /// B9: ATIS request from aircraft to ground station (TI2 protocol).
 ///
 /// The aircraft requests the current ATIS for the specified airport,
@@ -34,6 +49,61 @@ pub struct AtisRequest {
 ///
 /// Strips any leading message-number prefix (e.g. `J41ATK0059/`) before the
 /// ARINC 623 TI2 pattern.
+pub fn parse_a9(txt: &str) -> Option<AtisDelivery> {
+    let ti2_pos = txt.find(".TI2/")?;
+    let after = &txt[ti2_pos + 5..];
+    let mut body = after.trim();
+    let mut crc = None;
+    if body.len() >= 4 {
+        let suffix = &body[body.len() - 4..];
+        if suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+            crc = Some(suffix.to_ascii_uppercase());
+            body = body[..body.len() - 4].trim_end();
+        }
+    }
+
+    let mut lines = body.lines().map(str::trim).filter(|l| !l.is_empty());
+    let header = lines.next()?;
+    let mut header_parts = header.split_whitespace();
+    let airport = header_parts.next()?.to_ascii_uppercase();
+    if airport.len() != 4 {
+        return None;
+    }
+    let kind = header_parts.next().map(str::to_string);
+    // Header is usually "<ICAO> ARR ATIS <letter>" or "<ICAO> DEP ATIS <letter>".
+    let atis_letter = header_parts
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|w| {
+            (w[0].eq_ignore_ascii_case("ATIS") && w[1].len() == 1)
+                .then(|| w[1].to_ascii_uppercase())
+        })
+        .or_else(|| {
+            header
+                .split_whitespace()
+                .last()
+                .filter(|s| s.len() == 1)
+                .map(str::to_ascii_uppercase)
+        });
+
+    let text = lines.collect::<Vec<_>>().join("\n");
+    let issued_time = text
+        .split_whitespace()
+        .find(|tok| {
+            tok.len() == 5 && tok.ends_with('Z') && tok[..4].chars().all(|c| c.is_ascii_digit())
+        })
+        .map(str::to_string);
+
+    Some(AtisDelivery {
+        airport,
+        kind,
+        atis_letter,
+        issued_time,
+        text,
+        crc,
+    })
+}
+
 pub fn parse_b9(txt: &str) -> Option<AtisRequest> {
     // Find the `.TI2/` marker — there may be a message-number prefix before it.
     let ti2_pos = txt.find(".TI2/")?;

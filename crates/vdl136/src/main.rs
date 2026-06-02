@@ -1,8 +1,7 @@
 mod source;
 
-use acars::decode::acars::MessageDirection;
+use acars::decode::acars::{decode_acars_text_payload, MessageDirection};
 use acars::decode::avlc::parse_avlc_frame;
-use acars::decode::payload::arinc622;
 use acars::demod::resample::{maybe_resample, ResampleAdapter};
 use acars::demod::vdl2::{Vdl2Channel, SYMBOL_RATE};
 use clap::{Parser, Subcommand};
@@ -30,6 +29,10 @@ struct Options {
     /// Write rejected AVLC frames as NDJSON (frame + parse error)
     #[arg(long)]
     reject_log: Option<String>,
+    /// Include the full nested decoder output under raw_decode
+    #[arg(long)]
+    #[serde(default)]
+    raw: bool,
     /// Include frames with bad AVLC FCS in output JSON
     #[arg(long)]
     #[serde(default)]
@@ -95,6 +98,8 @@ enum Command {
         stats: bool,
         #[arg(long)]
         reject_log: Option<String>,
+        #[arg(long)]
+        raw: bool,
         #[arg(long)]
         include_fcs_fail: bool,
         #[arg(long)]
@@ -223,6 +228,7 @@ fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
                 channel,
                 stats,
                 reject_log,
+                raw,
                 include_fcs_fail,
                 candidate_log,
                 window_start_sec,
@@ -248,6 +254,9 @@ fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
                 }
                 if reject_log.is_some() {
                     options.reject_log = reject_log;
+                }
+                if raw {
+                    options.raw = true;
                 }
                 if include_fcs_fail {
                     options.include_fcs_fail = true;
@@ -276,6 +285,9 @@ fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
     }
     if cli.reject_log.is_some() {
         options.reject_log = cli.reject_log;
+    }
+    if cli.raw {
+        options.raw = true;
     }
     if cli.include_fcs_fail {
         options.include_fcs_fail = true;
@@ -336,7 +348,7 @@ async fn decode_source(
     mut candidate_writer: Option<&mut BufWriter<File>>,
 ) -> anyhow::Result<DecodeStats> {
     if matches!(src.address, Address::Websocket { .. }) {
-        return decode_websocket_source(src, source_index, output).await;
+        return decode_websocket_source(src, source_index, options.raw, output).await;
     }
 
     let center_freq = src.center_freq();
@@ -463,6 +475,8 @@ async fn decode_source(
                                         }),
                                     );
                                 }
+                                let obj =
+                                    acars::decode::compact::compact_avlc_value(obj, options.raw);
                                 let line = serde_json::to_string(&obj)?;
                                 println!("{line}");
                                 if let Some(w) = output.as_mut() {
@@ -504,6 +518,7 @@ async fn decode_source(
 async fn decode_websocket_source(
     src: &Source,
     source_index: usize,
+    raw: bool,
     mut output: Option<&mut BufWriter<File>>,
 ) -> anyhow::Result<DecodeStats> {
     let Address::Websocket {
@@ -561,7 +576,7 @@ async fn decode_websocket_source(
                         continue;
                     }
                     stats.avlc_ok += 1;
-                    let record = websocket_record(src, source_index, &event, payload);
+                    let record = websocket_record(src, source_index, &event, payload, raw);
                     let line = serde_json::to_string(&record)?;
                     println!("{line}");
                     if let Some(w) = output.as_mut() {
@@ -593,21 +608,32 @@ fn parse_socketio_event(packet: &str) -> Option<(String, Value)> {
     Some((event, payload))
 }
 
-fn websocket_record(src: &Source, source_index: usize, event: &str, payload: Value) -> Value {
-    let raw = payload.clone();
+fn websocket_record(
+    src: &Source,
+    source_index: usize,
+    event: &str,
+    payload: Value,
+    raw: bool,
+) -> Value {
     let decoded = if event == "message" {
         decode_airframes_message(&payload)
     } else {
         None
     };
-    serde_json::json!({
+    let mut record = serde_json::json!({
         "source": src.label(),
         "source_index": source_index,
         "bearer": "websocket",
         "event": event,
-        "raw": raw,
         "decoded": decoded,
-    })
+    });
+    if raw {
+        record
+            .as_object_mut()
+            .unwrap()
+            .insert("raw".into(), payload);
+    }
+    record
 }
 
 fn decode_airframes_message(payload: &Value) -> Option<Value> {
@@ -620,44 +646,46 @@ fn decode_airframes_message(payload: &Value) -> Option<Value> {
     let label = row.get("label").and_then(Value::as_str).unwrap_or_default();
     let link_direction = row.get("link_direction").and_then(Value::as_str);
     let direction = infer_airframes_direction(label, link_direction);
-    let base = serde_json::json!({
-        "airframes_id": row.get("id").cloned().unwrap_or(Value::Null),
+    let timestamp = row
+        .get("timestamp")
+        .or_else(|| row.get("created_at"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let Some(text) = text else {
+        return Some(serde_json::json!({
+            "path": "unknown",
+            "message_class": "metadata_only",
+            "summary": "Airframes VDL row without ACARS text payload",
+            "airframes_id": row.get("id").cloned().unwrap_or(Value::Null),
+            "timestamp": timestamp,
+            "label": row.get("label").cloned().unwrap_or(Value::Null),
+            "tail": row.get("tail").cloned().unwrap_or(Value::Null),
+            "source_type": row.get("source_type").cloned().unwrap_or(Value::Null),
+            "frequency": row.get("frequency").cloned().unwrap_or(Value::Null),
+            "app": Value::Null,
+        }));
+    };
+
+    let normalized_text = normalize_arinc622_text(text).unwrap_or_else(|| text.to_string());
+    let app = decode_acars_text_payload(label, None, &normalized_text, direction);
+    let raw = serde_json::json!({
+        "timestamp": timestamp,
         "label": label,
         "tail": row.get("tail").cloned().unwrap_or(Value::Null),
         "text": text,
-        "link_direction": link_direction,
+        "direction": direction,
+        "data": app,
+        "metadata": {
+            "bearer": "airframes",
+            "source": row.get("source").cloned().unwrap_or(Value::Null),
+            "source_type": row.get("source_type").cloned().unwrap_or(Value::Null),
+            "frequency": row.get("frequency").cloned().unwrap_or(Value::Null),
+            "link_direction": link_direction,
+            "airframes_id": row.get("id").cloned().unwrap_or(Value::Null),
+        }
     });
-    let Some(text) = text else {
-        return Some(serde_json::json!({
-            "decoder": "airframes_row",
-            "ok": false,
-            "reason": "missing text",
-            "fields": base,
-        }));
-    };
-    let Some(normalized) = normalize_arinc622_text(text) else {
-        return Some(serde_json::json!({
-            "decoder": "airframes_row",
-            "ok": false,
-            "reason": "no arinc622 imi in text",
-            "fields": base,
-        }));
-    };
-    match arinc622::parse_with_direction(&normalized, direction) {
-        Ok(message) => Some(serde_json::json!({
-            "decoder": "arinc622",
-            "ok": true,
-            "fields": base,
-            "message": message,
-        })),
-        Err(err) => Some(serde_json::json!({
-            "decoder": "arinc622",
-            "ok": false,
-            "fields": base,
-            "error": err.to_string(),
-            "normalized_text": normalized,
-        })),
-    }
+    Some(acars::decode::compact::compact_acars_value(raw, false))
 }
 
 fn normalize_arinc622_text(text: &str) -> Option<String> {
@@ -699,6 +727,8 @@ async fn websocket_connect(
 ) -> anyhow::Result<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 > {
+    // Install a CryptoProvider if none has been installed yet (required by rustls 0.23+).
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let proxy_env = std::env::var("HTTPS_PROXY")
         .or_else(|_| std::env::var("https_proxy"))
         .ok();
@@ -752,8 +782,6 @@ async fn websocket_connect(
         let root_store = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
-        // Install a CryptoProvider if none has been installed yet (required by rustls 0.23+).
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let tls_config = std::sync::Arc::new(
             rustls::ClientConfig::builder()
                 .with_root_certificates(root_store)

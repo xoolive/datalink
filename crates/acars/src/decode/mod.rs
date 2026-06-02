@@ -1,5 +1,6 @@
 pub mod acars;
 pub mod avlc;
+pub mod compact;
 pub mod helpers;
 pub mod payload;
 pub mod x25;

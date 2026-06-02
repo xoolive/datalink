@@ -19,13 +19,21 @@ pub mod miam;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use self::aoc::label16::Label16Message;
+use self::aoc::label32::Label32Message;
+use self::aoc::label37::Label37Message;
+use self::aoc::label5z::Label5zMessage;
 use self::aoc::label80::AocMessage;
 use self::aoc::oooi::{OooiOffDestination, OooiOffReport};
+use self::aoc::position::AocPositionMessage;
+use self::aoc::weather::WeatherBundle;
 use self::arinc620::media_advisory::MediaAdvisory;
 use self::arinc620::squitter::SquitterMessage;
+use self::arinc622::afn::AfnMessage;
+use self::arinc622::oceanic::OceanicClearance;
 use self::arinc622::Message as Arinc622Message;
 pub use self::arinc622::{Imi, Payload as Arinc622Payload};
-use self::arinc623::atis::AtisRequest;
+use self::arinc623::atis::{AtisDelivery, AtisRequest};
 use self::boeing::ohma::OhmaMessage;
 use self::miam::MiamMessage;
 
@@ -77,6 +85,28 @@ pub enum AcarsAppPayload {
     #[serde(rename = "AOC80")]
     AocReport(AocMessage),
 
+    /// AOC weather/METAR bundle.
+    Weather(WeatherBundle),
+
+    /// ACARS label `5Z` slash-field AOC message.
+    #[serde(rename = "5Z")]
+    Label5z(Label5zMessage),
+
+    /// AOC position/telemetry report.
+    AocPosition(AocPositionMessage),
+
+    /// ACARS label `32` CSV telemetry.
+    #[serde(rename = "32")]
+    Label32(Label32Message),
+
+    /// ACARS label `16` heterogeneous telemetry classifier.
+    #[serde(rename = "16")]
+    Label16(Label16Message),
+
+    /// ACARS label `37` obfuscated/encoded ops classifier.
+    #[serde(rename = "37")]
+    Label37(Label37Message),
+
     /// ACARS label `Q0` — ACARS link test / keepalive. Payload is always empty.
     #[serde(rename = "Q0")]
     LinkTest,
@@ -92,6 +122,18 @@ pub enum AcarsAppPayload {
     /// ACARS label `B9` — ATIS request (TI2 protocol, aircraft → ground).
     #[serde(rename = "B9")]
     AtisRequest(AtisRequest),
+
+    /// ACARS label `A9` — ATIS delivery (TI2 protocol, ground → aircraft).
+    #[serde(rename = "A9")]
+    AtisDelivery(AtisDelivery),
+
+    /// ACARS labels `A0`/`B0` — AFN CONTACT / logon.
+    #[serde(rename = "AFN")]
+    Afn(AfnMessage),
+
+    /// ACARS label `B1` — oceanic clearance / OC1.
+    #[serde(rename = "OC1")]
+    OceanicClearance(OceanicClearance),
 
     /// Non-empty `text` with no structured decoder.
     Text(String),
