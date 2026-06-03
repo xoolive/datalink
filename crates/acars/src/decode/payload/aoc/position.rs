@@ -168,7 +168,7 @@ fn parse_decimal_pair(s: &str) -> Option<(f64, f64)> {
         parse_signed_decimal_token(lat_part)
     };
     let lon = parse_signed_decimal_token(lon_part)?;
-    Some((lat.unwrap_or(0.0), lon))
+    Some((lat?, lon))
 }
 
 fn find_latlon(s: &str) -> Option<(f64, f64)> {

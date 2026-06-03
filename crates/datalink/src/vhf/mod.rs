@@ -9,11 +9,10 @@ use serde::Deserialize;
 use source::{Address, Source, DEFAULT_CHUNK_SIZE};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::fs;
 
 #[derive(Debug, Default, Clone, Deserialize, Parser)]
-#[command(name = "acars131", about = "Classic VHF ACARS frontend")]
-struct Options {
+#[command(about = "Classic VHF ACARS frontend")]
+pub(crate) struct Options {
     /// Activate JSON output (currently JSONL is always emitted; kept for jet1090-style config compatibility)
     #[arg(short, long)]
     #[serde(default)]
@@ -33,27 +32,22 @@ struct Options {
     #[serde(default)]
     stats: bool,
 
-    /// Legacy file input path; equivalent to a file:// source
-    #[arg(short, long)]
-    #[serde(skip)]
-    file: Option<String>,
-
-    /// Legacy I/Q sample format for --file: cu8, cs8, cs16, cf32
+    /// I/Q sample format for file input: cu8, cs8, cs16, cf32
     #[arg(long, default_value = "cu8")]
     #[serde(default)]
     format: Option<String>,
 
-    /// Legacy center frequency for --file and default SDR sources
+    /// Center frequency for file and SDR sources
     #[arg(long)]
     #[serde(default)]
     center_freq: Option<u32>,
 
-    /// Legacy sample rate for --file and default SDR sources
+    /// Sample rate for file and SDR sources
     #[arg(long)]
     #[serde(default)]
     sample_rate: Option<u32>,
 
-    /// Legacy ACARS channel frequencies in Hz
+    /// ACARS channel frequencies in Hz
     #[arg(long, num_args = 1..)]
     #[serde(default)]
     channel: Option<Vec<u32>>,
@@ -63,9 +57,9 @@ struct Options {
     #[serde(skip)]
     dump_demod_wav: Option<String>,
 
-    /// Source URLs: file://, rtlsdr://, airspy://, hackrf://, soapy://
+    /// Source URL: file://, rtlsdr://, airspy://, hackrf://, soapy://
     #[serde(default)]
-    sources: Vec<Source>,
+    source: Option<Source>,
 }
 
 #[derive(Default)]
@@ -75,30 +69,14 @@ struct DecodeStats {
     parse_fail: u64,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let mut options = load_config().await.unwrap_or_default();
-    let cli = Options::parse();
+pub(crate) async fn run(cli: Options) -> anyhow::Result<()> {
+    let mut options = Options::default();
     merge_cli(&mut options, cli)?;
 
-    if options.sources.is_empty() {
-        options.sources.push(Source {
-            address: Address::File {
-                file: "-".to_string(),
-            },
-            name: Some("stdin".to_string()),
-            center_freq: options.center_freq,
-            sample_rate: options.sample_rate,
-            channels: options.channel.clone(),
-            gain: None,
-            bias_tee: None,
-            amp_enable: None,
-            lna_gain: None,
-            vga_gain: None,
-            format: options.format.clone(),
-        });
-    }
-
+    anyhow::ensure!(
+        options.source.is_some(),
+        "missing source; pass an explicit source such as file://capture.cu8, -, or rtlsdr://"
+    );
     let mut output = if let Some(path) = options.output.as_deref() {
         Some(std::io::BufWriter::new(std::fs::File::create(expanduser(
             path,
@@ -108,18 +86,17 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mut total = DecodeStats::default();
-    for src in options.sources.iter() {
-        let stats = decode_source(
-            src,
-            options.dump_demod_wav.as_deref(),
-            options.raw,
-            output.as_mut(),
-        )
-        .await?;
-        total.demod_frames += stats.demod_frames;
-        total.parsed_ok += stats.parsed_ok;
-        total.parse_fail += stats.parse_fail;
-    }
+    let src = options.source.as_ref().expect("source checked before run");
+    let stats = decode_source(
+        src,
+        options.dump_demod_wav.as_deref(),
+        options.raw,
+        output.as_mut(),
+    )
+    .await?;
+    total.demod_frames += stats.demod_frames;
+    total.parsed_ok += stats.parsed_ok;
+    total.parse_fail += stats.parse_fail;
 
     if let Some(writer) = output.as_mut() {
         use std::io::Write;
@@ -128,31 +105,12 @@ async fn main() -> anyhow::Result<()> {
 
     if options.stats {
         eprintln!(
-            "acars131 stats: demod_frames={} parsed_ok={} parse_fail={}",
+            "datalink vhf stats: demod_frames={} parsed_ok={} parse_fail={}",
             total.demod_frames, total.parsed_ok, total.parse_fail
         );
     }
 
     Ok(())
-}
-
-async fn load_config() -> anyhow::Result<Options> {
-    let mut path = match std::env::var("XDG_CONFIG_HOME") {
-        Ok(value) => expanduser(&value),
-        Err(_) => dirs::config_dir().unwrap_or_default(),
-    };
-    path.push("acars131");
-    path.push("config.toml");
-
-    let explicit = std::env::var("ACARS131_CONFIG")
-        .ok()
-        .map(|p| expanduser(&p));
-    let path = explicit.unwrap_or(path);
-    if !path.exists() {
-        return Ok(Options::default());
-    }
-    let text = fs::read_to_string(path).await?;
-    Ok(toml::from_str(&text)?)
 }
 
 fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
@@ -171,22 +129,8 @@ fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
     if cli.dump_demod_wav.is_some() {
         options.dump_demod_wav = cli.dump_demod_wav;
     }
-    if let Some(file) = cli.file {
-        options.sources = vec![Source {
-            address: Address::File { file },
-            name: None,
-            center_freq: cli.center_freq,
-            sample_rate: cli.sample_rate,
-            channels: cli.channel.clone(),
-            gain: None,
-            bias_tee: None,
-            amp_enable: None,
-            lna_gain: None,
-            vga_gain: None,
-            format: cli.format.clone(),
-        }];
-    } else if !cli.sources.is_empty() {
-        options.sources = cli.sources;
+    if cli.source.is_some() {
+        options.source = cli.source;
     }
     if cli.center_freq.is_some() {
         options.center_freq = cli.center_freq;
@@ -200,7 +144,26 @@ fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
     if cli.format.as_deref() != Some("cu8") {
         options.format = cli.format;
     }
+    apply_source_overrides(options);
     Ok(())
+}
+
+fn apply_source_overrides(options: &mut Options) {
+    let Some(source) = options.source.as_mut() else {
+        return;
+    };
+    if options.center_freq.is_some() {
+        source.center_freq = options.center_freq;
+    }
+    if options.sample_rate.is_some() {
+        source.sample_rate = options.sample_rate;
+    }
+    if options.channel.is_some() {
+        source.channels = options.channel.clone();
+    }
+    if options.format.as_deref() != Some("cu8") {
+        source.format = options.format.clone();
+    }
 }
 
 async fn decode_source(
@@ -218,7 +181,7 @@ async fn decode_source(
     let mut adapter = ResampleAdapter::new(resample_rs);
     if sample_rate != raw_sample_rate {
         eprintln!(
-            "acars131: resampling {:.3} MHz \u{2192} {:.3} MHz for ACARS demod",
+            "datalink vhf: resampling {:.3} MHz \u{2192} {:.3} MHz for ACARS demod",
             raw_sample_rate as f64 / 1e6,
             sample_rate as f64 / 1e6
         );

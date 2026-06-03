@@ -153,6 +153,23 @@ impl FromStr for Source {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "-" {
+            return Ok(Source {
+                address: Address::File {
+                    file: "-".to_string(),
+                },
+                name: Some("stdin".to_string()),
+                center_freq: None,
+                sample_rate: None,
+                channels: None,
+                gain: None,
+                bias_tee: None,
+                amp_enable: None,
+                lna_gain: None,
+                vga_gain: None,
+                format: None,
+            });
+        }
         let default = Url::parse("file://").unwrap();
         let url = default.join(s).map_err(|e| e.to_string())?;
         let address = match url.scheme() {

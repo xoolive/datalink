@@ -7,14 +7,14 @@ pub const DEFAULT_SAMPLE_RATE: u32 = 1_050_000;
 pub const DEFAULT_CHANNELS: &[u32] = &[131_525_000, 131_725_000, 131_825_000];
 pub const DEFAULT_CHUNK_SIZE: usize = 65_536;
 
-#[cfg(feature = "sdr")]
 use desperado::{Gain, IqFormat};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", untagged)]
 pub enum Address {
-    #[cfg(feature = "sdr")]
-    File { file: String },
+    File {
+        file: String,
+    },
     #[cfg(feature = "rtlsdr")]
     Rtlsdr {
         device: Option<usize>,
@@ -26,9 +26,13 @@ pub enum Address {
         serial: Option<String>,
     },
     #[cfg(feature = "hackrf")]
-    Hackrf { device: Option<usize> },
+    Hackrf {
+        device: Option<usize>,
+    },
     #[cfg(feature = "soapy")]
-    Soapy { soapy: String },
+    Soapy {
+        soapy: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,22 +47,16 @@ pub struct Source {
     pub sample_rate: Option<u32>,
     #[serde(default, alias = "channel")]
     pub channels: Option<Vec<u32>>,
-    #[cfg(feature = "sdr")]
     #[serde(default)]
     pub gain: Option<f64>,
-    #[cfg(feature = "sdr")]
     #[serde(default)]
     pub bias_tee: Option<bool>,
-    #[cfg(feature = "sdr")]
     #[serde(default, alias = "rf_amp")]
     pub amp_enable: Option<bool>,
-    #[cfg(feature = "sdr")]
     #[serde(default, alias = "if_gain")]
     pub lna_gain: Option<f64>,
-    #[cfg(feature = "sdr")]
     #[serde(default, alias = "bb_gain")]
     pub vga_gain: Option<f64>,
-    #[cfg(feature = "sdr")]
     #[serde(default, alias = "iq_format")]
     pub format: Option<String>,
 }
@@ -79,7 +77,6 @@ impl Source {
             .unwrap_or_else(|| DEFAULT_CHANNELS.to_vec())
     }
 
-    #[cfg(feature = "sdr")]
     pub fn iq_format(&self) -> IqFormat {
         self.format
             .as_deref()
@@ -88,7 +85,6 @@ impl Source {
             .unwrap_or(IqFormat::Cu8)
     }
 
-    #[cfg(feature = "sdr")]
     pub fn gain(&self, default: f64) -> Gain {
         self.gain.map(Gain::Manual).unwrap_or(Gain::Manual(default))
     }
@@ -98,10 +94,26 @@ impl FromStr for Source {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "-" {
+            return Ok(Source {
+                address: Address::File {
+                    file: "-".to_string(),
+                },
+                name: Some("stdin".to_string()),
+                center_freq: None,
+                sample_rate: None,
+                channels: None,
+                gain: None,
+                bias_tee: None,
+                amp_enable: None,
+                lna_gain: None,
+                vga_gain: None,
+                format: None,
+            });
+        }
         let default = Url::parse("file://").unwrap();
         let url = default.join(s).map_err(|e| e.to_string())?;
         let address = match url.scheme() {
-            #[cfg(feature = "sdr")]
             "file" => {
                 let file = if let Some(host) = url.host_str() {
                     format!("{}{}", host, url.path())
@@ -181,17 +193,11 @@ impl FromStr for Source {
             center_freq: None,
             sample_rate: None,
             channels: None,
-            #[cfg(feature = "sdr")]
             gain: None,
-            #[cfg(feature = "sdr")]
             bias_tee: None,
-            #[cfg(feature = "sdr")]
             amp_enable: None,
-            #[cfg(feature = "sdr")]
             lna_gain: None,
-            #[cfg(feature = "sdr")]
             vga_gain: None,
-            #[cfg(feature = "sdr")]
             format: None,
         };
 
@@ -207,17 +213,11 @@ impl FromStr for Source {
                             source.channels.get_or_insert_with(Vec::new).extend(parsed);
                         }
                     }
-                    #[cfg(feature = "sdr")]
                     "gain" => source.gain = value.parse::<f64>().ok(),
-                    #[cfg(feature = "sdr")]
                     "bias_tee" => source.bias_tee = parse_bool(&value),
-                    #[cfg(feature = "sdr")]
                     "amp_enable" | "rf_amp" => source.amp_enable = parse_bool(&value),
-                    #[cfg(feature = "sdr")]
                     "lna_gain" | "if_gain" => source.lna_gain = value.parse::<f64>().ok(),
-                    #[cfg(feature = "sdr")]
                     "vga_gain" | "bb_gain" => source.vga_gain = value.parse::<f64>().ok(),
-                    #[cfg(feature = "sdr")]
                     "format" | "iq_format" => source.format = Some(value.into_owned()),
                     _ if !key.is_empty() && value.is_empty() => {
                         source.name = Some(key.into_owned())

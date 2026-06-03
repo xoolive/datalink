@@ -4,7 +4,7 @@ use acars::decode::acars::{decode_acars_text_payload, MessageDirection};
 use acars::decode::avlc::parse_avlc_frame;
 use acars::demod::resample::{maybe_resample, ResampleAdapter};
 use acars::demod::vdl2::{Vdl2Channel, SYMBOL_RATE};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use http::Uri;
 use serde::Deserialize;
@@ -14,11 +14,10 @@ use std::fs::{create_dir_all, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::fs;
 
 #[derive(Debug, Default, Clone, Deserialize, Parser)]
-#[command(name = "vdl136", about = "VDL2 frontend for I/Q and SDR inputs")]
-struct Options {
+#[command(about = "VDL2 frontend for I/Q and SDR inputs")]
+pub(crate) struct Options {
     /// Dump a copy of decoded AVLC frames as JSONL
     #[arg(short, long)]
     output: Option<String>,
@@ -53,66 +52,25 @@ struct Options {
     #[arg(long)]
     #[serde(default)]
     sync_threshold: Option<f32>,
-    /// Legacy file input path; equivalent to a file:// source
-    #[arg(short, long)]
-    #[serde(skip)]
-    file: Option<String>,
-    /// Legacy I/Q sample format for --file: cu8, cs8, cs16, cf32
+    /// I/Q sample format for file input: cu8, cs8, cs16, cf32
     #[arg(long, default_value = "cu8")]
     #[serde(default)]
     format: Option<String>,
-    /// Legacy center frequency for --file and default SDR sources
+    /// Center frequency for file and SDR sources
     #[arg(long)]
     #[serde(default)]
     center_freq: Option<u32>,
-    /// Legacy sample rate for --file and default SDR sources
+    /// Sample rate for file and SDR sources
     #[arg(long)]
     #[serde(default)]
     sample_rate: Option<u32>,
-    /// Legacy VDL2 channel frequencies in Hz
+    /// VDL2 channel frequencies in Hz
     #[arg(long, num_args = 1..)]
     #[serde(default)]
     channel: Option<Vec<u32>>,
-    /// Source URLs: file://, rtlsdr://, airspy://, hackrf://, soapy://, airframes://, ws://, wss://
+    /// Source URL: file://, rtlsdr://, airspy://, hackrf://, soapy://
     #[serde(default)]
-    sources: Vec<Source>,
-    /// Legacy subcommands, e.g. `vdl136 file --file capture.cu8`
-    #[command(subcommand)]
-    #[serde(skip)]
-    command: Option<Command>,
-}
-
-#[derive(Debug, Clone, Subcommand)]
-enum Command {
-    /// Decode a raw I/Q recording (.rtl / .cu8 file).
-    File {
-        #[arg(short, long, help = "Path to I/Q recording file")]
-        file: String,
-        #[arg(long, default_value_t = source::DEFAULT_CENTER_FREQ)]
-        center_freq: u32,
-        #[arg(long, default_value_t = source::DEFAULT_SAMPLE_RATE)]
-        sample_rate: u32,
-        #[arg(long, num_args = 1.., default_values_t = source::DEFAULT_CHANNELS.to_vec())]
-        channel: Vec<u32>,
-        #[arg(long)]
-        stats: bool,
-        #[arg(long)]
-        reject_log: Option<String>,
-        #[arg(long)]
-        raw: bool,
-        #[arg(long)]
-        include_fcs_fail: bool,
-        #[arg(long)]
-        candidate_log: Option<String>,
-        #[arg(long)]
-        window_start_sec: Option<f64>,
-        #[arg(long)]
-        window_end_sec: Option<f64>,
-        #[arg(long)]
-        demod_trace_dir: Option<String>,
-        #[arg(long, default_value_t = 3.2)]
-        sync_threshold: f32,
-    },
+    source: Option<Source>,
 }
 
 #[derive(Default)]
@@ -124,30 +82,42 @@ struct DecodeStats {
     avlc_parse_fail: u64,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let mut options = load_config().await.unwrap_or_default();
-    let cli = Options::parse();
+pub(crate) async fn run(cli: Options) -> anyhow::Result<()> {
+    let mut options = Options::default();
     merge_cli(&mut options, cli)?;
 
-    if options.sources.is_empty() {
-        options.sources.push(Source {
-            address: Address::File {
-                file: "-".to_string(),
-            },
-            name: Some("stdin".to_string()),
-            center_freq: options.center_freq,
-            sample_rate: options.sample_rate,
-            channels: options.channel.clone(),
-            gain: None,
-            bias_tee: None,
-            amp_enable: None,
-            lna_gain: None,
-            vga_gain: None,
-            format: options.format.clone(),
-        });
+    anyhow::ensure!(
+        options.source.is_some(),
+        "missing source; pass an explicit source such as file://capture.rtl, -, or rtlsdr://"
+    );
+    if matches!(
+        options.source.as_ref().map(|src| &src.address),
+        Some(Address::Websocket { .. })
+    ) {
+        anyhow::bail!("websocket/Airframes.io sources belong to `datalink airframes.io`");
     }
+    run_options(options, "vdl2").await
+}
 
+pub(crate) async fn run_airframes_simple(
+    source: Option<String>,
+    output: Option<String>,
+    stats: bool,
+    raw: bool,
+) -> anyhow::Result<()> {
+    let source = source.unwrap_or_else(|| "airframes://".to_string());
+    let options = Options {
+        output,
+        stats,
+        raw,
+        source: Some(source.parse().map_err(anyhow::Error::msg)?),
+        ..Options::default()
+    };
+
+    run_options(options, "airframes.io").await
+}
+
+async fn run_options(options: Options, stats_name: &str) -> anyhow::Result<()> {
     let mut output = if let Some(path) = options.output.as_deref() {
         Some(BufWriter::new(File::create(expanduser(path))?))
     } else {
@@ -165,22 +135,21 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mut total = DecodeStats::default();
-    for (idx, src) in options.sources.iter().enumerate() {
-        let stats = decode_source(
-            src,
-            idx,
-            &options,
-            output.as_mut(),
-            reject_writer.as_mut(),
-            candidate_writer.as_mut(),
-        )
-        .await?;
-        total.demod_frames += stats.demod_frames;
-        total.avlc_ok += stats.avlc_ok;
-        total.avlc_fcs_ok += stats.avlc_fcs_ok;
-        total.avlc_fcs_fail += stats.avlc_fcs_fail;
-        total.avlc_parse_fail += stats.avlc_parse_fail;
-    }
+    let src = options.source.as_ref().expect("source checked before run");
+    let stats = decode_source(
+        src,
+        0,
+        &options,
+        output.as_mut(),
+        reject_writer.as_mut(),
+        candidate_writer.as_mut(),
+    )
+    .await?;
+    total.demod_frames += stats.demod_frames;
+    total.avlc_ok += stats.avlc_ok;
+    total.avlc_fcs_ok += stats.avlc_fcs_ok;
+    total.avlc_fcs_fail += stats.avlc_fcs_fail;
+    total.avlc_parse_fail += stats.avlc_parse_fail;
 
     if let Some(w) = output.as_mut() {
         w.flush()?;
@@ -194,89 +163,15 @@ async fn main() -> anyhow::Result<()> {
 
     if options.stats {
         eprintln!(
-            "vdl136 stats: demod_frames={} avlc_ok={} avlc_fcs_ok={} avlc_fcs_fail={} avlc_parse_fail={}",
-            total.demod_frames, total.avlc_ok, total.avlc_fcs_ok, total.avlc_fcs_fail, total.avlc_parse_fail
+            "{} stats: demod_frames={} avlc_ok={} avlc_fcs_ok={} avlc_fcs_fail={} avlc_parse_fail={}",
+            stats_name, total.demod_frames, total.avlc_ok, total.avlc_fcs_ok, total.avlc_fcs_fail, total.avlc_parse_fail
         );
     }
 
     Ok(())
 }
 
-async fn load_config() -> anyhow::Result<Options> {
-    let mut path = match std::env::var("XDG_CONFIG_HOME") {
-        Ok(value) => expanduser(&value),
-        Err(_) => dirs::config_dir().unwrap_or_default(),
-    };
-    path.push("vdl136");
-    path.push("config.toml");
-    let explicit = std::env::var("VDL136_CONFIG").ok().map(|p| expanduser(&p));
-    let path = explicit.unwrap_or(path);
-    if !path.exists() {
-        return Ok(Options::default());
-    }
-    let text = fs::read_to_string(path).await?;
-    Ok(toml::from_str(&text)?)
-}
-
 fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
-    if let Some(command) = cli.command {
-        match command {
-            Command::File {
-                file,
-                center_freq,
-                sample_rate,
-                channel,
-                stats,
-                reject_log,
-                raw,
-                include_fcs_fail,
-                candidate_log,
-                window_start_sec,
-                window_end_sec,
-                demod_trace_dir,
-                sync_threshold,
-            } => {
-                options.sources = vec![Source {
-                    address: Address::File { file },
-                    name: None,
-                    center_freq: Some(center_freq),
-                    sample_rate: Some(sample_rate),
-                    channels: Some(channel),
-                    gain: None,
-                    bias_tee: None,
-                    amp_enable: None,
-                    lna_gain: None,
-                    vga_gain: None,
-                    format: Some("cu8".into()),
-                }];
-                if stats {
-                    options.stats = true;
-                }
-                if reject_log.is_some() {
-                    options.reject_log = reject_log;
-                }
-                if raw {
-                    options.raw = true;
-                }
-                if include_fcs_fail {
-                    options.include_fcs_fail = true;
-                }
-                if candidate_log.is_some() {
-                    options.candidate_log = candidate_log;
-                }
-                if window_start_sec.is_some() {
-                    options.window_start_sec = window_start_sec;
-                }
-                if window_end_sec.is_some() {
-                    options.window_end_sec = window_end_sec;
-                }
-                if demod_trace_dir.is_some() {
-                    options.demod_trace_dir = demod_trace_dir;
-                }
-                options.sync_threshold = Some(sync_threshold);
-            }
-        }
-    }
     if cli.output.is_some() {
         options.output = cli.output;
     }
@@ -307,22 +202,8 @@ fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
     if cli.sync_threshold.is_some() {
         options.sync_threshold = cli.sync_threshold;
     }
-    if let Some(file) = cli.file {
-        options.sources = vec![Source {
-            address: Address::File { file },
-            name: None,
-            center_freq: cli.center_freq,
-            sample_rate: cli.sample_rate,
-            channels: cli.channel.clone(),
-            gain: None,
-            bias_tee: None,
-            amp_enable: None,
-            lna_gain: None,
-            vga_gain: None,
-            format: cli.format.clone(),
-        }];
-    } else if !cli.sources.is_empty() {
-        options.sources = cli.sources;
+    if cli.source.is_some() {
+        options.source = cli.source;
     }
     if cli.center_freq.is_some() {
         options.center_freq = cli.center_freq;
@@ -336,7 +217,26 @@ fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
     if cli.format.as_deref() != Some("cu8") {
         options.format = cli.format;
     }
+    apply_source_overrides(options);
     Ok(())
+}
+
+fn apply_source_overrides(options: &mut Options) {
+    let Some(source) = options.source.as_mut() else {
+        return;
+    };
+    if options.center_freq.is_some() {
+        source.center_freq = options.center_freq;
+    }
+    if options.sample_rate.is_some() {
+        source.sample_rate = options.sample_rate;
+    }
+    if options.channel.is_some() {
+        source.channels = options.channel.clone();
+    }
+    if options.format.as_deref() != Some("cu8") {
+        source.format = options.format.clone();
+    }
 }
 
 async fn decode_source(
@@ -364,7 +264,7 @@ async fn decode_source(
     let mut adapter = ResampleAdapter::new(resample_rs);
     if sample_rate != raw_sample_rate {
         eprintln!(
-            "vdl136: resampling {:.3} MHz → {:.3} MHz for VDL2 demod",
+            "datalink vdl2: resampling {:.3} MHz → {:.3} MHz for VDL2 demod",
             raw_sample_rate as f64 / 1e6,
             sample_rate as f64 / 1e6
         );
@@ -616,14 +516,14 @@ fn websocket_record(
     raw: bool,
 ) -> Value {
     let decoded = if event == "message" {
-        decode_airframes_message(&payload)
+        decode_airframes_message(&payload, raw)
     } else {
         None
     };
     let mut record = serde_json::json!({
         "source": src.label(),
         "source_index": source_index,
-        "bearer": "websocket",
+        "bearer": "airframes.io",
         "event": event,
         "decoded": decoded,
     });
@@ -636,7 +536,7 @@ fn websocket_record(
     record
 }
 
-fn decode_airframes_message(payload: &Value) -> Option<Value> {
+fn decode_airframes_message(payload: &Value, include_raw: bool) -> Option<Value> {
     let row = if payload.is_array() {
         payload.as_array()?.first()?
     } else {
@@ -669,7 +569,7 @@ fn decode_airframes_message(payload: &Value) -> Option<Value> {
 
     let normalized_text = normalize_arinc622_text(text).unwrap_or_else(|| text.to_string());
     let app = decode_acars_text_payload(label, None, &normalized_text, direction);
-    let raw = serde_json::json!({
+    let raw_val = serde_json::json!({
         "timestamp": timestamp,
         "label": label,
         "tail": row.get("tail").cloned().unwrap_or(Value::Null),
@@ -677,7 +577,7 @@ fn decode_airframes_message(payload: &Value) -> Option<Value> {
         "direction": direction,
         "data": app,
         "metadata": {
-            "bearer": "airframes",
+            "bearer": "airframes.io",
             "source": row.get("source").cloned().unwrap_or(Value::Null),
             "source_type": row.get("source_type").cloned().unwrap_or(Value::Null),
             "frequency": row.get("frequency").cloned().unwrap_or(Value::Null),
@@ -685,7 +585,10 @@ fn decode_airframes_message(payload: &Value) -> Option<Value> {
             "airframes_id": row.get("id").cloned().unwrap_or(Value::Null),
         }
     });
-    Some(acars::decode::compact::compact_acars_value(raw, false))
+    Some(acars::decode::compact::compact_acars_value(
+        raw_val,
+        include_raw,
+    ))
 }
 
 fn normalize_arinc622_text(text: &str) -> Option<String> {
