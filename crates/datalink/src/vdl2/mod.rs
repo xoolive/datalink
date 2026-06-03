@@ -7,6 +7,7 @@ use acars::demod::vdl2::{Vdl2Channel, SYMBOL_RATE};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use http::Uri;
+use redis::AsyncCommands;
 use serde::Deserialize;
 use serde_json::Value;
 use source::{Address, Source, DEFAULT_CHUNK_SIZE};
@@ -68,6 +69,14 @@ pub(crate) struct Options {
     #[arg(long, num_args = 1..)]
     #[serde(default)]
     channel: Option<Vec<u32>>,
+    /// Publish decoded application messages to Redis pub/sub topics
+    #[arg(long, value_name = "REDIS URL")]
+    #[serde(default)]
+    redis_url: Option<String>,
+    /// Retry interval (seconds) when publishing to Redis fails; 0 disables retry
+    #[arg(long, default_value_t = 5)]
+    #[serde(default)]
+    redis_retry_interval: u64,
     /// Source URL: file://, rtlsdr://, airspy://, hackrf://, soapy://
     #[serde(default)]
     source: Option<Source>,
@@ -80,6 +89,41 @@ struct DecodeStats {
     avlc_fcs_ok: u64,
     avlc_fcs_fail: u64,
     avlc_parse_fail: u64,
+}
+
+struct RedisPublisher {
+    connection: redis::aio::MultiplexedConnection,
+    retry_interval: Duration,
+}
+
+impl RedisPublisher {
+    async fn connect(url: &str, retry_interval_secs: u64) -> anyhow::Result<Self> {
+        let client = redis::Client::open(url)?;
+        let connection = client.get_multiplexed_async_connection().await?;
+        Ok(Self {
+            connection,
+            retry_interval: Duration::from_secs(retry_interval_secs),
+        })
+    }
+
+    async fn publish(&mut self, topic: &str, payload: &str) {
+        loop {
+            match self.connection.publish::<_, _, ()>(topic, payload).await {
+                Ok(()) => break,
+                Err(err) if self.retry_interval.is_zero() => {
+                    eprintln!("datalink vdl2: Redis publish to {topic} failed: {err}");
+                    break;
+                }
+                Err(err) => {
+                    eprintln!(
+                        "datalink vdl2: Redis publish to {topic} failed: {err}; retrying in {}s",
+                        self.retry_interval.as_secs()
+                    );
+                    tokio::time::sleep(self.retry_interval).await;
+                }
+            }
+        }
+    }
 }
 
 pub(crate) async fn run(cli: Options) -> anyhow::Result<()> {
@@ -104,12 +148,16 @@ pub(crate) async fn run_airframes_simple(
     output: Option<String>,
     stats: bool,
     raw: bool,
+    redis_url: Option<String>,
+    redis_retry_interval: u64,
 ) -> anyhow::Result<()> {
     let source = source.unwrap_or_else(|| "airframes://".to_string());
     let options = Options {
         output,
         stats,
         raw,
+        redis_url,
+        redis_retry_interval,
         source: Some(source.parse().map_err(anyhow::Error::msg)?),
         ..Options::default()
     };
@@ -134,6 +182,12 @@ async fn run_options(options: Options, stats_name: &str) -> anyhow::Result<()> {
         None
     };
 
+    let mut redis = if let Some(url) = options.redis_url.as_deref() {
+        Some(RedisPublisher::connect(url, options.redis_retry_interval).await?)
+    } else {
+        None
+    };
+
     let mut total = DecodeStats::default();
     let src = options.source.as_ref().expect("source checked before run");
     let stats = decode_source(
@@ -143,6 +197,7 @@ async fn run_options(options: Options, stats_name: &str) -> anyhow::Result<()> {
         output.as_mut(),
         reject_writer.as_mut(),
         candidate_writer.as_mut(),
+        redis.as_mut(),
     )
     .await?;
     total.demod_frames += stats.demod_frames;
@@ -202,6 +257,12 @@ fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
     if cli.sync_threshold.is_some() {
         options.sync_threshold = cli.sync_threshold;
     }
+    if cli.redis_url.is_some() {
+        options.redis_url = cli.redis_url;
+    }
+    if cli.redis_retry_interval != 5 {
+        options.redis_retry_interval = cli.redis_retry_interval;
+    }
     if cli.source.is_some() {
         options.source = cli.source;
     }
@@ -246,9 +307,10 @@ async fn decode_source(
     mut output: Option<&mut BufWriter<File>>,
     mut reject_writer: Option<&mut BufWriter<File>>,
     mut candidate_writer: Option<&mut BufWriter<File>>,
+    mut redis: Option<&mut RedisPublisher>,
 ) -> anyhow::Result<DecodeStats> {
     if matches!(src.address, Address::Websocket { .. }) {
-        return decode_websocket_source(src, source_index, options.raw, output).await;
+        return decode_websocket_source(src, source_index, options.raw, output, redis).await;
     }
 
     let center_freq = src.center_freq();
@@ -377,10 +439,14 @@ async fn decode_source(
                                 }
                                 let obj =
                                     acars::decode::compact::compact_avlc_value(obj, options.raw);
+                                let topic = redis_topic_for_record(&obj);
                                 let line = serde_json::to_string(&obj)?;
                                 println!("{line}");
                                 if let Some(w) = output.as_mut() {
                                     writeln!(w, "{line}")?;
+                                }
+                                if let (Some(redis), Some(topic)) = (redis.as_deref_mut(), topic) {
+                                    redis.publish(topic, &line).await;
                                 }
                             }
                             Err(err) => {
@@ -420,6 +486,7 @@ async fn decode_websocket_source(
     source_index: usize,
     raw: bool,
     mut output: Option<&mut BufWriter<File>>,
+    mut redis: Option<&mut RedisPublisher>,
 ) -> anyhow::Result<DecodeStats> {
     let Address::Websocket {
         websocket,
@@ -477,10 +544,14 @@ async fn decode_websocket_source(
                     }
                     stats.avlc_ok += 1;
                     let record = websocket_record(src, source_index, &event, payload, raw);
+                    let topic = redis_topic_for_record(&record);
                     let line = serde_json::to_string(&record)?;
                     println!("{line}");
                     if let Some(w) = output.as_mut() {
                         writeln!(w, "{line}")?;
+                    }
+                    if let (Some(redis), Some(topic)) = (redis.as_deref_mut(), topic) {
+                        redis.publish(topic, &line).await;
                     }
                 }
             }
@@ -493,6 +564,45 @@ async fn decode_websocket_source(
         }
     }
     Ok(stats)
+}
+
+fn redis_topic_for_record(record: &Value) -> Option<&'static str> {
+    let decoded = record.get("decoded").unwrap_or(record);
+    if decoded.get("message_class").and_then(Value::as_str) != Some("app_message") {
+        return None;
+    }
+    let app = decoded.get("app")?;
+    if app.is_null() {
+        return None;
+    }
+
+    let protocol = app
+        .get("protocol")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if matches!(protocol, "fans1a_cpdlc" | "atn_b1_cpdlc" | "cpdlc") {
+        return Some("datalink-cpdlc");
+    }
+    if matches!(protocol, "ads_c" | "adsc") {
+        return Some("datalink-adsc");
+    }
+    if matches!(protocol, "squitter" | "sq")
+        || decoded.get("label").and_then(Value::as_str) == Some("SQ")
+    {
+        return Some("datalink-sq");
+    }
+
+    let stack_has_acars = decoded
+        .get("protocol_stack")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|v| v.as_str() == Some("acars"));
+    if stack_has_acars && !matches!(protocol, "text" | "unknown" | "") {
+        return Some("datalink-aoc");
+    }
+
+    Some("datalink-other")
 }
 
 fn parse_socketio_event(packet: &str) -> Option<(String, Value)> {
@@ -561,6 +671,8 @@ fn decode_airframes_message(payload: &Value, include_raw: bool) -> Option<Value>
             "timestamp": timestamp,
             "label": row.get("label").cloned().unwrap_or(Value::Null),
             "tail": row.get("tail").cloned().unwrap_or(Value::Null),
+            "src": airframes_addr_value(row, "from_hex"),
+            "dst": airframes_addr_value(row, "to_hex"),
             "source_type": row.get("source_type").cloned().unwrap_or(Value::Null),
             "frequency": row.get("frequency").cloned().unwrap_or(Value::Null),
             "app": Value::Null,
@@ -569,12 +681,16 @@ fn decode_airframes_message(payload: &Value, include_raw: bool) -> Option<Value>
 
     let normalized_text = normalize_arinc622_text(text).unwrap_or_else(|| text.to_string());
     let app = decode_acars_text_payload(label, None, &normalized_text, direction);
+    let src_addr = airframes_addr_value(row, "from_hex");
+    let dst_addr = airframes_addr_value(row, "to_hex");
     let raw_val = serde_json::json!({
         "timestamp": timestamp,
         "label": label,
         "tail": row.get("tail").cloned().unwrap_or(Value::Null),
         "text": text,
         "direction": direction,
+        "src": src_addr,
+        "dst": dst_addr,
         "data": app,
         "metadata": {
             "bearer": "airframes.io",
@@ -589,6 +705,31 @@ fn decode_airframes_message(payload: &Value, include_raw: bool) -> Option<Value>
         raw_val,
         include_raw,
     ))
+}
+
+fn airframes_addr_value(row: &Value, key: &str) -> Value {
+    let Some(hex) = row.get(key).and_then(Value::as_str) else {
+        return Value::Null;
+    };
+    let addr = hex.trim().to_ascii_lowercase();
+    if addr.len() != 6 || !addr.chars().all(|c| c.is_ascii_hexdigit()) {
+        return serde_json::json!({ "icao24": addr });
+    }
+
+    let aircraft_icao = row
+        .pointer("/airframe/icao")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    let addr_type = if aircraft_icao.as_deref() == Some(addr.as_str()) {
+        "aircraft"
+    } else {
+        "ground_station"
+    };
+
+    serde_json::json!({
+        "icao24": addr,
+        "type": addr_type,
+    })
 }
 
 fn normalize_arinc622_text(text: &str) -> Option<String> {

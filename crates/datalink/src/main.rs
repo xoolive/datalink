@@ -54,6 +54,12 @@ struct AirframesOptions {
     /// Include the original websocket payload under raw
     #[arg(long)]
     raw: bool,
+    /// Publish decoded application messages to Redis pub/sub topics
+    #[arg(long, value_name = "REDIS URL")]
+    redis_url: Option<String>,
+    /// Retry interval (seconds) when publishing to Redis fails; 0 disables retry
+    #[arg(long, default_value_t = 5)]
+    redis_retry_interval: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -94,8 +100,15 @@ async fn main() -> anyhow::Result<()> {
         Command::Vdl2(options) => vdl2::run(options).await,
         Command::Vhf(options) => vhf::run(options).await,
         Command::AirframesIo(options) => {
-            vdl2::run_airframes_simple(options.source, options.output, options.stats, options.raw)
-                .await
+            vdl2::run_airframes_simple(
+                options.source,
+                options.output,
+                options.stats,
+                options.raw,
+                options.redis_url,
+                options.redis_retry_interval,
+            )
+            .await
         }
         Command::Hfdl(options) => hfdl::run(options),
         Command::Decode { command } => run_decode(command),

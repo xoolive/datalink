@@ -94,6 +94,8 @@ pub fn compact_acars_value(raw: Value, include_raw: bool) -> Value {
         "tail",
         "label",
         "direction",
+        "src",
+        "dst",
         "block_id",
         "msg_nb",
         "flight_id",
