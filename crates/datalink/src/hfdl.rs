@@ -1,6 +1,10 @@
+use acars::decode::{
+    acars::{parse_acars_frame, MessageDirection},
+    compact::compact_value,
+};
+use acars::demod::hfdl::{diagnose_channel, HfdlDemodConfig};
 use clap::{Parser, ValueEnum};
-use desperado::dsp::resampler::ComplexResampler;
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::num_complex::Complex;
 use serde_json::json;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -15,39 +19,13 @@ const DEFAULT_HFDL_CHANNELS_KHZ: &[f64] = &[
     13342.0, 13351.0,
 ];
 
-const HFDL_SSB_CARRIER_OFFSET_HZ: f64 = 1440.0;
-const FFT_SIZE: usize = 65_536;
-const HFDL_SYMBOL_RATE: u32 = 1_800;
-const HFDL_SPS: u32 = 3;
-const HFDL_DEMOD_RATE: u32 = HFDL_SYMBOL_RATE * HFDL_SPS;
-#[allow(clippy::excessive_precision)]
-const HFDL_MATCHED_FILTER: [f32; 19] = [
-    -0.0170974647427123,
-    0.01148231492068473,
-    0.03138375667422348,
-    0.009454398851680437,
-    -0.04161644170893816,
-    -0.06451564801420356,
-    -0.005495792933327306,
-    0.1316404671361545,
-    0.2759693160697777,
-    0.3375901874933208,
-    0.2759693160697777,
-    0.1316404671361545,
-    -0.005495792933327306,
-    -0.06451564801420356,
-    -0.04161644170893816,
-    0.009454398851680437,
-    0.03138375667422348,
-    0.01148231492068473,
-    -0.0170974647427123,
-];
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum SampleFormat {
     U8,
     Cs16,
     Cf32,
+    /// 16-bit stereo WAV I/Q file (auto-selected for .wav sources when --format is omitted).
+    Wav16,
 }
 
 impl SampleFormat {
@@ -56,33 +34,16 @@ impl SampleFormat {
             Self::U8 => 2,
             Self::Cs16 => 4,
             Self::Cf32 => 8,
+            Self::Wav16 => 4,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum HfdlMode {
-    /// Native spectral activity scanner for HFDL channels.
-    Scan,
-    /// Native BPSK A-sequence preamble search diagnostic for one channel.
-    Preamble,
-    /// Native deterministic parser for raw HFDL PDU bytes supplied with --pdu-hex.
-    ParsePdu,
-}
-
 #[derive(Debug, Parser)]
-#[command(about = "Native HF Data Link experimental frontend")]
+#[command(about = "HF Data Link decoder for I/Q file captures")]
 pub(crate) struct Options {
-    /// I/Q file source, e.g. file://capture.raw or ~/capture.raw. Optional for --mode parse-pdu.
+    /// I/Q file source, e.g. file://capture.raw or ~/capture.raw.
     source: Option<String>,
-
-    /// Native operation mode
-    #[arg(long, value_enum, default_value_t = HfdlMode::Scan)]
-    mode: HfdlMode,
-
-    /// Raw HFDL PDU bytes as hex for --mode parse-pdu
-    #[arg(long)]
-    pdu_hex: Option<String>,
 
     /// I/Q sample format
     #[arg(long, value_enum, default_value_t = SampleFormat::Cf32)]
@@ -100,275 +61,85 @@ pub(crate) struct Options {
     #[arg(long, num_args = 1..)]
     channel: Option<Vec<f64>>,
 
-    /// Start offset in seconds for scan/preamble modes
+    /// Start offset in seconds for file decoding
     #[arg(long, default_value_t = 0.0)]
     start_second: f64,
 
-    /// Maximum seconds to scan from the file
+    /// Maximum seconds to decode from the file
     #[arg(long, default_value_t = 20.0)]
     max_seconds: f64,
 
-    /// Detection threshold in dB above adjacent-channel estimate
-    #[arg(long, default_value_t = 8.0)]
-    threshold_db: f64,
-
-    /// Emit every scanned window, not only detections
+    /// Print demod/decode counters to stderr at end
     #[arg(long)]
-    all_windows: bool,
+    stats: bool,
 }
 
 pub(crate) fn run(options: Options) -> anyhow::Result<()> {
-    match options.mode {
-        HfdlMode::ParsePdu => parse_pdu_mode(&options),
-        HfdlMode::Preamble => preamble_mode(&options),
-        HfdlMode::Scan => scan_mode(&options),
-    }
+    decode_mode(&options)
 }
 
-fn parse_pdu_mode(options: &Options) -> anyhow::Result<()> {
-    let hex = options
-        .pdu_hex
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("--pdu-hex is required with --mode parse-pdu"))?;
-    let bytes = hex::decode(hex.split_whitespace().collect::<String>())?;
-    let parsed = parse_hfdl_pdu(&bytes);
-    println!("{}", serde_json::to_string_pretty(&parsed)?);
-    Ok(())
-}
-
-fn preamble_mode(options: &Options) -> anyhow::Result<()> {
+fn decode_mode(options: &Options) -> anyhow::Result<()> {
     let source = options
         .source
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("source is required for native HFDL preamble mode"))?;
+        .ok_or_else(|| anyhow::anyhow!("missing source; pass an explicit I/Q file source"))?;
     let path = normalize_source_path(source);
-    let channels = channels_khz(options);
-    anyhow::ensure!(
-        channels.len() == 1,
-        "preamble mode expects exactly one --channel for now"
-    );
-    let channel_khz = channels[0];
-    let channel_hz = channel_khz * 1000.0 + HFDL_SSB_CARRIER_OFFSET_HZ;
-    let offset_hz = channel_hz - options.center_freq as f64;
-    let samples = read_complex_window(
-        &path,
-        options.format,
-        options.sample_rate,
-        options.start_second,
-        options.max_seconds,
-    )?;
-    let mut mixed = Vec::with_capacity(samples.len());
-    let mut phase = 0.0f64;
-    let phase_step = -std::f64::consts::TAU * offset_hz / options.sample_rate as f64;
-    for sample in samples {
-        let osc = Complex::new(phase.cos() as f32, phase.sin() as f32);
-        mixed.push(sample * osc);
-        phase += phase_step;
-        if phase.abs() > std::f64::consts::TAU {
-            phase %= std::f64::consts::TAU;
-        }
-    }
-
-    let mut resampler =
-        ComplexResampler::new(options.sample_rate, HFDL_DEMOD_RATE).map_err(anyhow::Error::msg)?;
-    let mut baseband = resampler.process(&mixed);
-    apply_matched_filter(&mut baseband);
-    let frame_hits = search_frame_sync(&baseband);
-    let a_hits = if frame_hits.is_empty() {
-        search_a_sequence(&baseband)
-    } else {
-        Vec::new()
-    };
-    eprintln!(
-        "hfdl native preamble: channel={:.3} kHz samples={} demod_samples={} frame_hits={} a_hits={}",
-        channel_khz,
-        mixed.len(),
-        baseband.len(),
-        frame_hits.len(),
-        a_hits.len()
-    );
-    for hit in frame_hits.iter().take(100) {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "bearer": "hfdl",
-                "event": "frame_sync_candidate",
-                "channel_khz": channel_khz,
-                "carrier_offset_hz": HFDL_SSB_CARRIER_OFFSET_HZ,
-                "seconds_into_recording": options.start_second + hit.symbol_index as f64 / HFDL_SYMBOL_RATE as f64,
-                "a1_correlation": hit.a1_correlation,
-                "a2_correlation": hit.a2_correlation,
-                "m1_correlation": hit.m1_correlation,
-                "m2_correlation": hit.m2_correlation,
-                "training_correlation": hit.training_correlation,
-                "m1": hit.m1,
-                "residual_hz": hit.residual_hz,
-                "sample_phase": hit.sample_phase,
-                "carrier_phase_rad": hit.carrier_phase,
-            }))?
-        );
-    }
-    for hit in a_hits.iter().take(100) {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "bearer": "hfdl",
-                "event": "preamble_a_candidate",
-                "channel_khz": channel_khz,
-                "carrier_offset_hz": HFDL_SSB_CARRIER_OFFSET_HZ,
-                "seconds_into_recording": options.start_second + hit.symbol_index as f64 / HFDL_SYMBOL_RATE as f64,
-                "correlation": hit.correlation,
-                "residual_hz": hit.residual_hz,
-                "sample_phase": hit.sample_phase,
-                "carrier_phase_rad": hit.carrier_phase,
-            }))?
-        );
-    }
-    Ok(())
-}
-
-fn scan_mode(options: &Options) -> anyhow::Result<()> {
-    let source = options
-        .source
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("source is required for native HFDL scan mode"))?;
-    let path = normalize_source_path(source);
-    let channels = channels_khz(options);
+    let format = effective_format(&path, options.format);
+    let sample_rate = effective_sample_rate(&path, format, options.sample_rate)?;
+    let center_freq = effective_center_freq(&path, format, options.center_freq);
+    let channels = channels_khz_for(options, sample_rate, center_freq);
     anyhow::ensure!(
         !channels.is_empty(),
         "no HFDL channels selected; pass --channel or use a wider/centered recording"
     );
-
-    let mut reader = BufReader::new(File::open(&path)?);
-    seek_to_second(
-        &mut reader,
-        options.format,
-        options.sample_rate,
+    let samples = read_complex_window(
+        &path,
+        format,
+        sample_rate,
         options.start_second,
+        options.max_seconds,
     )?;
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(FFT_SIZE);
-    let mut input = vec![Complex::new(0.0f32, 0.0f32); FFT_SIZE];
-    let window: Vec<f32> = (0..FFT_SIZE)
-        .map(|i| {
-            let phase = std::f32::consts::TAU * i as f32 / (FFT_SIZE - 1) as f32;
-            0.5 - 0.5 * phase.cos()
-        })
-        .collect();
-    let mut raw = vec![0u8; FFT_SIZE * options.format.bytes_per_complex()];
-    let max_blocks =
-        ((options.max_seconds * options.sample_rate as f64) / FFT_SIZE as f64).ceil() as usize;
-    let bin_hz = options.sample_rate as f64 / FFT_SIZE as f64;
-    let mut summaries: Vec<ChannelSummary> = channels
-        .iter()
-        .map(|&khz| ChannelSummary::new(khz))
-        .collect();
-
-    for block_index in 0..max_blocks {
-        if !read_complex_block(&mut reader, options.format, &mut raw, &mut input)? {
-            break;
-        }
-        for (sample, gain) in input.iter_mut().zip(window.iter()) {
-            sample.re *= gain;
-            sample.im *= gain;
-        }
-        fft.process(&mut input);
-        let seconds = block_index as f64 * FFT_SIZE as f64 / options.sample_rate as f64;
-        let powers: Vec<f64> = input.iter().map(|v| v.norm_sqr() as f64 + 1e-30).collect();
-
-        for (summary, &channel_khz) in summaries.iter_mut().zip(channels.iter()) {
-            let carrier_hz = channel_khz * 1000.0 + HFDL_SSB_CARRIER_OFFSET_HZ;
-            let offset_hz = carrier_hz - options.center_freq as f64;
-            let center_power = band_power(&powers, offset_hz, bin_hz, 2);
-            let adj_a = band_power(&powers, offset_hz - 30_000.0, bin_hz, 4);
-            let adj_b = band_power(&powers, offset_hz + 30_000.0, bin_hz, 4);
-            let noise = ((adj_a + adj_b) * 0.5).max(1e-30);
-            let snr_db = 10.0 * (center_power / noise).log10();
-            summary.observe(snr_db, seconds, options.threshold_db);
-            if options.all_windows || snr_db >= options.threshold_db {
-                println!(
-                    "{}",
-                    serde_json::to_string(&json!({
-                        "bearer": "hfdl",
-                        "event": if snr_db >= options.threshold_db { "activity" } else { "scan_window" },
-                        "channel_khz": channel_khz,
-                        "carrier_offset_hz": HFDL_SSB_CARRIER_OFFSET_HZ,
-                        "seconds_into_recording": seconds,
-                        "snr_db": snr_db,
-                    }))?
-                );
+    let mut pdu_ok = 0u64;
+    let mut candidate_count = 0u64;
+    let mut frame_sync_count = 0u64;
+    for &channel_khz in &channels {
+        let diagnostics = diagnose_channel(
+            &samples,
+            &HfdlDemodConfig {
+                input_sample_rate: sample_rate,
+                center_freq_hz: center_freq as f64,
+                channel_khz,
+                use_symbol_sync: true,
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+        frame_sync_count += diagnostics.frame_hits.len() as u64;
+        candidate_count += diagnostics.pdu_candidates.len() as u64;
+        for candidate in &diagnostics.pdu_candidates {
+            let mut parsed = parse_hfdl_pdu(&candidate.bytes);
+            if parsed.get("fcs_ok").and_then(|v| v.as_bool()) != Some(true) {
+                continue;
             }
+            pdu_ok += 1;
+            if let Some(obj) = parsed.as_object_mut() {
+                obj.insert("event".into(), "pdu".into());
+                obj.insert("channel_khz".into(), channel_khz.into());
+                obj.insert("m1".into(), candidate.m1.into());
+                obj.insert("raw_hex".into(), hex::encode_upper(&candidate.bytes).into());
+            }
+            println!("{}", serde_json::to_string(&parsed)?)
         }
     }
-
-    eprintln!(
-        "hfdl native scan: channels={} max_seconds={} threshold_db={}",
-        summaries.len(),
-        options.max_seconds,
-        options.threshold_db
-    );
-    for summary in summaries
-        .iter()
-        .filter(|s| s.best_snr_db >= options.threshold_db)
-    {
+    if options.stats {
         eprintln!(
-            "hfdl activity: {:.3} kHz best_snr_db={:.1} at {:.3}s detections={}",
-            summary.channel_khz, summary.best_snr_db, summary.best_seconds, summary.detections
+            "datalink hfdl stats: channels={} frame_sync={} candidates={} pdu_ok={}",
+            channels.len(),
+            frame_sync_count,
+            candidate_count,
+            pdu_ok
         );
     }
     Ok(())
-}
-
-#[derive(Debug)]
-struct ChannelSummary {
-    channel_khz: f64,
-    best_snr_db: f64,
-    best_seconds: f64,
-    detections: usize,
-}
-
-impl ChannelSummary {
-    fn new(channel_khz: f64) -> Self {
-        Self {
-            channel_khz,
-            best_snr_db: f64::NEG_INFINITY,
-            best_seconds: 0.0,
-            detections: 0,
-        }
-    }
-
-    fn observe(&mut self, snr_db: f64, seconds: f64, threshold_db: f64) {
-        if snr_db > self.best_snr_db {
-            self.best_snr_db = snr_db;
-            self.best_seconds = seconds;
-        }
-        if snr_db >= threshold_db {
-            self.detections += 1;
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PreambleHit {
-    correlation: f64,
-    residual_hz: f64,
-    sample_phase: usize,
-    carrier_phase: f64,
-    symbol_index: usize,
-}
-
-#[derive(Debug, Clone)]
-struct FrameSyncHit {
-    a1_correlation: f64,
-    a2_correlation: f64,
-    m1_correlation: f64,
-    m2_correlation: f64,
-    training_correlation: f64,
-    m1: usize,
-    residual_hz: f64,
-    sample_phase: usize,
-    carrier_phase: f64,
-    symbol_index: usize,
 }
 
 fn read_complex_window(
@@ -378,6 +149,9 @@ fn read_complex_window(
     start_second: f64,
     max_seconds: f64,
 ) -> anyhow::Result<Vec<Complex<f32>>> {
+    if format == SampleFormat::Wav16 {
+        return read_wav_complex_window(path, start_second, max_seconds);
+    }
     let mut reader = BufReader::new(File::open(path)?);
     seek_to_second(&mut reader, format, sample_rate, start_second)?;
     let count = (sample_rate as f64 * max_seconds).ceil() as usize;
@@ -396,6 +170,39 @@ fn read_complex_window(
     Ok(out)
 }
 
+fn read_wav_complex_window(
+    path: &str,
+    start_second: f64,
+    max_seconds: f64,
+) -> anyhow::Result<Vec<Complex<f32>>> {
+    let mut reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    anyhow::ensure!(
+        spec.channels == 2,
+        "HFDL WAV input expects stereo I/Q, got {} channels",
+        spec.channels
+    );
+    anyhow::ensure!(
+        spec.sample_format == hound::SampleFormat::Int && spec.bits_per_sample == 16,
+        "HFDL WAV input currently supports 16-bit PCM stereo only"
+    );
+    let start_frames = (start_second * spec.sample_rate as f64).round() as usize;
+    let max_frames = (max_seconds * spec.sample_rate as f64).ceil() as usize;
+    let mut samples = reader.samples::<i16>();
+    for _ in 0..start_frames.saturating_mul(2) {
+        if samples.next().is_none() {
+            return Ok(Vec::new());
+        }
+    }
+    let mut out = Vec::with_capacity(max_frames);
+    for _ in 0..max_frames {
+        let Some(i) = samples.next() else { break };
+        let Some(q) = samples.next() else { break };
+        out.push(Complex::new(i? as f32 / 32768.0, q? as f32 / 32768.0));
+    }
+    Ok(out)
+}
+
 fn seek_to_second<R: Seek>(
     reader: &mut R,
     format: SampleFormat,
@@ -409,267 +216,6 @@ fn seek_to_second<R: Seek>(
         (start_second * sample_rate as f64).round() as u64 * format.bytes_per_complex() as u64;
     reader.seek(SeekFrom::Start(byte_offset))?;
     Ok(())
-}
-
-fn apply_matched_filter(samples: &mut [Complex<f32>]) {
-    let input = samples.to_vec();
-    for idx in 0..samples.len() {
-        let mut acc = Complex::new(0.0f32, 0.0f32);
-        for (tap_idx, tap) in HFDL_MATCHED_FILTER.iter().enumerate() {
-            if idx >= tap_idx {
-                acc += input[idx - tap_idx] * *tap;
-            }
-        }
-        samples[idx] = acc;
-    }
-}
-
-fn search_frame_sync(samples: &[Complex<f32>]) -> Vec<FrameSyncHit> {
-    let a_template = a_sequence_symbols();
-    let m1_templates = m1_sequences();
-    let phases: Vec<f64> = (0..16)
-        .map(|idx| std::f64::consts::PI * idx as f64 / 16.0)
-        .collect();
-    let mut hits = Vec::new();
-    for residual_step in -40..=40 {
-        let residual_hz = residual_step as f64 * 5.0;
-        let phase_step = -std::f64::consts::TAU * residual_hz / HFDL_DEMOD_RATE as f64;
-        for sample_phase in 0..HFDL_SPS as usize {
-            let symbols: Vec<Complex<f32>> = samples
-                .iter()
-                .skip(sample_phase)
-                .step_by(HFDL_SPS as usize)
-                .enumerate()
-                .map(|(idx, sample)| {
-                    let phase = phase_step * (idx * HFDL_SPS as usize + sample_phase) as f64;
-                    *sample * Complex::new(phase.cos() as f32, phase.sin() as f32)
-                })
-                .collect();
-            let t_template = training_sequence();
-            let needed = 127 + 127 + 127 + 15 + 9 * 15;
-            if symbols.len() < needed {
-                continue;
-            }
-            for &carrier_phase in &phases {
-                let rot = Complex::new(carrier_phase.cos() as f32, (-carrier_phase).sin() as f32);
-                let hard: Vec<i8> = symbols
-                    .iter()
-                    .map(|s| if (*s * rot).re >= 0.0 { 1 } else { -1 })
-                    .collect();
-                for idx in 0..=hard.len() - needed {
-                    let a1 = corr_abs(&a_template, &hard[idx..idx + 127]);
-                    if a1 < 0.34 {
-                        continue;
-                    }
-                    let a2_idx = idx + 127;
-                    let a2 = corr_abs(&a_template, &hard[a2_idx..a2_idx + 127]);
-                    if a2 < 0.28 {
-                        continue;
-                    }
-                    let m1_idx = idx + 254;
-                    let (m1, m1_corr) = m1_templates
-                        .iter()
-                        .enumerate()
-                        .map(|(m1, tmpl)| (m1, corr_abs(tmpl, &hard[m1_idx..m1_idx + 127])))
-                        .max_by(|a, b| a.1.total_cmp(&b.1))
-                        .unwrap();
-                    if m1_corr < 0.28 {
-                        continue;
-                    }
-                    let m2_idx = idx + 381;
-                    let m2_corr = corr_abs(&m1_templates[m1][..15], &hard[m2_idx..m2_idx + 15]);
-                    if m2_corr < 0.20 {
-                        continue;
-                    }
-                    let train_idx = m2_idx + 15;
-                    let mut training_corr = 0.0;
-                    for seq in 0..9 {
-                        let start = train_idx + seq * 15;
-                        training_corr += corr_abs(&t_template, &hard[start..start + 15]);
-                    }
-                    training_corr /= 9.0;
-                    hits.push(FrameSyncHit {
-                        a1_correlation: a1,
-                        a2_correlation: a2,
-                        m1_correlation: m1_corr,
-                        m2_correlation: m2_corr,
-                        training_correlation: training_corr,
-                        m1,
-                        residual_hz,
-                        sample_phase,
-                        carrier_phase,
-                        symbol_index: idx,
-                    });
-                }
-            }
-        }
-    }
-    hits.sort_by(|a, b| {
-        let ac = a.a1_correlation
-            + a.a2_correlation
-            + a.m1_correlation
-            + a.m2_correlation
-            + a.training_correlation;
-        let bc = b.a1_correlation
-            + b.a2_correlation
-            + b.m1_correlation
-            + b.m2_correlation
-            + b.training_correlation;
-        bc.total_cmp(&ac)
-    });
-    hits.dedup_by(|a, b| {
-        (a.symbol_index as isize - b.symbol_index as isize).abs() < 20
-            && (a.residual_hz - b.residual_hz).abs() < 15.0
-    });
-    hits
-}
-
-fn corr_abs(template: &[i8], observed: &[i8]) -> f64 {
-    let matches = template
-        .iter()
-        .zip(observed)
-        .filter(|(a, b)| a == b)
-        .count() as f64;
-    (2.0 * matches / template.len() as f64 - 1.0).abs()
-}
-
-fn search_a_sequence(samples: &[Complex<f32>]) -> Vec<PreambleHit> {
-    let template = a_sequence_symbols();
-    let phases: Vec<f64> = (0..16)
-        .map(|idx| std::f64::consts::PI * idx as f64 / 16.0)
-        .collect();
-    let mut hits = Vec::new();
-    for residual_step in -24..=24 {
-        let residual_hz = residual_step as f64 * 5.0;
-        let phase_step = -std::f64::consts::TAU * residual_hz / HFDL_DEMOD_RATE as f64;
-        for sample_phase in 0..HFDL_SPS as usize {
-            let symbols: Vec<Complex<f32>> = samples
-                .iter()
-                .skip(sample_phase)
-                .step_by(HFDL_SPS as usize)
-                .enumerate()
-                .map(|(idx, sample)| {
-                    let phase = phase_step * (idx * HFDL_SPS as usize + sample_phase) as f64;
-                    *sample * Complex::new(phase.cos() as f32, phase.sin() as f32)
-                })
-                .collect();
-            if symbols.len() < template.len() {
-                continue;
-            }
-            for &carrier_phase in &phases {
-                let rot = Complex::new(carrier_phase.cos() as f32, (-carrier_phase).sin() as f32);
-                let hard: Vec<i8> = symbols
-                    .iter()
-                    .map(|s| if (*s * rot).re >= 0.0 { 1 } else { -1 })
-                    .collect();
-                for idx in 0..=hard.len() - template.len() {
-                    let corr = template
-                        .iter()
-                        .zip(&hard[idx..idx + template.len()])
-                        .filter(|(a, b)| a == b)
-                        .count() as f64;
-                    let corr = (2.0 * corr / template.len() as f64 - 1.0).abs();
-                    if corr >= 0.40 {
-                        hits.push(PreambleHit {
-                            correlation: corr,
-                            residual_hz,
-                            sample_phase,
-                            carrier_phase,
-                            symbol_index: idx,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    hits.sort_by(|a, b| b.correlation.total_cmp(&a.correlation));
-    hits.dedup_by(|a, b| {
-        (a.symbol_index as isize - b.symbol_index as isize).abs() < 10
-            && (a.residual_hz - b.residual_hz).abs() < 10.0
-    });
-    hits
-}
-
-fn training_sequence() -> Vec<i8> {
-    vec![1, 1, 1, -1, 1, 1, -1, -1, 1, -1, 1, -1, -1, -1, -1]
-}
-
-fn m1_sequences() -> Vec<Vec<i8>> {
-    let m1_bits = [
-        0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1,
-        0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1,
-        0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1,
-        0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0,
-        1, 1, 1, 1, 1, 1, 1,
-    ];
-    let shifts = [72usize, 82, 113, 123, 61, 103, 93, 9];
-    shifts
-        .iter()
-        .map(|&shift| {
-            (0..127)
-                .map(|idx| {
-                    if m1_bits[(shift + idx) % 127] != 0 {
-                        1
-                    } else {
-                        -1
-                    }
-                })
-                .collect()
-        })
-        .collect()
-}
-
-fn a_sequence_symbols() -> Vec<i8> {
-    let octets = [
-        0b01011011u8,
-        0b10111100,
-        0b01110100,
-        0b01010111,
-        0b00000011,
-        0b11011001,
-        0b10001001,
-        0b00111001,
-        0b11110010,
-        0b00001000,
-        0b11010101,
-        0b00110110,
-        0b10010100,
-        0b00101100,
-        0b00110010,
-        0b11111110,
-    ];
-    let mut out = Vec::with_capacity(127);
-    for byte in octets {
-        for bit in (0..8).rev() {
-            out.push(if (byte >> bit) & 1 != 0 { 1 } else { -1 });
-            if out.len() == 127 {
-                return out;
-            }
-        }
-    }
-    out
-}
-
-fn read_complex_block<R: Read>(
-    reader: &mut R,
-    format: SampleFormat,
-    raw: &mut [u8],
-    out: &mut [Complex<f32>],
-) -> anyhow::Result<bool> {
-    let mut filled = 0usize;
-    while filled < raw.len() {
-        let n = reader.read(&mut raw[filled..])?;
-        if n == 0 {
-            break;
-        }
-        filled += n;
-    }
-    if filled < raw.len() {
-        return Ok(false);
-    }
-
-    decode_complex_bytes(format, raw, out);
-    Ok(true)
 }
 
 fn decode_complex_bytes(format: SampleFormat, raw: &[u8], out: &mut [Complex<f32>]) {
@@ -688,6 +234,7 @@ fn decode_complex_bytes(format: SampleFormat, raw: &[u8], out: &mut [Complex<f32
                 out[idx].im = q;
             }
         }
+        SampleFormat::Wav16 => unreachable!("WAV samples are decoded by read_wav_complex_window"),
         SampleFormat::Cf32 => {
             for (idx, chunk) in raw.chunks_exact(8).enumerate() {
                 out[idx].re = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
@@ -695,22 +242,6 @@ fn decode_complex_bytes(format: SampleFormat, raw: &[u8], out: &mut [Complex<f32
             }
         }
     }
-}
-
-fn band_power(powers: &[f64], offset_hz: f64, bin_hz: f64, radius_bins: isize) -> f64 {
-    let len = powers.len() as isize;
-    let center = (offset_hz / bin_hz).round() as isize;
-    let mut sum = 0.0;
-    let mut count = 0usize;
-    for delta in -radius_bins..=radius_bins {
-        let signed = center + delta;
-        let idx = if signed >= 0 { signed } else { len + signed };
-        if (0..len).contains(&idx) {
-            sum += powers[idx as usize];
-            count += 1;
-        }
-    }
-    sum / count.max(1) as f64
 }
 
 fn parse_hfdl_pdu(buf: &[u8]) -> serde_json::Value {
@@ -726,14 +257,40 @@ fn parse_hfdl_pdu(buf: &[u8]) -> serde_json::Value {
 
 fn parse_spdu(buf: &[u8]) -> serde_json::Value {
     let fcs_ok = hfdl_fcs_ok(buf, 64);
-    json!({
+    let mut out = json!({
         "bearer": "hfdl",
         "pdu": "spdu",
         "parse_ok": buf.len() >= 66,
         "fcs_ok": fcs_ok,
         "len": buf.len(),
         "ground_station_id": buf.get(1).map(|v| v & 0x7f),
-    })
+    });
+    if buf.len() >= 66 {
+        let obj = out.as_object_mut().unwrap();
+        obj.insert("version".into(), ((buf[0] >> 2) & 3).into());
+        obj.insert("rls_in_use".into(), (buf[0] & 2 != 0).into());
+        obj.insert("iso8208_supported".into(), (buf[0] & 0x20 != 0).into());
+        obj.insert(
+            "change_note".into(),
+            spdu_change_note((buf[0] & 0xc0) >> 6).into(),
+        );
+        obj.insert(
+            "tdma_frame_index".into(),
+            ((buf[2] as u16) | (((buf[3] & 0x0f) as u16) << 8)).into(),
+        );
+        obj.insert("tdma_frame_offset".into(), (buf[3] >> 4).into());
+        obj.insert("min_priority".into(), (buf[52] & 0x0f).into());
+        obj.insert(
+            "system_table_version".into(),
+            ((buf[53] as u16) | (((buf[54] & 0x0f) as u16) << 8)).into(),
+        );
+        obj.insert("ground_stations".into(), json!([
+            {"id": buf[1] & 0x7f, "utc_sync": buf[1] & 0x80 != 0, "frequencies_in_use_mask": ((buf[54] >> 4) as u32) | ((buf[55] as u32) << 4) | ((buf[56] as u32) << 12)},
+            {"id": buf[57] & 0x7f, "utc_sync": buf[57] & 0x80 != 0, "frequencies_in_use_mask": (buf[58] as u32) | ((buf[59] as u32) << 8) | (((buf[60] & 0x0f) as u32) << 16)},
+            {"id": (buf[60] >> 4) | ((buf[61] & 0x07) << 4), "utc_sync": buf[61] & 0x08 != 0, "frequencies_in_use_mask": ((buf[61] >> 4) as u32) | ((buf[62] as u32) << 4) | ((buf[63] as u32) << 12)}
+        ]));
+    }
+    out
 }
 
 fn parse_mpdu(buf: &[u8]) -> serde_json::Value {
@@ -758,17 +315,29 @@ fn parse_downlink_mpdu(buf: &[u8]) -> serde_json::Value {
         .iter()
         .map(|v| *v as usize + 1)
         .collect();
+    let parse_ok = buf.len() >= header_len + 2;
+    let lpdus = if parse_ok {
+        let data_start = header_len + 2;
+        parse_lpdu_list(
+            &lpdu_lengths,
+            buf.get(data_start..).unwrap_or_default(),
+            MessageDirection::AirToGround,
+        )
+    } else {
+        Vec::new()
+    };
     json!({
         "bearer": "hfdl",
         "pdu": "mpdu",
         "direction": "downlink",
-        "parse_ok": buf.len() >= header_len + 2,
+        "parse_ok": parse_ok,
         "fcs_ok": fcs_ok,
         "len": buf.len(),
         "src_aircraft_id": buf[2],
         "dst_ground_station_id": buf[1] & 0x7f,
         "lpdu_count": lpdu_count,
         "lpdu_lengths": lpdu_lengths,
+        "lpdus": lpdus,
     })
 }
 
@@ -777,14 +346,14 @@ fn parse_uplink_mpdu(buf: &[u8]) -> serde_json::Value {
         return json!({ "bearer": "hfdl", "pdu": "mpdu", "direction": "uplink", "parse_ok": false, "error": "too short" });
     }
     let aircraft_count = (((buf[0] & 0x70) >> 4) + 1) as usize;
-    let mut pos = 3usize;
-    let mut aircraft = Vec::new();
+    let mut pos = 2usize;
+    let mut aircraft_headers = Vec::new();
     for _ in 0..aircraft_count {
         if pos + 2 > buf.len() {
             break;
         }
         let aircraft_id = buf[pos];
-        let lpdu_count = (buf[pos + 1] & 0x0f) as usize;
+        let lpdu_count = (buf[pos + 1] >> 4) as usize;
         pos += 2;
         let lengths: Vec<usize> = buf
             .get(pos..pos + lpdu_count)
@@ -793,14 +362,30 @@ fn parse_uplink_mpdu(buf: &[u8]) -> serde_json::Value {
             .map(|v| *v as usize + 1)
             .collect();
         pos += lpdu_count;
-        aircraft.push(json!({ "aircraft_id": aircraft_id, "lpdu_count": lpdu_count, "lpdu_lengths": lengths }));
+        aircraft_headers.push((aircraft_id, lengths));
     }
     let fcs_ok = hfdl_fcs_ok(buf, pos);
+    let parse_ok = buf.len() >= pos + 2;
+    let mut data = buf.get(pos + 2..).unwrap_or_default();
+    let aircraft: Vec<_> = aircraft_headers
+        .into_iter()
+        .map(|(aircraft_id, lengths)| {
+            let lpdus = parse_lpdu_list(&lengths, data, MessageDirection::GroundToAir);
+            let consumed: usize = lengths.iter().sum();
+            data = data.get(consumed..).unwrap_or_default();
+            json!({
+                "aircraft_id": aircraft_id,
+                "lpdu_count": lengths.len(),
+                "lpdu_lengths": lengths,
+                "lpdus": lpdus,
+            })
+        })
+        .collect();
     json!({
         "bearer": "hfdl",
         "pdu": "mpdu",
         "direction": "uplink",
-        "parse_ok": buf.len() >= pos + 2,
+        "parse_ok": parse_ok,
         "fcs_ok": fcs_ok,
         "len": buf.len(),
         "src_ground_station_id": buf[1] & 0x7f,
@@ -813,8 +398,283 @@ fn hfdl_fcs_ok(buf: &[u8], header_len: usize) -> Option<bool> {
         return None;
     }
     let got = u16::from_le_bytes([buf[header_len], buf[header_len + 1]]);
-    let expected = crc16_ccitt_reflected(&buf[..header_len], 0xffff) ^ 0xffff;
+    let expected = hfdl_fcs(&buf[..header_len]);
     Some(got == expected)
+}
+
+fn hfdl_fcs(data: &[u8]) -> u16 {
+    crc16_ccitt_reflected(data, 0xffff) ^ 0xffff
+}
+
+fn parse_lpdu_list(
+    lengths: &[usize],
+    mut data: &[u8],
+    acars_direction: MessageDirection,
+) -> Vec<serde_json::Value> {
+    lengths
+        .iter()
+        .enumerate()
+        .map(|(idx, len)| {
+            let lpdu = data.get(..*len).unwrap_or(data);
+            data = data.get(*len..).unwrap_or_default();
+            parse_lpdu(idx, lpdu, acars_direction)
+        })
+        .collect()
+}
+
+fn parse_lpdu(index: usize, buf: &[u8], acars_direction: MessageDirection) -> serde_json::Value {
+    if buf.len() < 3 {
+        return json!({
+            "index": index,
+            "parse_ok": false,
+            "error": "too short",
+            "len": buf.len(),
+        });
+    }
+    let body_len = buf.len() - 2;
+    let fcs_ok = hfdl_fcs_ok(buf, body_len);
+    let body = &buf[..body_len];
+    let lpdu_type = body[0];
+    let mut out = json!({
+        "index": index,
+        "parse_ok": true,
+        "fcs_ok": fcs_ok,
+        "len": buf.len(),
+        "type": format!("0x{lpdu_type:02X}"),
+        "type_name": lpdu_type_name(lpdu_type),
+    });
+
+    if let Some(obj) = out.as_object_mut() {
+        match lpdu_type {
+            0x0D | 0x1D => {
+                if body.len() > 1 {
+                    obj.insert("hfnpdu".into(), parse_hfnpdu(&body[1..], acars_direction));
+                }
+            }
+            0x2F | 0x3F if body.len() >= 5 => {
+                obj.insert("icao24".into(), icao_hex(&body[1..4]).into());
+                obj.insert("reason_code".into(), body[4].into());
+            }
+            0x5F | 0x9F if body.len() >= 5 => {
+                obj.insert("icao24".into(), icao_hex(&body[1..4]).into());
+                obj.insert("aircraft_id".into(), body[4].into());
+            }
+            0x4F | 0x8F | 0xBF if body.len() >= 4 => {
+                obj.insert("icao24".into(), icao_hex(&body[1..4]).into());
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn parse_hfnpdu(buf: &[u8], acars_direction: MessageDirection) -> serde_json::Value {
+    if buf.is_empty() {
+        return json!({ "parse_ok": false, "error": "empty HFNPDU" });
+    }
+    if buf[0] != 0xFF {
+        return json!({
+            "parse_ok": false,
+            "error": "not an HFNPDU",
+            "raw_hex": hex::encode_upper(buf),
+        });
+    }
+    if buf.len() < 2 {
+        return json!({ "parse_ok": false, "error": "too short", "raw_hex": hex::encode_upper(buf) });
+    }
+    let hfnpdu_type = buf[1];
+    let mut out = json!({
+        "parse_ok": true,
+        "type": format!("0x{hfnpdu_type:02X}"),
+        "type_name": hfnpdu_type_name(hfnpdu_type),
+    });
+    if let Some(obj) = out.as_object_mut() {
+        match hfnpdu_type {
+            0xD0 if buf.len() >= 5 => {
+                obj.insert("total_pdu_count".into(), ((buf[2] >> 4) + 1).into());
+                obj.insert("pdu_sequence".into(), (buf[2] & 0x0f).into());
+                obj.insert(
+                    "system_table_version".into(),
+                    ((buf[3] as u16 >> 4) | ((buf[4] as u16) << 4)).into(),
+                );
+            }
+            0xD1 if buf.len() >= 47 => {
+                obj.insert("performance".into(), parse_performance_data(buf));
+            }
+            0xD2 if buf.len() >= 4 => {
+                obj.insert(
+                    "request_data".into(),
+                    u16::from_le_bytes([buf[2], buf[3]]).into(),
+                );
+            }
+            0xD5 if buf.len() >= 15 => {
+                obj.insert("frequency_data".into(), parse_frequency_data(buf));
+            }
+            0xFF => {
+                let acars_bytes = &buf[2..];
+                match parse_acars_frame(acars_bytes, acars_direction) {
+                    Ok(msg) => {
+                        let raw = serde_json::to_value(&msg)
+                            .unwrap_or_else(|e| json!({ "serialize_error": e.to_string() }));
+                        obj.insert("acars".into(), compact_value(raw, false));
+                    }
+                    Err(err) => {
+                        obj.insert(
+                            "acars".into(),
+                            json!({
+                                "parse_ok": false,
+                                "error": err.to_string(),
+                                "raw_hex": hex::encode_upper(acars_bytes),
+                            }),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn parse_performance_data(buf: &[u8]) -> serde_json::Value {
+    let flight_id = ascii_trim(&buf[2..8]);
+    let lat_raw = (buf[8] as u32) | ((buf[9] as u32) << 8) | (((buf[10] & 0x0f) as u32) << 16);
+    let lon_raw =
+        ((buf[10] as u32 & 0xf0) >> 4) | ((buf[11] as u32) << 4) | ((buf[12] as u32) << 12);
+    let utc = 2 * u16::from_le_bytes([buf[13], buf[14]]) as u32;
+    json!({
+        "version": buf[15],
+        "flight_id": flight_id,
+        "position": { "lat": parse_hfdl_coordinate(lat_raw), "lon": parse_hfdl_coordinate(lon_raw) },
+        "time_utc": format_hms(utc),
+        "flight_leg": buf[16],
+        "ground_station_id": buf[17] & 0x7f,
+        "frequency_id": buf[18],
+        "frequency_search_count": {
+            "previous_leg": u16::from_le_bytes([buf[19], buf[20]]),
+            "current_leg": u16::from_le_bytes([buf[21], buf[22]]),
+        },
+        "hf_data_disabled_duration_sec": {
+            "previous_leg": u16::from_le_bytes([buf[23], buf[24]]),
+            "current_leg": u16::from_le_bytes([buf[25], buf[26]]),
+        },
+        "mpdus_received": mpdu_stats(&buf[27..31]),
+        "mpdus_received_with_errors": mpdu_stats(&buf[31..35]),
+        "spdus_received": u16::from_le_bytes([buf[35], buf[36]]),
+        "spdus_missed": buf[37],
+        "mpdus_transmitted": mpdu_stats(&buf[38..42]),
+        "mpdus_delivered": mpdu_stats(&buf[42..46]),
+        "frequency_change_code": buf[46] & 0x0f,
+        "frequency_change_reason": frequency_change_reason(buf[46] & 0x0f),
+    })
+}
+
+fn parse_frequency_data(buf: &[u8]) -> serde_json::Value {
+    let flight_id = ascii_trim(&buf[2..8]);
+    let lat_raw = (buf[8] as u32) | ((buf[9] as u32) << 8) | (((buf[10] & 0x0f) as u32) << 16);
+    let lon_raw =
+        ((buf[10] as u32 & 0xf0) >> 4) | ((buf[11] as u32) << 4) | ((buf[12] as u32) << 12);
+    let utc = 2 * u16::from_le_bytes([buf[13], buf[14]]) as u32;
+    let mut freqs = Vec::new();
+    let mut pos = 15usize;
+    while pos + 6 <= buf.len() && freqs.len() < 6 {
+        freqs.push(json!({
+            "ground_station_id": buf[pos] & 0x7f,
+            "propagating_frequencies_mask": (buf[pos + 1] as u32) | ((buf[pos + 2] as u32) << 8) | (((buf[pos + 3] & 0x0f) as u32) << 16),
+            "heard_frequencies_mask": ((buf[pos + 3] as u32 & 0xf0) >> 4) | ((buf[pos + 4] as u32) << 4) | ((buf[pos + 5] as u32) << 12),
+        }));
+        pos += 6;
+    }
+    json!({
+        "flight_id": flight_id,
+        "position": { "lat": parse_hfdl_coordinate(lat_raw), "lon": parse_hfdl_coordinate(lon_raw) },
+        "time_utc": format_hms(utc),
+        "propagating_frequency_count": freqs.len(),
+        "ground_stations": freqs,
+    })
+}
+
+fn mpdu_stats(bytes: &[u8]) -> serde_json::Value {
+    json!({ "300bps": bytes[3], "600bps": bytes[2], "1200bps": bytes[1], "1800bps": bytes[0] })
+}
+
+fn parse_hfdl_coordinate(raw: u32) -> f64 {
+    let signed = if raw & (1 << 19) != 0 {
+        raw as i32 - (1 << 20)
+    } else {
+        raw as i32
+    };
+    signed as f64 * 180.0 / 0x7ffff as f64
+}
+
+fn format_hms(total_seconds: u32) -> String {
+    format!(
+        "{:02}:{:02}:{:02}",
+        total_seconds / 3600,
+        (total_seconds % 3600) / 60,
+        total_seconds % 60
+    )
+}
+
+fn ascii_trim(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .trim_matches(|c| c == '\0' || c == ' ')
+        .to_string()
+}
+
+fn frequency_change_reason(code: u8) -> &'static str {
+    match code {
+        0 => "First frequency search in this flight leg",
+        1 => "Too many NACKs",
+        2 => "SPDUs no longer received",
+        3 => "HFDL disabled",
+        4 => "Ground station frequency change",
+        5 => "Ground station down / channel down",
+        6 => "Poor uplink channel quality",
+        7 => "No change",
+        _ => "Unknown",
+    }
+}
+
+fn spdu_change_note(code: u8) -> &'static str {
+    match code {
+        0 => "None",
+        1 => "Channel down",
+        2 => "Upcoming frequency change",
+        3 => "Ground station down",
+        _ => "Unknown",
+    }
+}
+
+fn lpdu_type_name(typ: u8) -> &'static str {
+    match typ {
+        0x0D => "Unnumbered data",
+        0x1D => "Unnumbered acked data",
+        0x2F => "Logon denied",
+        0x3F => "Logoff request",
+        0x4F => "Logon resume",
+        0x5F => "Logon resume confirm",
+        0x8F => "Logon request normal",
+        0x9F => "Logon confirm",
+        0xBF => "Logon request DLS",
+        _ => "Unknown",
+    }
+}
+
+fn hfnpdu_type_name(typ: u8) -> &'static str {
+    match typ {
+        0xD0 => "System table partial",
+        0xD1 => "Performance data",
+        0xD2 => "System table request",
+        0xD5 => "Frequency data",
+        0xDE => "Delayed echo",
+        0xFF => "Enveloped data",
+        _ => "Unknown",
+    }
+}
+
+fn icao_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
 
 fn crc16_ccitt_reflected(data: &[u8], init: u16) -> u16 {
@@ -832,13 +692,13 @@ fn crc16_ccitt_reflected(data: &[u8], init: u16) -> u16 {
     crc
 }
 
-fn channels_khz(options: &Options) -> Vec<f64> {
+fn channels_khz_for(options: &Options, sample_rate: u32, center_freq: u32) -> Vec<f64> {
     if let Some(channels) = &options.channel {
         return channels.iter().copied().map(to_khz).collect();
     }
 
-    let center_khz = options.center_freq as f64 / 1000.0;
-    let usable_half_bw_khz = options.sample_rate as f64 * 0.40 / 1000.0;
+    let center_khz = center_freq as f64 / 1000.0;
+    let usable_half_bw_khz = sample_rate as f64 * 0.40 / 1000.0;
     let lo = center_khz - usable_half_bw_khz;
     let hi = center_khz + usable_half_bw_khz;
     DEFAULT_HFDL_CHANNELS_KHZ
@@ -853,6 +713,49 @@ fn to_khz(freq: f64) -> f64 {
         freq / 1000.0
     } else {
         freq
+    }
+}
+
+fn effective_format(path: &str, requested: SampleFormat) -> SampleFormat {
+    if requested == SampleFormat::Cf32 && path.to_ascii_lowercase().ends_with(".wav") {
+        SampleFormat::Wav16
+    } else {
+        requested
+    }
+}
+
+fn effective_center_freq(path: &str, format: SampleFormat, requested: u32) -> u32 {
+    if format == SampleFormat::Wav16 && requested == 10_000_000 {
+        if let Some(freq) = infer_khz_from_filename(path) {
+            return freq;
+        }
+    }
+    requested
+}
+
+fn infer_khz_from_filename(path: &str) -> Option<u32> {
+    let name = std::path::Path::new(path).file_name()?.to_string_lossy();
+    let lower = name.to_ascii_lowercase();
+    let khz_pos = lower.rfind("khz")?;
+    let prefix = &lower[..khz_pos];
+    let digits_rev: String = prefix
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits_rev.is_empty() {
+        return None;
+    }
+    let digits: String = digits_rev.chars().rev().collect();
+    digits.parse::<u32>().ok().map(|khz| khz * 1000)
+}
+
+fn effective_sample_rate(path: &str, format: SampleFormat, requested: u32) -> anyhow::Result<u32> {
+    if format == SampleFormat::Wav16 {
+        let reader = hound::WavReader::open(path)?;
+        Ok(reader.spec().sample_rate)
+    } else {
+        Ok(requested)
     }
 }
 
@@ -887,21 +790,64 @@ mod tests {
     }
 
     #[test]
+    fn parse_downlink_mpdu_extracts_hfnpdu_payload() {
+        let hfnpdu = [0xff, 0xd2, 0x34, 0x12];
+        let mut lpdu = vec![0x0d];
+        lpdu.extend_from_slice(&hfnpdu);
+        let lpdu_fcs = hfdl_fcs(&lpdu);
+        lpdu.extend_from_slice(&lpdu_fcs.to_le_bytes());
+
+        let lpdu_len = lpdu.len();
+        let mut pdu = vec![0x07, 0x8c, 0x2a, 0, 0, 0, (lpdu_len - 1) as u8];
+        let hdr_fcs = hfdl_fcs(&pdu);
+        pdu.extend_from_slice(&hdr_fcs.to_le_bytes());
+        pdu.extend_from_slice(&lpdu);
+
+        let parsed = parse_hfdl_pdu(&pdu);
+        assert_eq!(parsed["pdu"], "mpdu");
+        assert_eq!(parsed["direction"], "downlink");
+        assert_eq!(parsed["fcs_ok"], true);
+        assert_eq!(parsed["lpdus"][0]["fcs_ok"], true);
+        assert_eq!(parsed["lpdus"][0]["hfnpdu"]["type"], "0xD2");
+        assert_eq!(parsed["lpdus"][0]["hfnpdu"]["request_data"], 0x1234);
+    }
+
+    #[test]
+    fn parse_uplink_mpdu_uses_high_nibble_lpdu_count() {
+        let mut lpdu = vec![0x1d, 0xff, 0xff, 0x01, 0x02, 0x03];
+        let lpdu_fcs = hfdl_fcs(&lpdu);
+        lpdu.extend_from_slice(&lpdu_fcs.to_le_bytes());
+
+        let mut pdu = vec![0x01, 0x8c, 0x2a, 0x10, (lpdu.len() - 1) as u8];
+        let hdr_fcs = hfdl_fcs(&pdu);
+        pdu.extend_from_slice(&hdr_fcs.to_le_bytes());
+        pdu.extend_from_slice(&lpdu);
+
+        let parsed = parse_hfdl_pdu(&pdu);
+        assert_eq!(parsed["pdu"], "mpdu");
+        assert_eq!(parsed["direction"], "uplink");
+        assert_eq!(parsed["fcs_ok"], true);
+        assert_eq!(parsed["aircraft"][0]["lpdu_count"], 1);
+        assert_eq!(parsed["aircraft"][0]["lpdus"][0]["hfnpdu"]["type"], "0xFF");
+        assert_eq!(
+            parsed["aircraft"][0]["lpdus"][0]["hfnpdu"]["acars"]["parse_ok"],
+            false
+        );
+    }
+
+    #[test]
     fn auto_channels_cover_10mhz_capture() {
         let options = Options {
             source: Some("dummy".into()),
-            mode: HfdlMode::Scan,
-            pdu_hex: None,
             format: SampleFormat::Cf32,
             center_freq: 10_000_000,
             sample_rate: 8_000_000,
             channel: None,
             start_second: 0.0,
             max_seconds: 1.0,
-            threshold_db: 8.0,
-            all_windows: false,
+            stats: false,
         };
-        let channels = channels_khz(&options);
+        let channels = channels_khz_for(&options, options.sample_rate, options.center_freq);
         assert!(channels.contains(&10081.0));
         assert!(channels.contains(&11387.0));
         assert!(!channels.contains(&6529.0));

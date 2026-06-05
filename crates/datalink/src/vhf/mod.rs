@@ -1,8 +1,8 @@
 mod source;
 
 use acars::decode::acars::{parse_acars_frame, MessageDirection};
-use acars::demod::acars131::Acars131Channel;
 use acars::demod::resample::{maybe_resample, ResampleAdapter};
+use acars::demod::vhf::VhfChannel;
 use clap::Parser;
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -187,11 +187,9 @@ async fn decode_source(
         );
     }
 
-    let mut demods: Vec<Acars131Channel> = channels
+    let mut demods: Vec<VhfChannel> = channels
         .iter()
-        .map(|&ch_freq| {
-            Acars131Channel::new(sample_rate as f32, ch_freq as f32 - center_freq as f32)
-        })
+        .map(|&ch_freq| VhfChannel::new(sample_rate as f32, ch_freq as f32 - center_freq as f32))
         .collect();
 
     let mut demod_wav = if let Some(path) = dump_demod_wav {

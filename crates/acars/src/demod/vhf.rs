@@ -280,7 +280,7 @@ impl MskDemod {
 }
 
 /// Per-channel classic ACARS (131 MHz family) demodulator state.
-pub struct Acars131Channel {
+pub struct VhfChannel {
     lpf_re: Chebyshev2Lpf,
     lpf_im: Chebyshev2Lpf,
     downmix_nco: Option<Nco>,
@@ -291,7 +291,7 @@ pub struct Acars131Channel {
     msk: MskDemod,
 }
 
-impl Acars131Channel {
+impl VhfChannel {
     pub fn new(sample_rate: f32, offset_hz: f32) -> Self {
         let downmix_nco = if offset_hz.abs() > 1.0 {
             Some(Nco::new(offset_hz as f64, sample_rate as f64))
