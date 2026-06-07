@@ -5,6 +5,17 @@ use url::Url;
 pub const DEFAULT_CENTER_FREQ: u32 = 131_700_000;
 pub const DEFAULT_SAMPLE_RATE: u32 = 1_050_000;
 pub const DEFAULT_CHANNELS: &[u32] = &[131_525_000, 131_725_000, 131_825_000];
+pub const KNOWN_ACARS_CHANNELS: &[u32] = &[
+    129_125_000,
+    129_525_000,
+    130_025_000,
+    130_425_000,
+    131_125_000,
+    131_525_000,
+    131_725_000,
+    131_825_000,
+    136_900_000,
+];
 pub const DEFAULT_CHUNK_SIZE: usize = 65_536;
 
 use desperado::{Gain, IqFormat};
@@ -74,7 +85,24 @@ impl Source {
         self.channels
             .clone()
             .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| DEFAULT_CHANNELS.to_vec())
+            .unwrap_or_else(|| self.auto_channels())
+    }
+
+    fn auto_channels(&self) -> Vec<u32> {
+        let center = self.center_freq();
+        let half_bw = (self.sample_rate() as f64 * 0.45) as u32;
+        let lo = center.saturating_sub(half_bw);
+        let hi = center.saturating_add(half_bw);
+        let candidates: Vec<u32> = KNOWN_ACARS_CHANNELS
+            .iter()
+            .copied()
+            .filter(|&ch| ch >= lo && ch <= hi)
+            .collect();
+        if candidates.is_empty() {
+            DEFAULT_CHANNELS.to_vec()
+        } else {
+            candidates
+        }
     }
 
     pub fn iq_format(&self) -> IqFormat {

@@ -410,10 +410,15 @@ pub fn decode_frame_candidate_variants(
             0.0
         };
         let train_rot = Complex::new(train_phase.cos(), train_phase.sin());
-        for idx in seg_start..seg_start + DATA_FRAME_LEN {
+        for (idx, symbol) in symbols
+            .iter()
+            .enumerate()
+            .skip(seg_start)
+            .take(DATA_FRAME_LEN)
+        {
             let phase = phase_step * idx as f64;
             let residual = Complex::new(phase.cos() as f32, phase.sin() as f32);
-            data_symbols.push(symbols[idx] * residual * carrier * train_rot);
+            data_symbols.push(*symbol * residual * carrier * train_rot);
         }
     }
 
@@ -494,7 +499,7 @@ pub fn deinterleave_soft_bits(soft: &[u8], params: HfdlFrameParams) -> Vec<u8> {
 }
 
 pub fn viterbi_decode_27(symbols: &[u8]) -> Result<Vec<u8>, String> {
-    if symbols.len() % 2 != 0 {
+    if !symbols.len().is_multiple_of(2) {
         return Err("Viterbi input must contain pairs of soft symbols".into());
     }
     let nbits = symbols.len() / 2;

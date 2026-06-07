@@ -78,7 +78,48 @@ pub(crate) fn run(options: Options) -> anyhow::Result<()> {
     decode_mode(&options)
 }
 
+pub(crate) fn decode_file_values(
+    source: &str,
+    format: Option<&str>,
+    center_freq: Option<u32>,
+    sample_rate: Option<u32>,
+    channels: Option<Vec<u32>>,
+    start_second: f64,
+    max_seconds: f64,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let options = Options {
+        source: Some(source.to_string()),
+        format: format
+            .and_then(parse_sample_format)
+            .unwrap_or(SampleFormat::Cf32),
+        center_freq: center_freq.unwrap_or(10_000_000),
+        sample_rate: sample_rate.unwrap_or(8_000_000),
+        channel: channels.map(|v| v.into_iter().map(|hz| hz as f64).collect()),
+        start_second,
+        max_seconds,
+        stats: false,
+    };
+    collect_decoded_pdus(&options)
+}
+
+fn parse_sample_format(value: &str) -> Option<SampleFormat> {
+    match value.to_ascii_lowercase().as_str() {
+        "u8" | "cu8" => Some(SampleFormat::U8),
+        "cs16" => Some(SampleFormat::Cs16),
+        "cf32" => Some(SampleFormat::Cf32),
+        "wav16" | "wav" => Some(SampleFormat::Wav16),
+        _ => None,
+    }
+}
+
 fn decode_mode(options: &Options) -> anyhow::Result<()> {
+    for parsed in collect_decoded_pdus(options)? {
+        println!("{}", serde_json::to_string(&parsed)?)
+    }
+    Ok(())
+}
+
+fn collect_decoded_pdus(options: &Options) -> anyhow::Result<Vec<serde_json::Value>> {
     let source = options
         .source
         .as_deref()
@@ -102,6 +143,7 @@ fn decode_mode(options: &Options) -> anyhow::Result<()> {
     let mut pdu_ok = 0u64;
     let mut candidate_count = 0u64;
     let mut frame_sync_count = 0u64;
+    let mut out = Vec::new();
     for &channel_khz in &channels {
         let diagnostics = diagnose_channel(
             &samples,
@@ -127,7 +169,7 @@ fn decode_mode(options: &Options) -> anyhow::Result<()> {
                 obj.insert("m1".into(), candidate.m1.into());
                 obj.insert("raw_hex".into(), hex::encode_upper(&candidate.bytes).into());
             }
-            println!("{}", serde_json::to_string(&parsed)?)
+            out.push(parsed);
         }
     }
     if options.stats {
@@ -139,7 +181,7 @@ fn decode_mode(options: &Options) -> anyhow::Result<()> {
             pdu_ok
         );
     }
-    Ok(())
+    Ok(out)
 }
 
 fn read_complex_window(
@@ -446,10 +488,8 @@ fn parse_lpdu(index: usize, buf: &[u8], acars_direction: MessageDirection) -> se
 
     if let Some(obj) = out.as_object_mut() {
         match lpdu_type {
-            0x0D | 0x1D => {
-                if body.len() > 1 {
-                    obj.insert("hfnpdu".into(), parse_hfnpdu(&body[1..], acars_direction));
-                }
+            0x0D | 0x1D if body.len() > 1 => {
+                obj.insert("hfnpdu".into(), parse_hfnpdu(&body[1..], acars_direction));
             }
             0x2F | 0x3F if body.len() >= 5 => {
                 obj.insert("icao24".into(), icao_hex(&body[1..4]).into());

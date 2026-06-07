@@ -1,12 +1,10 @@
 mod source;
 
-use acars::decode::acars::{decode_acars_text_payload, MessageDirection};
 use acars::decode::avlc::parse_avlc_frame;
 use acars::demod::resample::{maybe_resample, ResampleAdapter};
 use acars::demod::vdl2::{Vdl2Channel, SYMBOL_RATE};
 use clap::Parser;
-use futures_util::{SinkExt, StreamExt};
-use http::Uri;
+use futures_util::StreamExt;
 use redis::AsyncCommands;
 use serde::Deserialize;
 use serde_json::Value;
@@ -134,35 +132,7 @@ pub(crate) async fn run(cli: Options) -> anyhow::Result<()> {
         options.source.is_some(),
         "missing source; pass an explicit source such as file://capture.rtl, -, or rtlsdr://"
     );
-    if matches!(
-        options.source.as_ref().map(|src| &src.address),
-        Some(Address::Websocket { .. })
-    ) {
-        anyhow::bail!("websocket/Airframes.io sources belong to `datalink airframes.io`");
-    }
     run_options(options, "vdl2").await
-}
-
-pub(crate) async fn run_airframes_simple(
-    source: Option<String>,
-    output: Option<String>,
-    stats: bool,
-    raw: bool,
-    redis_url: Option<String>,
-    redis_retry_interval: u64,
-) -> anyhow::Result<()> {
-    let source = source.unwrap_or_else(|| "airframes://".to_string());
-    let options = Options {
-        output,
-        stats,
-        raw,
-        redis_url,
-        redis_retry_interval,
-        source: Some(source.parse().map_err(anyhow::Error::msg)?),
-        ..Options::default()
-    };
-
-    run_options(options, "airframes.io").await
 }
 
 async fn run_options(options: Options, stats_name: &str) -> anyhow::Result<()> {
@@ -198,6 +168,7 @@ async fn run_options(options: Options, stats_name: &str) -> anyhow::Result<()> {
         reject_writer.as_mut(),
         candidate_writer.as_mut(),
         redis.as_mut(),
+        None,
     )
     .await?;
     total.demod_frames += stats.demod_frames;
@@ -300,6 +271,40 @@ fn apply_source_overrides(options: &mut Options) {
     }
 }
 
+pub(crate) async fn decode_file_values(
+    file: &str,
+    format: Option<&str>,
+    center_freq: Option<u32>,
+    sample_rate: Option<u32>,
+    channels: Option<Vec<u32>>,
+    raw: bool,
+) -> anyhow::Result<Vec<Value>> {
+    let src = Source {
+        address: Address::File {
+            file: file.to_string(),
+        },
+        name: None,
+        center_freq,
+        sample_rate,
+        channels,
+        gain: None,
+        bias_tee: None,
+        amp_enable: None,
+        lna_gain: None,
+        vga_gain: None,
+        format: format.map(str::to_string),
+    };
+    let options = Options {
+        raw,
+        source: Some(src.clone()),
+        ..Options::default()
+    };
+    let mut out = Vec::new();
+    decode_source(&src, 0, &options, None, None, None, None, Some(&mut out)).await?;
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn decode_source(
     src: &Source,
     source_index: usize,
@@ -308,9 +313,13 @@ async fn decode_source(
     mut reject_writer: Option<&mut BufWriter<File>>,
     mut candidate_writer: Option<&mut BufWriter<File>>,
     mut redis: Option<&mut RedisPublisher>,
+    mut collect: Option<&mut Vec<Value>>,
 ) -> anyhow::Result<DecodeStats> {
-    if matches!(src.address, Address::Websocket { .. }) {
-        return decode_websocket_source(src, source_index, options.raw, output, redis).await;
+    if let Address::File { file } = &src.address {
+        if file.to_ascii_lowercase().ends_with(".wav") {
+            return decode_wav_source(src, file, source_index, options, output, redis, collect)
+                .await;
+        }
     }
 
     let center_freq = src.center_freq();
@@ -440,13 +449,19 @@ async fn decode_source(
                                 let obj =
                                     acars::decode::compact::compact_avlc_value(obj, options.raw);
                                 let topic = redis_topic_for_record(&obj);
-                                let line = serde_json::to_string(&obj)?;
-                                println!("{line}");
-                                if let Some(w) = output.as_mut() {
-                                    writeln!(w, "{line}")?;
-                                }
-                                if let (Some(redis), Some(topic)) = (redis.as_deref_mut(), topic) {
-                                    redis.publish(topic, &line).await;
+                                if let Some(values) = collect.as_mut() {
+                                    values.push(obj);
+                                } else {
+                                    let line = serde_json::to_string(&obj)?;
+                                    println!("{line}");
+                                    if let Some(w) = output.as_mut() {
+                                        writeln!(w, "{line}")?;
+                                    }
+                                    if let (Some(redis), Some(topic)) =
+                                        (redis.as_deref_mut(), topic)
+                                    {
+                                        redis.publish(topic, &line).await;
+                                    }
                                 }
                             }
                             Err(err) => {
@@ -481,367 +496,127 @@ async fn decode_source(
     Ok(stats)
 }
 
-async fn decode_websocket_source(
+async fn decode_wav_source(
     src: &Source,
-    source_index: usize,
-    raw: bool,
+    file: &str,
+    _source_index: usize,
+    options: &Options,
     mut output: Option<&mut BufWriter<File>>,
     mut redis: Option<&mut RedisPublisher>,
+    mut collect: Option<&mut Vec<Value>>,
 ) -> anyhow::Result<DecodeStats> {
-    let Address::Websocket {
-        websocket,
-        token,
-        events,
-    } = &src.address
-    else {
-        unreachable!("decode_websocket_source called for non-websocket source")
-    };
-    let selected_events = events
-        .clone()
-        .unwrap_or_else(|| vec!["message".to_string()]);
-    let capture_all = selected_events.iter().any(|event| event == "*");
-    let mut request =
-        tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
-            websocket.as_str(),
-        )?;
-    request.headers_mut().insert(
-        "Origin",
-        tokio_tungstenite::tungstenite::http::HeaderValue::from_static("https://app.airframes.io"),
+    let mut reader = hound::WavReader::open(expanduser(file))?;
+    let spec = reader.spec();
+    anyhow::ensure!(spec.channels == 2, "VDL2 WAV input must be stereo I/Q");
+    anyhow::ensure!(
+        spec.sample_format == hound::SampleFormat::Int && spec.bits_per_sample == 16,
+        "VDL2 WAV input currently supports 16-bit PCM stereo I/Q"
     );
-    let mut ws = websocket_connect(websocket, request).await?;
-    while let Some(message) = ws.next().await {
-        let message = message?;
-        if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
-            if text.starts_with('0') {
-                break;
-            }
-        }
-    }
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(format!(
-        "40{}",
-        serde_json::to_string(&serde_json::json!({ "token": token.as_deref().unwrap_or("") }))?
-    )))
-    .await?;
-
+    let raw_sample_rate = spec.sample_rate;
+    let center_freq = src
+        .center_freq
+        .or_else(|| infer_sdruno_center_freq(file))
+        .unwrap_or_else(|| src.center_freq());
+    let channels = src.channels();
+    let sync_threshold = options.sync_threshold.unwrap_or(3.2);
+    let vdl2_decimated_rate = SYMBOL_RATE * 10;
+    let (sample_rate, resample_rs) = maybe_resample(raw_sample_rate, vdl2_decimated_rate);
+    let mut adapter = ResampleAdapter::new(resample_rs);
+    let mut demods: Vec<Vdl2Channel> = channels
+        .iter()
+        .map(|&ch_freq| {
+            let mut d = Vdl2Channel::new(
+                sample_rate as f32,
+                ch_freq as f32 - center_freq as f32,
+                ch_freq as f32,
+            );
+            d.set_sync_threshold(sync_threshold);
+            d
+        })
+        .collect();
+    let run_start = SystemTime::now();
+    let mut sample_index: u64 = 0;
     let mut stats = DecodeStats::default();
-    while let Some(message) = ws.next().await {
-        let message = message?;
-        match message {
-            tokio_tungstenite::tungstenite::Message::Text(text) => {
-                for packet in text.split('\u{1e}') {
-                    if packet == "2" {
-                        ws.send(tokio_tungstenite::tungstenite::Message::Text(
-                            "3".to_string(),
-                        ))
-                        .await?;
-                        continue;
-                    }
-                    let Some((event, payload)) = parse_socketio_event(packet) else {
-                        continue;
-                    };
-                    if !capture_all && !selected_events.iter().any(|wanted| wanted == &event) {
-                        continue;
-                    }
-                    stats.avlc_ok += 1;
-                    let record = websocket_record(src, source_index, &event, payload, raw);
-                    let topic = redis_topic_for_record(&record);
-                    let line = serde_json::to_string(&record)?;
-                    println!("{line}");
-                    if let Some(w) = output.as_mut() {
-                        writeln!(w, "{line}")?;
-                    }
-                    if let (Some(redis), Some(topic)) = (redis.as_deref_mut(), topic) {
-                        redis.publish(topic, &line).await;
+    let mut samples = reader.samples::<i16>();
+    while let (Some(i), Some(q)) = (samples.next(), samples.next()) {
+        let i = i? as f32 / 32768.0;
+        let q = q? as f32 / 32768.0;
+        for sample in adapter.feed(i, q) {
+            sample_index = sample_index.saturating_add(1);
+            let seconds_into_recording = sample_index as f64 / sample_rate as f64;
+            let frame_ts = run_start + Duration::from_secs_f64(seconds_into_recording);
+            let timestamp_unix = frame_ts
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or_default();
+            for (idx, d) in demods.iter_mut().enumerate() {
+                for demod_frame in d.process_sample(sample.re, sample.im) {
+                    stats.demod_frames += 1;
+                    match parse_avlc_frame(&demod_frame.bytes) {
+                        Ok(avlc) => {
+                            stats.avlc_ok += 1;
+                            if avlc.fcs_ok {
+                                stats.avlc_fcs_ok += 1;
+                            } else {
+                                stats.avlc_fcs_fail += 1;
+                            }
+                            if !options.include_fcs_fail && !avlc.fcs_ok {
+                                continue;
+                            }
+                            let channel_hz = channels[idx] as u64;
+                            let mut obj = serde_json::to_value(&avlc)?;
+                            if let serde_json::Value::Object(ref mut m) = obj {
+                                m.insert("timestamp".into(), timestamp_unix.into());
+                                m.insert("frame".into(), bytes_to_hex(&demod_frame.bytes).into());
+                                m.insert("metadata".into(), serde_json::json!({"bearer":"vdl2", "channel_mhz": channel_hz as f64 / 1_000_000.0}));
+                            }
+                            let obj = acars::decode::compact::compact_avlc_value(obj, options.raw);
+                            let topic = redis_topic_for_record(&obj);
+                            if let Some(values) = collect.as_mut() {
+                                values.push(obj);
+                            } else {
+                                let line = serde_json::to_string(&obj)?;
+                                println!("{line}");
+                                if let Some(w) = output.as_mut() {
+                                    writeln!(w, "{line}")?;
+                                }
+                                if let (Some(redis), Some(topic)) = (redis.as_deref_mut(), topic) {
+                                    redis.publish(topic, &line).await;
+                                }
+                            }
+                        }
+                        Err(_) => stats.avlc_parse_fail += 1,
                     }
                 }
             }
-            tokio_tungstenite::tungstenite::Message::Ping(payload) => {
-                ws.send(tokio_tungstenite::tungstenite::Message::Pong(payload))
-                    .await?;
-            }
-            tokio_tungstenite::tungstenite::Message::Close(_) => break,
-            _ => {}
         }
     }
     Ok(stats)
 }
 
+fn infer_sdruno_center_freq(path: &str) -> Option<u32> {
+    let name = std::path::Path::new(path).file_name()?.to_string_lossy();
+    let khz_pos = name.find("kHz")?;
+    let prefix = &name[..khz_pos];
+    let digits: String = prefix
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    digits.parse::<u32>().ok().map(|khz| khz * 1000)
+}
+
 fn redis_topic_for_record(record: &Value) -> Option<&'static str> {
-    let decoded = record.get("decoded").unwrap_or(record);
-    if decoded.get("message_class").and_then(Value::as_str) != Some("app_message") {
-        return None;
+    if record.get("path").and_then(Value::as_str) == Some("acars") {
+        return Some("datalink-acars");
     }
-    let app = decoded.get("app")?;
-    if app.is_null() {
-        return None;
+    if record.get("path").and_then(Value::as_str) == Some("avlc") {
+        return Some("datalink-vdl2");
     }
-
-    let protocol = app
-        .get("protocol")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if matches!(protocol, "fans1a_cpdlc" | "atn_b1_cpdlc" | "cpdlc") {
-        return Some("datalink-cpdlc");
-    }
-    if matches!(protocol, "ads_c" | "adsc") {
-        return Some("datalink-adsc");
-    }
-    if matches!(protocol, "squitter" | "sq")
-        || decoded.get("label").and_then(Value::as_str) == Some("SQ")
-    {
-        return Some("datalink-sq");
-    }
-
-    let stack_has_acars = decoded
-        .get("protocol_stack")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|v| v.as_str() == Some("acars"));
-    if stack_has_acars && !matches!(protocol, "text" | "unknown" | "") {
-        return Some("datalink-aoc");
-    }
-
     Some("datalink-other")
-}
-
-fn parse_socketio_event(packet: &str) -> Option<(String, Value)> {
-    let json = packet.strip_prefix("42")?;
-    let value: Value = serde_json::from_str(json).ok()?;
-    let array = value.as_array()?;
-    let event = array.first()?.as_str()?.to_string();
-    let payload = if array.len() == 2 {
-        array[1].clone()
-    } else {
-        Value::Array(array.iter().skip(1).cloned().collect())
-    };
-    Some((event, payload))
-}
-
-fn websocket_record(
-    src: &Source,
-    source_index: usize,
-    event: &str,
-    payload: Value,
-    raw: bool,
-) -> Value {
-    let decoded = if event == "message" {
-        decode_airframes_message(&payload, raw)
-    } else {
-        None
-    };
-    let mut record = serde_json::json!({
-        "source": src.label(),
-        "source_index": source_index,
-        "bearer": "airframes.io",
-        "event": event,
-        "decoded": decoded,
-    });
-    if raw {
-        record
-            .as_object_mut()
-            .unwrap()
-            .insert("raw".into(), payload);
-    }
-    record
-}
-
-fn decode_airframes_message(payload: &Value, include_raw: bool) -> Option<Value> {
-    let row = if payload.is_array() {
-        payload.as_array()?.first()?
-    } else {
-        payload
-    };
-    let text = row.get("text").and_then(Value::as_str);
-    let label = row.get("label").and_then(Value::as_str).unwrap_or_default();
-    let link_direction = row.get("link_direction").and_then(Value::as_str);
-    let direction = infer_airframes_direction(label, link_direction);
-    let timestamp = row
-        .get("timestamp")
-        .or_else(|| row.get("created_at"))
-        .cloned()
-        .unwrap_or(Value::Null);
-
-    let Some(text) = text else {
-        return Some(serde_json::json!({
-            "path": "unknown",
-            "message_class": "metadata_only",
-            "summary": "Airframes VDL row without ACARS text payload",
-            "airframes_id": row.get("id").cloned().unwrap_or(Value::Null),
-            "timestamp": timestamp,
-            "label": row.get("label").cloned().unwrap_or(Value::Null),
-            "tail": row.get("tail").cloned().unwrap_or(Value::Null),
-            "src": airframes_addr_value(row, "from_hex"),
-            "dst": airframes_addr_value(row, "to_hex"),
-            "source_type": row.get("source_type").cloned().unwrap_or(Value::Null),
-            "frequency": row.get("frequency").cloned().unwrap_or(Value::Null),
-            "app": Value::Null,
-        }));
-    };
-
-    let normalized_text = normalize_arinc622_text(text).unwrap_or_else(|| text.to_string());
-    let app = decode_acars_text_payload(label, None, &normalized_text, direction);
-    let src_addr = airframes_addr_value(row, "from_hex");
-    let dst_addr = airframes_addr_value(row, "to_hex");
-    let raw_val = serde_json::json!({
-        "timestamp": timestamp,
-        "label": label,
-        "tail": row.get("tail").cloned().unwrap_or(Value::Null),
-        "text": text,
-        "direction": direction,
-        "src": src_addr,
-        "dst": dst_addr,
-        "data": app,
-        "metadata": {
-            "bearer": "airframes.io",
-            "source": row.get("source").cloned().unwrap_or(Value::Null),
-            "source_type": row.get("source_type").cloned().unwrap_or(Value::Null),
-            "frequency": row.get("frequency").cloned().unwrap_or(Value::Null),
-            "link_direction": link_direction,
-            "airframes_id": row.get("id").cloned().unwrap_or(Value::Null),
-        }
-    });
-    Some(acars::decode::compact::compact_acars_value(
-        raw_val,
-        include_raw,
-    ))
-}
-
-fn airframes_addr_value(row: &Value, key: &str) -> Value {
-    let Some(hex) = row.get(key).and_then(Value::as_str) else {
-        return Value::Null;
-    };
-    let addr = hex.trim().to_ascii_lowercase();
-    if addr.len() != 6 || !addr.chars().all(|c| c.is_ascii_hexdigit()) {
-        return serde_json::json!({ "icao24": addr });
-    }
-
-    let aircraft_icao = row
-        .pointer("/airframe/icao")
-        .and_then(Value::as_str)
-        .map(str::to_ascii_lowercase);
-    let addr_type = if aircraft_icao.as_deref() == Some(addr.as_str()) {
-        "aircraft"
-    } else {
-        "ground_station"
-    };
-
-    serde_json::json!({
-        "icao24": addr,
-        "type": addr_type,
-    })
-}
-
-fn normalize_arinc622_text(text: &str) -> Option<String> {
-    if text.starts_with('/') {
-        return has_arinc622_imi(text).then(|| text.to_string());
-    }
-    for token in text.split_whitespace().rev() {
-        if has_arinc622_imi(token) {
-            return Some(format!("/{token}"));
-        }
-    }
-    None
-}
-
-fn has_arinc622_imi(text: &str) -> bool {
-    [".AT1.", ".CR1.", ".CC1.", ".DR1.", ".ADS."]
-        .iter()
-        .any(|needle| text.contains(needle))
-}
-
-fn infer_airframes_direction(label: &str, link_direction: Option<&str>) -> MessageDirection {
-    match label {
-        "AA" => MessageDirection::GroundToAir,
-        "BA" => MessageDirection::AirToGround,
-        _ => match link_direction {
-            Some("uplink") => MessageDirection::GroundToAir,
-            Some("downlink") => MessageDirection::AirToGround,
-            _ => MessageDirection::Unknown,
-        },
-    }
-}
-
-/// Connect to a websocket, routing through an HTTP CONNECT proxy if
-/// HTTPS_PROXY / https_proxy is set in the environment (matching the behaviour
-/// of the Python collection script).
-async fn websocket_connect(
-    url: &str,
-    request: tokio_tungstenite::tungstenite::handshake::client::Request,
-) -> anyhow::Result<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-> {
-    // Install a CryptoProvider if none has been installed yet (required by rustls 0.23+).
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let proxy_env = std::env::var("HTTPS_PROXY")
-        .or_else(|_| std::env::var("https_proxy"))
-        .ok();
-
-    if let Some(proxy_url) = proxy_env {
-        let proxy_uri: Uri = proxy_url.parse()?;
-        let proxy_host = proxy_uri
-            .host()
-            .ok_or_else(|| anyhow::anyhow!("proxy URL has no host"))?
-            .to_string();
-        let proxy_port = proxy_uri.port_u16().unwrap_or(8080);
-        let target_uri: Uri = url.parse()?;
-        let target_host = target_uri
-            .host()
-            .ok_or_else(|| anyhow::anyhow!("target URL has no host"))?
-            .to_string();
-        let target_port = target_uri.port_u16().unwrap_or(443);
-        let connect_target = format!("{target_host}:{target_port}");
-        let connect_req = format!(
-            "CONNECT {connect_target} HTTP/1.1\r\nHost: {connect_target}\r\nProxy-Connection: keep-alive\r\n\r\n"
-        );
-
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut tcp = tokio::net::TcpStream::connect(format!("{proxy_host}:{proxy_port}")).await?;
-        tcp.write_all(connect_req.as_bytes()).await?;
-        let mut buf = [0u8; 4096];
-        let mut n = 0usize;
-        loop {
-            let r = tcp.read(&mut buf[n..]).await?;
-            if r == 0 {
-                anyhow::bail!("proxy closed during CONNECT");
-            }
-            n += r;
-            if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
-            if n >= buf.len() {
-                anyhow::bail!("proxy CONNECT response too large");
-            }
-        }
-        let status_line = std::str::from_utf8(&buf[..n])?
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_string();
-        if !status_line.contains("200") {
-            anyhow::bail!("proxy CONNECT failed: {status_line}");
-        }
-
-        // TLS-wrap the tunnelled TCP stream with rustls, then hand to tungstenite.
-        let root_store = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
-        let tls_config = std::sync::Arc::new(
-            rustls::ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth(),
-        );
-        let connector = tokio_rustls::TlsConnector::from(tls_config.clone());
-        let domain = rustls::pki_types::ServerName::try_from(target_host.clone())
-            .map_err(|e| anyhow::anyhow!("invalid TLS hostname {target_host}: {e}"))?;
-        let tls = connector.connect(domain, tcp).await?;
-        // Wrap the TlsStream in MaybeTlsStream so the return type matches the non-proxy path.
-        let maybe_tls = tokio_tungstenite::MaybeTlsStream::Rustls(tls);
-        let (ws, _) = tokio_tungstenite::client_async_with_config(request, maybe_tls, None).await?;
-        Ok(ws)
-    } else {
-        Ok(tokio_tungstenite::connect_async(request).await?.0)
-    }
 }
 
 async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {

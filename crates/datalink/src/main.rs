@@ -1,4 +1,6 @@
+mod airframes;
 mod hfdl;
+mod merged;
 mod vdl2;
 mod vhf;
 
@@ -17,8 +19,12 @@ enum Direction {
 #[derive(Debug, Parser)]
 #[command(name = "datalink", about = "Decode aviation datalink traffic")]
 struct Args {
+    /// Merged receiver configuration file. Used when no bearer subcommand is provided.
+    #[arg(long)]
+    config: Option<String>,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -30,7 +36,7 @@ enum Command {
     Vhf(vhf::Options),
     /// Airframes.io websocket feed.
     #[command(name = "airframes.io", alias = "airframes")]
-    AirframesIo(AirframesOptions),
+    AirframesIo(airframes::Options),
     /// HF Data Link frontend.
     #[command(alias = "hf")]
     Hfdl(hfdl::Options),
@@ -39,27 +45,6 @@ enum Command {
         #[command(subcommand)]
         command: DecodeCommand,
     },
-}
-
-#[derive(Debug, Parser)]
-struct AirframesOptions {
-    /// Airframes source URL; defaults to airframes://
-    source: Option<String>,
-    /// Dump a copy of decoded websocket rows as JSONL
-    #[arg(short, long)]
-    output: Option<String>,
-    /// Print counters to stderr at end
-    #[arg(long)]
-    stats: bool,
-    /// Include the original websocket payload under raw
-    #[arg(long)]
-    raw: bool,
-    /// Publish decoded application messages to Redis pub/sub topics
-    #[arg(long, value_name = "REDIS URL")]
-    redis_url: Option<String>,
-    /// Retry interval (seconds) when publishing to Redis fails; 0 disables retry
-    #[arg(long, default_value_t = 5)]
-    redis_retry_interval: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -97,21 +82,12 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Command::Vdl2(options) => vdl2::run(options).await,
-        Command::Vhf(options) => vhf::run(options).await,
-        Command::AirframesIo(options) => {
-            vdl2::run_airframes_simple(
-                options.source,
-                options.output,
-                options.stats,
-                options.raw,
-                options.redis_url,
-                options.redis_retry_interval,
-            )
-            .await
-        }
-        Command::Hfdl(options) => hfdl::run(options),
-        Command::Decode { command } => run_decode(command),
+        Some(Command::Vdl2(options)) => vdl2::run(options).await,
+        Some(Command::Vhf(options)) => vhf::run(options).await,
+        Some(Command::AirframesIo(options)) => airframes::run(options).await,
+        Some(Command::Hfdl(options)) => hfdl::run(options),
+        Some(Command::Decode { command }) => run_decode(command),
+        None => merged::run(args.config).await,
     }
 }
 
