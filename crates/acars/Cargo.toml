@@ -16,7 +16,7 @@ demod = ["dep:desperado", "dep:num-complex"]
 deku.workspace = true
 hex.workspace = true
 num-complex = { version = "0.4", optional = true }
-base64 = "0.21"
+base64 = "0.22"
 flate2 = "1"
 serde.workspace = true
 serde_json.workspace = true
