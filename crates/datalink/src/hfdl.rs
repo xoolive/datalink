@@ -1,14 +1,16 @@
-use acars::decode::{
-    acars::{parse_acars_frame, MessageDirection},
-    compact::compact_value,
-};
+use crate::source::{Address, Source};
+#[cfg(feature = "hackrf")]
+use crate::util::hackrf_gain;
+#[cfg(feature = "airspy")]
+use crate::util::parse_airspy_serial;
+use crate::util::{expanduser, infer_capture_params, redis_topic_for_record, RedisPublisher};
+use acars::decode::hfdl::parse_hfdl_pdu;
 use acars::demod::hfdl::{diagnose_channel, HfdlDemodConfig};
 use clap::{Parser, ValueEnum};
+use futures_util::StreamExt;
 use rustfft::num_complex::Complex;
-use serde_json::json;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::path::PathBuf;
 
 const DEFAULT_HFDL_CHANNELS_KHZ: &[f64] = &[
     6529.0, 6532.0, 6535.0, 6559.0, 6565.0, 6589.0, 6596.0, 6619.0, 6628.0, 6646.0, 6652.0, 6661.0,
@@ -40,10 +42,10 @@ impl SampleFormat {
 }
 
 #[derive(Debug, Parser)]
-#[command(about = "HF Data Link decoder for I/Q file captures")]
+#[command(about = "HF Data Link frontend for WAV and I/Q captures")]
 pub(crate) struct Options {
-    /// I/Q file source, e.g. file://capture.raw or ~/capture.raw.
-    source: Option<String>,
+    /// WAV, I/Q, or SDR source, e.g. file://capture.wav, rtlsdr://0, hackrf://0, or ~/capture.raw.
+    source: Option<Source>,
 
     /// I/Q sample format
     #[arg(long, value_enum, default_value_t = SampleFormat::Cf32)]
@@ -72,13 +74,21 @@ pub(crate) struct Options {
     /// Print demod/decode counters to stderr at end
     #[arg(long)]
     stats: bool,
+
+    /// Publish decoded PDUs to application-specific Redis pub/sub topics
+    #[arg(long, value_name = "REDIS URL")]
+    redis_url: Option<String>,
+
+    /// Retry interval (seconds) when publishing to Redis fails; 0 disables retry
+    #[arg(long)]
+    redis_retry_interval: Option<u64>,
 }
 
-pub(crate) fn run(options: Options) -> anyhow::Result<()> {
-    decode_mode(&options)
+pub(crate) async fn run(options: Options) -> anyhow::Result<()> {
+    decode_mode(&options).await
 }
 
-pub(crate) fn decode_file_values(
+pub(crate) async fn decode_file_values(
     source: &str,
     format: Option<&str>,
     center_freq: Option<u32>,
@@ -88,7 +98,7 @@ pub(crate) fn decode_file_values(
     max_seconds: f64,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let options = Options {
-        source: Some(source.to_string()),
+        source: Some(source.parse().map_err(anyhow::Error::msg)?),
         format: format
             .and_then(parse_sample_format)
             .unwrap_or(SampleFormat::Cf32),
@@ -98,8 +108,10 @@ pub(crate) fn decode_file_values(
         start_second,
         max_seconds,
         stats: false,
+        redis_url: None,
+        redis_retry_interval: None,
     };
-    collect_decoded_pdus(&options)
+    collect_decoded_pdus(&options).await
 }
 
 fn parse_sample_format(value: &str) -> Option<SampleFormat> {
@@ -112,34 +124,40 @@ fn parse_sample_format(value: &str) -> Option<SampleFormat> {
     }
 }
 
-fn decode_mode(options: &Options) -> anyhow::Result<()> {
-    for parsed in collect_decoded_pdus(options)? {
-        println!("{}", serde_json::to_string(&parsed)?)
+async fn decode_mode(options: &Options) -> anyhow::Result<()> {
+    let mut redis = if let Some(url) = options.redis_url.as_deref() {
+        Some(
+            RedisPublisher::connect_with_prefix(
+                url,
+                options.redis_retry_interval.unwrap_or(5),
+                "datalink hfdl",
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    for parsed in collect_decoded_pdus(options).await? {
+        let line = serde_json::to_string(&parsed)?;
+        println!("{line}");
+        if let Some(redis) = redis.as_mut() {
+            redis.publish(redis_topic_for_record(&parsed), &line).await;
+        }
     }
     Ok(())
 }
 
-fn collect_decoded_pdus(options: &Options) -> anyhow::Result<Vec<serde_json::Value>> {
+async fn collect_decoded_pdus(options: &Options) -> anyhow::Result<Vec<serde_json::Value>> {
     let source = options
         .source
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("missing source; pass an explicit I/Q file source"))?;
-    let path = normalize_source_path(source);
-    let format = effective_format(&path, options.format);
-    let sample_rate = effective_sample_rate(&path, format, options.sample_rate)?;
-    let center_freq = effective_center_freq(&path, format, options.center_freq);
-    let channels = channels_khz_for(options, sample_rate, center_freq);
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing source; pass an explicit I/Q or SDR source"))?;
+    let (samples, sample_rate, center_freq, channels) = samples_for_source(source, options).await?;
     anyhow::ensure!(
         !channels.is_empty(),
         "no HFDL channels selected; pass --channel or use a wider/centered recording"
     );
-    let samples = read_complex_window(
-        &path,
-        format,
-        sample_rate,
-        options.start_second,
-        options.max_seconds,
-    )?;
     let mut pdu_ok = 0u64;
     let mut candidate_count = 0u64;
     let mut frame_sync_count = 0u64;
@@ -182,6 +200,182 @@ fn collect_decoded_pdus(options: &Options) -> anyhow::Result<Vec<serde_json::Val
         );
     }
     Ok(out)
+}
+
+async fn samples_for_source(
+    source: &Source,
+    options: &Options,
+) -> anyhow::Result<(Vec<Complex<f32>>, u32, u32, Vec<f64>)> {
+    let mut effective_source = source.clone();
+    if effective_source.center_freq.is_none() {
+        effective_source.center_freq = Some(options.center_freq);
+    }
+    if effective_source.sample_rate.is_none() {
+        effective_source.sample_rate = Some(options.sample_rate);
+    }
+    let sample_rate = effective_source.sample_rate.unwrap_or(options.sample_rate);
+    let center_freq = effective_source.center_freq.unwrap_or(options.center_freq);
+    let configured_channels = options.channel.clone().or_else(|| {
+        effective_source
+            .channels
+            .clone()
+            .map(|channels| channels.into_iter().map(|hz| hz as f64).collect())
+    });
+    let channels = channels_khz_for(configured_channels.as_ref(), sample_rate, center_freq);
+
+    let samples = match &effective_source.address {
+        Address::File { file } => {
+            let path = expanduser(file.strip_prefix("file://").unwrap_or(file));
+            let path = path.to_string_lossy();
+            let inferred = infer_capture_params(&path);
+            let requested_format = effective_source
+                .format
+                .as_deref()
+                .and_then(parse_sample_format)
+                .unwrap_or(options.format);
+            let format = effective_format(&path, requested_format);
+            let sample_rate = effective_sample_rate(
+                &path,
+                format,
+                inferred
+                    .and_then(|params| params.sample_rate)
+                    .unwrap_or(sample_rate),
+            )?;
+            let center_freq = inferred
+                .map(|params| params.center_freq)
+                .unwrap_or_else(|| effective_center_freq(&path, format, center_freq));
+            let channels = channels_khz_for(configured_channels.as_ref(), sample_rate, center_freq);
+            let samples = read_complex_window(
+                &path,
+                format,
+                sample_rate,
+                options.start_second,
+                options.max_seconds,
+            )?;
+            return Ok((samples, sample_rate, center_freq, channels));
+        }
+        _ => read_sdr_window(&effective_source, options.start_second, options.max_seconds).await?,
+    };
+
+    Ok((samples, sample_rate, center_freq, channels))
+}
+
+async fn read_sdr_window(
+    source: &Source,
+    start_second: f64,
+    max_seconds: f64,
+) -> anyhow::Result<Vec<Complex<f32>>> {
+    let sample_rate = source.sample_rate.unwrap_or(8_000_000);
+    let skip = (start_second.max(0.0) * sample_rate as f64).round() as usize;
+    let keep = (max_seconds.max(0.0) * sample_rate as f64).ceil() as usize;
+    let mut stream = open_source(source).await?;
+    let mut seen = 0usize;
+    let mut out = Vec::with_capacity(keep);
+    while out.len() < keep {
+        let Some(chunk_result) = stream.next().await else {
+            break;
+        };
+        let chunk = chunk_result?;
+        for sample in chunk {
+            if seen >= skip && out.len() < keep {
+                out.push(Complex::new(sample.re, sample.im));
+            }
+            seen = seen.saturating_add(1);
+            if out.len() >= keep {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
+    use desperado::{DeviceConfig, IqAsyncSource};
+
+    let center_freq = src.center_freq.unwrap_or(10_000_000);
+    let sample_rate = src.sample_rate.unwrap_or(8_000_000);
+    match &src.address {
+        Address::File { file } if file == "-" => Ok(IqAsyncSource::from_stdin(
+            center_freq,
+            sample_rate,
+            65_536,
+            src.iq_format(),
+        )),
+        Address::File { file } => {
+            Ok(
+                IqAsyncSource::from_file(file, center_freq, sample_rate, 65_536, src.iq_format())
+                    .await?,
+            )
+        }
+        #[cfg(feature = "rtlsdr")]
+        Address::Rtlsdr { device, serial } => {
+            let selector = if let Some(serial) = serial {
+                desperado::rtlsdr::DeviceSelector::Filter {
+                    manufacturer: None,
+                    product: None,
+                    serial: Some(serial.clone()),
+                }
+            } else {
+                desperado::rtlsdr::DeviceSelector::Index(device.unwrap_or(0))
+            };
+            let cfg = desperado::rtlsdr::RtlSdrConfig {
+                device: selector,
+                center_freq,
+                sample_rate,
+                gain: src.gain(49.6),
+                bias_tee: src.bias_tee.unwrap_or(false),
+                freq_correction_ppm: 0,
+            };
+            Ok(IqAsyncSource::from_device_config(&DeviceConfig::RtlSdr(cfg)).await?)
+        }
+        #[cfg(feature = "airspy")]
+        Address::Airspy { device, serial } => {
+            let selector = if let Some(serial) = serial {
+                desperado::airspy::DeviceSelector::Serial(parse_airspy_serial(serial)?)
+            } else {
+                desperado::airspy::DeviceSelector::Index(device.unwrap_or(0))
+            };
+            let cfg = desperado::airspy::AirspyConfig {
+                device: selector,
+                center_freq,
+                sample_rate,
+                gain: src.gain(50.0),
+                bias_tee: src.bias_tee.unwrap_or(false),
+                packing: false,
+                lna_gain: None,
+                mixer_gain: None,
+                vga_gain: None,
+                gain_mode: desperado::airspy::AirspyGainMode::Sensitivity,
+            };
+            Ok(IqAsyncSource::from_device_config(&DeviceConfig::Airspy(cfg)).await?)
+        }
+        #[cfg(feature = "hackrf")]
+        Address::Hackrf { device } => {
+            let cfg = desperado::hackrf::HackRfConfig {
+                device_index: device.unwrap_or(0),
+                center_freq: center_freq as u64,
+                sample_rate,
+                gain: hackrf_gain(src),
+                amp_enable: src.amp_enable.unwrap_or(false),
+                bias_tee: src.bias_tee.unwrap_or(false),
+            };
+            Ok(IqAsyncSource::from_device_config(&DeviceConfig::HackRf(cfg)).await?)
+        }
+        #[cfg(feature = "soapy")]
+        Address::Soapy { soapy } => {
+            let cfg = desperado::soapy::SoapyConfig {
+                args: soapy.clone(),
+                center_freq: center_freq as f64,
+                sample_rate: sample_rate as f64,
+                channel: 0,
+                gain: src.gain(49.6),
+                bias_tee: src.bias_tee.unwrap_or(false),
+            };
+            Ok(IqAsyncSource::from_device_config(&DeviceConfig::Soapy(cfg)).await?)
+        }
+        #[allow(unreachable_patterns)]
+        _ => Err(anyhow::anyhow!("source type is not enabled in this build")),
+    }
 }
 
 fn read_complex_window(
@@ -286,454 +480,12 @@ fn decode_complex_bytes(format: SampleFormat, raw: &[u8], out: &mut [Complex<f32
     }
 }
 
-fn parse_hfdl_pdu(buf: &[u8]) -> serde_json::Value {
-    if buf.is_empty() {
-        return json!({ "bearer": "hfdl", "parse_ok": false, "error": "empty PDU" });
-    }
-    if buf[0] & 1 != 0 {
-        parse_mpdu(buf)
-    } else {
-        parse_spdu(buf)
-    }
-}
-
-fn parse_spdu(buf: &[u8]) -> serde_json::Value {
-    let fcs_ok = hfdl_fcs_ok(buf, 64);
-    let mut out = json!({
-        "bearer": "hfdl",
-        "pdu": "spdu",
-        "parse_ok": buf.len() >= 66,
-        "fcs_ok": fcs_ok,
-        "len": buf.len(),
-        "ground_station_id": buf.get(1).map(|v| v & 0x7f),
-    });
-    if buf.len() >= 66 {
-        let obj = out.as_object_mut().unwrap();
-        obj.insert("version".into(), ((buf[0] >> 2) & 3).into());
-        obj.insert("rls_in_use".into(), (buf[0] & 2 != 0).into());
-        obj.insert("iso8208_supported".into(), (buf[0] & 0x20 != 0).into());
-        obj.insert(
-            "change_note".into(),
-            spdu_change_note((buf[0] & 0xc0) >> 6).into(),
-        );
-        obj.insert(
-            "tdma_frame_index".into(),
-            ((buf[2] as u16) | (((buf[3] & 0x0f) as u16) << 8)).into(),
-        );
-        obj.insert("tdma_frame_offset".into(), (buf[3] >> 4).into());
-        obj.insert("min_priority".into(), (buf[52] & 0x0f).into());
-        obj.insert(
-            "system_table_version".into(),
-            ((buf[53] as u16) | (((buf[54] & 0x0f) as u16) << 8)).into(),
-        );
-        obj.insert("ground_stations".into(), json!([
-            {"id": buf[1] & 0x7f, "utc_sync": buf[1] & 0x80 != 0, "frequencies_in_use_mask": ((buf[54] >> 4) as u32) | ((buf[55] as u32) << 4) | ((buf[56] as u32) << 12)},
-            {"id": buf[57] & 0x7f, "utc_sync": buf[57] & 0x80 != 0, "frequencies_in_use_mask": (buf[58] as u32) | ((buf[59] as u32) << 8) | (((buf[60] & 0x0f) as u32) << 16)},
-            {"id": (buf[60] >> 4) | ((buf[61] & 0x07) << 4), "utc_sync": buf[61] & 0x08 != 0, "frequencies_in_use_mask": ((buf[61] >> 4) as u32) | ((buf[62] as u32) << 4) | ((buf[63] as u32) << 12)}
-        ]));
-    }
-    out
-}
-
-fn parse_mpdu(buf: &[u8]) -> serde_json::Value {
-    let downlink = buf[0] & 0x02 != 0;
-    if downlink {
-        parse_downlink_mpdu(buf)
-    } else {
-        parse_uplink_mpdu(buf)
-    }
-}
-
-fn parse_downlink_mpdu(buf: &[u8]) -> serde_json::Value {
-    if buf.len() < 8 {
-        return json!({ "bearer": "hfdl", "pdu": "mpdu", "direction": "downlink", "parse_ok": false, "error": "too short" });
-    }
-    let lpdu_count = ((buf[0] >> 2) & 0x0f) as usize;
-    let header_len = 6 + lpdu_count;
-    let fcs_ok = hfdl_fcs_ok(buf, header_len);
-    let lpdu_lengths: Vec<usize> = buf
-        .get(6..6 + lpdu_count)
-        .unwrap_or_default()
-        .iter()
-        .map(|v| *v as usize + 1)
-        .collect();
-    let parse_ok = buf.len() >= header_len + 2;
-    let lpdus = if parse_ok {
-        let data_start = header_len + 2;
-        parse_lpdu_list(
-            &lpdu_lengths,
-            buf.get(data_start..).unwrap_or_default(),
-            MessageDirection::AirToGround,
-        )
-    } else {
-        Vec::new()
-    };
-    json!({
-        "bearer": "hfdl",
-        "pdu": "mpdu",
-        "direction": "downlink",
-        "parse_ok": parse_ok,
-        "fcs_ok": fcs_ok,
-        "len": buf.len(),
-        "src_aircraft_id": buf[2],
-        "dst_ground_station_id": buf[1] & 0x7f,
-        "lpdu_count": lpdu_count,
-        "lpdu_lengths": lpdu_lengths,
-        "lpdus": lpdus,
-    })
-}
-
-fn parse_uplink_mpdu(buf: &[u8]) -> serde_json::Value {
-    if buf.len() < 5 {
-        return json!({ "bearer": "hfdl", "pdu": "mpdu", "direction": "uplink", "parse_ok": false, "error": "too short" });
-    }
-    let aircraft_count = (((buf[0] & 0x70) >> 4) + 1) as usize;
-    let mut pos = 2usize;
-    let mut aircraft_headers = Vec::new();
-    for _ in 0..aircraft_count {
-        if pos + 2 > buf.len() {
-            break;
-        }
-        let aircraft_id = buf[pos];
-        let lpdu_count = (buf[pos + 1] >> 4) as usize;
-        pos += 2;
-        let lengths: Vec<usize> = buf
-            .get(pos..pos + lpdu_count)
-            .unwrap_or_default()
-            .iter()
-            .map(|v| *v as usize + 1)
-            .collect();
-        pos += lpdu_count;
-        aircraft_headers.push((aircraft_id, lengths));
-    }
-    let fcs_ok = hfdl_fcs_ok(buf, pos);
-    let parse_ok = buf.len() >= pos + 2;
-    let mut data = buf.get(pos + 2..).unwrap_or_default();
-    let aircraft: Vec<_> = aircraft_headers
-        .into_iter()
-        .map(|(aircraft_id, lengths)| {
-            let lpdus = parse_lpdu_list(&lengths, data, MessageDirection::GroundToAir);
-            let consumed: usize = lengths.iter().sum();
-            data = data.get(consumed..).unwrap_or_default();
-            json!({
-                "aircraft_id": aircraft_id,
-                "lpdu_count": lengths.len(),
-                "lpdu_lengths": lengths,
-                "lpdus": lpdus,
-            })
-        })
-        .collect();
-    json!({
-        "bearer": "hfdl",
-        "pdu": "mpdu",
-        "direction": "uplink",
-        "parse_ok": parse_ok,
-        "fcs_ok": fcs_ok,
-        "len": buf.len(),
-        "src_ground_station_id": buf[1] & 0x7f,
-        "aircraft": aircraft,
-    })
-}
-
-fn hfdl_fcs_ok(buf: &[u8], header_len: usize) -> Option<bool> {
-    if buf.len() < header_len + 2 {
-        return None;
-    }
-    let got = u16::from_le_bytes([buf[header_len], buf[header_len + 1]]);
-    let expected = hfdl_fcs(&buf[..header_len]);
-    Some(got == expected)
-}
-
-fn hfdl_fcs(data: &[u8]) -> u16 {
-    crc16_ccitt_reflected(data, 0xffff) ^ 0xffff
-}
-
-fn parse_lpdu_list(
-    lengths: &[usize],
-    mut data: &[u8],
-    acars_direction: MessageDirection,
-) -> Vec<serde_json::Value> {
-    lengths
-        .iter()
-        .enumerate()
-        .map(|(idx, len)| {
-            let lpdu = data.get(..*len).unwrap_or(data);
-            data = data.get(*len..).unwrap_or_default();
-            parse_lpdu(idx, lpdu, acars_direction)
-        })
-        .collect()
-}
-
-fn parse_lpdu(index: usize, buf: &[u8], acars_direction: MessageDirection) -> serde_json::Value {
-    if buf.len() < 3 {
-        return json!({
-            "index": index,
-            "parse_ok": false,
-            "error": "too short",
-            "len": buf.len(),
-        });
-    }
-    let body_len = buf.len() - 2;
-    let fcs_ok = hfdl_fcs_ok(buf, body_len);
-    let body = &buf[..body_len];
-    let lpdu_type = body[0];
-    let mut out = json!({
-        "index": index,
-        "parse_ok": true,
-        "fcs_ok": fcs_ok,
-        "len": buf.len(),
-        "type": format!("0x{lpdu_type:02X}"),
-        "type_name": lpdu_type_name(lpdu_type),
-    });
-
-    if let Some(obj) = out.as_object_mut() {
-        match lpdu_type {
-            0x0D | 0x1D if body.len() > 1 => {
-                obj.insert("hfnpdu".into(), parse_hfnpdu(&body[1..], acars_direction));
-            }
-            0x2F | 0x3F if body.len() >= 5 => {
-                obj.insert("icao24".into(), icao_hex(&body[1..4]).into());
-                obj.insert("reason_code".into(), body[4].into());
-            }
-            0x5F | 0x9F if body.len() >= 5 => {
-                obj.insert("icao24".into(), icao_hex(&body[1..4]).into());
-                obj.insert("aircraft_id".into(), body[4].into());
-            }
-            0x4F | 0x8F | 0xBF if body.len() >= 4 => {
-                obj.insert("icao24".into(), icao_hex(&body[1..4]).into());
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-fn parse_hfnpdu(buf: &[u8], acars_direction: MessageDirection) -> serde_json::Value {
-    if buf.is_empty() {
-        return json!({ "parse_ok": false, "error": "empty HFNPDU" });
-    }
-    if buf[0] != 0xFF {
-        return json!({
-            "parse_ok": false,
-            "error": "not an HFNPDU",
-            "raw_hex": hex::encode_upper(buf),
-        });
-    }
-    if buf.len() < 2 {
-        return json!({ "parse_ok": false, "error": "too short", "raw_hex": hex::encode_upper(buf) });
-    }
-    let hfnpdu_type = buf[1];
-    let mut out = json!({
-        "parse_ok": true,
-        "type": format!("0x{hfnpdu_type:02X}"),
-        "type_name": hfnpdu_type_name(hfnpdu_type),
-    });
-    if let Some(obj) = out.as_object_mut() {
-        match hfnpdu_type {
-            0xD0 if buf.len() >= 5 => {
-                obj.insert("total_pdu_count".into(), ((buf[2] >> 4) + 1).into());
-                obj.insert("pdu_sequence".into(), (buf[2] & 0x0f).into());
-                obj.insert(
-                    "system_table_version".into(),
-                    ((buf[3] as u16 >> 4) | ((buf[4] as u16) << 4)).into(),
-                );
-            }
-            0xD1 if buf.len() >= 47 => {
-                obj.insert("performance".into(), parse_performance_data(buf));
-            }
-            0xD2 if buf.len() >= 4 => {
-                obj.insert(
-                    "request_data".into(),
-                    u16::from_le_bytes([buf[2], buf[3]]).into(),
-                );
-            }
-            0xD5 if buf.len() >= 15 => {
-                obj.insert("frequency_data".into(), parse_frequency_data(buf));
-            }
-            0xFF => {
-                let acars_bytes = &buf[2..];
-                match parse_acars_frame(acars_bytes, acars_direction) {
-                    Ok(msg) => {
-                        let raw = serde_json::to_value(&msg)
-                            .unwrap_or_else(|e| json!({ "serialize_error": e.to_string() }));
-                        obj.insert("acars".into(), compact_value(raw, false));
-                    }
-                    Err(err) => {
-                        obj.insert(
-                            "acars".into(),
-                            json!({
-                                "parse_ok": false,
-                                "error": err.to_string(),
-                                "raw_hex": hex::encode_upper(acars_bytes),
-                            }),
-                        );
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-fn parse_performance_data(buf: &[u8]) -> serde_json::Value {
-    let flight_id = ascii_trim(&buf[2..8]);
-    let lat_raw = (buf[8] as u32) | ((buf[9] as u32) << 8) | (((buf[10] & 0x0f) as u32) << 16);
-    let lon_raw =
-        ((buf[10] as u32 & 0xf0) >> 4) | ((buf[11] as u32) << 4) | ((buf[12] as u32) << 12);
-    let utc = 2 * u16::from_le_bytes([buf[13], buf[14]]) as u32;
-    json!({
-        "version": buf[15],
-        "flight_id": flight_id,
-        "position": { "lat": parse_hfdl_coordinate(lat_raw), "lon": parse_hfdl_coordinate(lon_raw) },
-        "time_utc": format_hms(utc),
-        "flight_leg": buf[16],
-        "ground_station_id": buf[17] & 0x7f,
-        "frequency_id": buf[18],
-        "frequency_search_count": {
-            "previous_leg": u16::from_le_bytes([buf[19], buf[20]]),
-            "current_leg": u16::from_le_bytes([buf[21], buf[22]]),
-        },
-        "hf_data_disabled_duration_sec": {
-            "previous_leg": u16::from_le_bytes([buf[23], buf[24]]),
-            "current_leg": u16::from_le_bytes([buf[25], buf[26]]),
-        },
-        "mpdus_received": mpdu_stats(&buf[27..31]),
-        "mpdus_received_with_errors": mpdu_stats(&buf[31..35]),
-        "spdus_received": u16::from_le_bytes([buf[35], buf[36]]),
-        "spdus_missed": buf[37],
-        "mpdus_transmitted": mpdu_stats(&buf[38..42]),
-        "mpdus_delivered": mpdu_stats(&buf[42..46]),
-        "frequency_change_code": buf[46] & 0x0f,
-        "frequency_change_reason": frequency_change_reason(buf[46] & 0x0f),
-    })
-}
-
-fn parse_frequency_data(buf: &[u8]) -> serde_json::Value {
-    let flight_id = ascii_trim(&buf[2..8]);
-    let lat_raw = (buf[8] as u32) | ((buf[9] as u32) << 8) | (((buf[10] & 0x0f) as u32) << 16);
-    let lon_raw =
-        ((buf[10] as u32 & 0xf0) >> 4) | ((buf[11] as u32) << 4) | ((buf[12] as u32) << 12);
-    let utc = 2 * u16::from_le_bytes([buf[13], buf[14]]) as u32;
-    let mut freqs = Vec::new();
-    let mut pos = 15usize;
-    while pos + 6 <= buf.len() && freqs.len() < 6 {
-        freqs.push(json!({
-            "ground_station_id": buf[pos] & 0x7f,
-            "propagating_frequencies_mask": (buf[pos + 1] as u32) | ((buf[pos + 2] as u32) << 8) | (((buf[pos + 3] & 0x0f) as u32) << 16),
-            "heard_frequencies_mask": ((buf[pos + 3] as u32 & 0xf0) >> 4) | ((buf[pos + 4] as u32) << 4) | ((buf[pos + 5] as u32) << 12),
-        }));
-        pos += 6;
-    }
-    json!({
-        "flight_id": flight_id,
-        "position": { "lat": parse_hfdl_coordinate(lat_raw), "lon": parse_hfdl_coordinate(lon_raw) },
-        "time_utc": format_hms(utc),
-        "propagating_frequency_count": freqs.len(),
-        "ground_stations": freqs,
-    })
-}
-
-fn mpdu_stats(bytes: &[u8]) -> serde_json::Value {
-    json!({ "300bps": bytes[3], "600bps": bytes[2], "1200bps": bytes[1], "1800bps": bytes[0] })
-}
-
-fn parse_hfdl_coordinate(raw: u32) -> f64 {
-    let signed = if raw & (1 << 19) != 0 {
-        raw as i32 - (1 << 20)
-    } else {
-        raw as i32
-    };
-    signed as f64 * 180.0 / 0x7ffff as f64
-}
-
-fn format_hms(total_seconds: u32) -> String {
-    format!(
-        "{:02}:{:02}:{:02}",
-        total_seconds / 3600,
-        (total_seconds % 3600) / 60,
-        total_seconds % 60
-    )
-}
-
-fn ascii_trim(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
-        .trim_matches(|c| c == '\0' || c == ' ')
-        .to_string()
-}
-
-fn frequency_change_reason(code: u8) -> &'static str {
-    match code {
-        0 => "First frequency search in this flight leg",
-        1 => "Too many NACKs",
-        2 => "SPDUs no longer received",
-        3 => "HFDL disabled",
-        4 => "Ground station frequency change",
-        5 => "Ground station down / channel down",
-        6 => "Poor uplink channel quality",
-        7 => "No change",
-        _ => "Unknown",
-    }
-}
-
-fn spdu_change_note(code: u8) -> &'static str {
-    match code {
-        0 => "None",
-        1 => "Channel down",
-        2 => "Upcoming frequency change",
-        3 => "Ground station down",
-        _ => "Unknown",
-    }
-}
-
-fn lpdu_type_name(typ: u8) -> &'static str {
-    match typ {
-        0x0D => "Unnumbered data",
-        0x1D => "Unnumbered acked data",
-        0x2F => "Logon denied",
-        0x3F => "Logoff request",
-        0x4F => "Logon resume",
-        0x5F => "Logon resume confirm",
-        0x8F => "Logon request normal",
-        0x9F => "Logon confirm",
-        0xBF => "Logon request DLS",
-        _ => "Unknown",
-    }
-}
-
-fn hfnpdu_type_name(typ: u8) -> &'static str {
-    match typ {
-        0xD0 => "System table partial",
-        0xD1 => "Performance data",
-        0xD2 => "System table request",
-        0xD5 => "Frequency data",
-        0xDE => "Delayed echo",
-        0xFF => "Enveloped data",
-        _ => "Unknown",
-    }
-}
-
-fn icao_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02X}")).collect()
-}
-
-fn crc16_ccitt_reflected(data: &[u8], init: u16) -> u16 {
-    let mut crc = init;
-    for &byte in data {
-        crc ^= byte as u16;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0x8408;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    crc
-}
-
-fn channels_khz_for(options: &Options, sample_rate: u32, center_freq: u32) -> Vec<f64> {
-    if let Some(channels) = &options.channel {
+fn channels_khz_for(
+    configured_channels: Option<&Vec<f64>>,
+    sample_rate: u32,
+    center_freq: u32,
+) -> Vec<f64> {
+    if let Some(channels) = configured_channels {
         return channels.iter().copied().map(to_khz).collect();
     }
 
@@ -766,28 +518,11 @@ fn effective_format(path: &str, requested: SampleFormat) -> SampleFormat {
 
 fn effective_center_freq(path: &str, format: SampleFormat, requested: u32) -> u32 {
     if format == SampleFormat::Wav16 && requested == 10_000_000 {
-        if let Some(freq) = infer_khz_from_filename(path) {
-            return freq;
+        if let Some(params) = infer_capture_params(path) {
+            return params.center_freq;
         }
     }
     requested
-}
-
-fn infer_khz_from_filename(path: &str) -> Option<u32> {
-    let name = std::path::Path::new(path).file_name()?.to_string_lossy();
-    let lower = name.to_ascii_lowercase();
-    let khz_pos = lower.rfind("khz")?;
-    let prefix = &lower[..khz_pos];
-    let digits_rev: String = prefix
-        .chars()
-        .rev()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    if digits_rev.is_empty() {
-        return None;
-    }
-    let digits: String = digits_rev.chars().rev().collect();
-    digits.parse::<u32>().ok().map(|khz| khz * 1000)
 }
 
 fn effective_sample_rate(path: &str, format: SampleFormat, requested: u32) -> anyhow::Result<u32> {
@@ -799,23 +534,28 @@ fn effective_sample_rate(path: &str, format: SampleFormat, requested: u32) -> an
     }
 }
 
-fn normalize_source_path(source: &str) -> String {
-    let path = source.strip_prefix("file://").unwrap_or(source);
-    expanduser(path).to_string_lossy().into_owned()
-}
-
-fn expanduser(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hfdl_fcs(data: &[u8]) -> u16 {
+        crc16_ccitt_reflected(data, 0xffff) ^ 0xffff
+    }
+
+    fn crc16_ccitt_reflected(data: &[u8], init: u16) -> u16 {
+        let mut crc = init;
+        for &byte in data {
+            crc ^= byte as u16;
+            for _ in 0..8 {
+                if crc & 1 != 0 {
+                    crc = (crc >> 1) ^ 0x8408;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        crc
+    }
 
     #[test]
     fn crc_check_accepts_constructed_spdu() {
@@ -878,7 +618,7 @@ mod tests {
     #[test]
     fn auto_channels_cover_10mhz_capture() {
         let options = Options {
-            source: Some("dummy".into()),
+            source: Some("dummy".parse().unwrap()),
             format: SampleFormat::Cf32,
             center_freq: 10_000_000,
             sample_rate: 8_000_000,
@@ -886,8 +626,14 @@ mod tests {
             start_second: 0.0,
             max_seconds: 1.0,
             stats: false,
+            redis_url: None,
+            redis_retry_interval: None,
         };
-        let channels = channels_khz_for(&options, options.sample_rate, options.center_freq);
+        let channels = channels_khz_for(
+            options.channel.as_ref(),
+            options.sample_rate,
+            options.center_freq,
+        );
         assert!(channels.contains(&10081.0));
         assert!(channels.contains(&11387.0));
         assert!(!channels.contains(&6529.0));

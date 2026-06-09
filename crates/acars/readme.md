@@ -1,30 +1,49 @@
 # acars
 
-Core decoding crate for ACARS, VDL2, ADS-C, and CPDLC payloads.
+Core decoding crate for aviation datalink protocols.
 
-It is shared by:
+This crate is shared by the `datalink` CLI and downstream Rust users that want to parse or
+inspect datalink frames without depending on the CLI.
 
-- `vdl136` (VDL2 demod frontend),
-- `datalink` (payload decoder CLI),
-- future frontends such as `acars131`.
+## Modules
 
-Current module split includes:
+- `decode::acars` — ACARS frame parsing, CRC verification, headers, text, labels, and
+  direction handling.
+- `decode::avlc` — VDL2 AVLC frame parsing, FCS status, addresses, control fields, and
+  payload dispatch.
+- `decode::hfdl` — HFDL PDU/MPDU/LPDU parsing.
+- `decode::payload` — application payload decoders, including ARINC 622 ADS-C and partial
+  CPDLC-related paths.
+- `decode::compact` — compact JSON shaping used by the CLI.
+- `demod` — optional demodulators for VDL2, VHF ACARS, HFDL, and resampling helpers.
 
-- `src/demod/vdl2.rs` for reusable VDL2 demodulation,
-- `src/decode/*` for protocol decoding layers.
+## Features
 
-Design intent:
+The default build is decode-only:
 
-- keep parser behavior close to `dumpvdl2`/`libacars` where practical,
-- expose strongly typed Rust structures for downstream tooling,
-- preserve stable JSON-facing conventions while expanding decode depth.
+```toml
+acars = { path = "crates/acars" }
+```
 
-Initial implementation includes:
+Enable demodulation support when I/Q sample processing is needed:
 
-- ACARS frame parsing from octets (post-SOH, with trailing DEL)
+```toml
+acars = { path = "crates/acars", features = ["demod"] }
+```
+
+The `demod` feature enables DSP dependencies such as `desperado` and `num-complex`. Keeping
+it optional lets pure parser users avoid SDR/DSP dependency builds.
+
+## Current decode coverage
+
+- ACARS frame parsing from octets
 - CRC-16-CCITT verification
-- ACARS header and text extraction
+- ACARS header/text extraction
 - H1 sublabel/MFI extraction
-- VDL payload wrapper that can dispatch to ACARS
-- ADS-C app-layer parsing (`/ATSU.ADS.<reg><payload><crc>`) with deku bitfield
-  structs for all downlink tag types present in OpenSky `adsc_decoded.txt`
+- AVLC parsing with payload dispatch (`Acars`, `X25`, `Xid`, `Unknown`)
+- HFDL PDU parsing
+- ADS-C application-layer parsing for implemented downlink tags
+- Partial CPDLC and related ARINC 622 payload extraction
+
+The implementation is Rust-native and uses `dumpvdl2`, `libacars`, `acarsdec`, `JAERO`, and
+`dumphfdl` as behavioral references where applicable.

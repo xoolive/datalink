@@ -17,7 +17,6 @@
 //!   → AVLC frame bytes  Vec<u8>
 //! ```
 //!
-//! Ported from dumpvdl2 (GPL-2+, © Tomasz Lemiech).
 
 use std::f32::consts::PI;
 use std::fs::File;

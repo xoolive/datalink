@@ -1,10 +1,11 @@
+use crate::util::{expanduser, RedisPublisher};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+#[cfg(test)]
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -333,6 +334,7 @@ impl OutputSink {
         if !self.raw {
             event.raw = None;
         }
+        remove_nested_timestamp(&mut event);
         let line = serde_json::to_string(&event)?;
         if let Some(writer) = self.writer.as_mut() {
             writeln!(writer, "{line}")?;
@@ -353,39 +355,10 @@ impl OutputSink {
     }
 }
 
-pub(crate) struct RedisPublisher {
-    connection: redis::aio::MultiplexedConnection,
-    retry_interval: Duration,
-}
-
-impl RedisPublisher {
-    async fn connect(url: &str, retry_interval_secs: u64) -> anyhow::Result<Self> {
-        let client = redis::Client::open(url)?;
-        let connection = client.get_multiplexed_async_connection().await?;
-        Ok(Self {
-            connection,
-            retry_interval: Duration::from_secs(retry_interval_secs),
-        })
-    }
-
-    async fn publish(&mut self, topic: &str, payload: &str) {
-        use redis::AsyncCommands;
-        loop {
-            let result: redis::RedisResult<()> = self.connection.publish(topic, payload).await;
-            match result {
-                Ok(()) => return,
-                Err(err) if self.retry_interval.is_zero() => {
-                    eprintln!("datalink: Redis publish to {topic} failed: {err}");
-                    return;
-                }
-                Err(err) => {
-                    eprintln!(
-                        "datalink: Redis publish to {topic} failed: {err}; retrying in {}s",
-                        self.retry_interval.as_secs()
-                    );
-                    tokio::time::sleep(self.retry_interval).await;
-                }
-            }
+fn remove_nested_timestamp(event: &mut DecodedEvent) {
+    if event.timestamp.is_some() {
+        if let Value::Object(message) = &mut event.message {
+            message.remove("timestamp");
         }
     }
 }
@@ -411,24 +384,69 @@ pub(crate) async fn run(config_path: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn source_url(source: &SourceConfig) -> anyhow::Result<String> {
+    if let Some(file) = source.file.as_deref() {
+        return Ok(file.to_string());
+    }
+    if let Some(value) = source.rtlsdr.as_ref() {
+        return Ok(device_url("rtlsdr", value));
+    }
+    if let Some(value) = source.airspy.as_ref() {
+        return Ok(device_url("airspy", value));
+    }
+    if let Some(value) = source.hackrf.as_ref() {
+        return Ok(device_url("hackrf", value));
+    }
+    if let Some(value) = source.soapy.as_ref() {
+        return Ok(device_url("soapy", value));
+    }
+    anyhow::bail!("source {} has no IQ source address", source.id)
+}
+
+fn device_url(scheme: &str, value: &toml::Value) -> String {
+    match value {
+        toml::Value::Integer(device) => format!("{scheme}://{device}"),
+        toml::Value::String(s) => format!("{scheme}://{s}"),
+        toml::Value::Table(table) => {
+            if let Some(serial) = table.get("serial").and_then(toml::Value::as_str) {
+                format!("{scheme}://serial={serial}")
+            } else if let Some(device) = table.get("device").and_then(toml::Value::as_integer) {
+                format!("{scheme}://{device}")
+            } else if scheme == "soapy" {
+                table
+                    .get("args")
+                    .and_then(toml::Value::as_str)
+                    .map(|args| format!("soapy://{args}"))
+                    .unwrap_or_else(|| "soapy://".to_string())
+            } else {
+                format!("{scheme}://0")
+            }
+        }
+        _ => format!("{scheme}://0"),
+    }
+}
+
 async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow::Result<()> {
-    let Some(file) = source.file.as_deref() else {
-        // Live SDR fanout is implemented in a later step; config parsing and validation are already shared.
-        return Ok(());
-    };
+    let source_url = source_url(source)?;
     let source_meta = SourceMetadata::from_config(source)?;
     for receiver in &source.receivers {
         let values = match receiver.bearer {
-            Bearer::Hfdl => crate::hfdl::decode_file_values(
-                file,
-                source.format.as_deref(),
-                source.center_freq,
-                source.sample_rate,
-                receiver.channels.clone(),
-                source.start_second.unwrap_or(0.0),
-                source.max_seconds.unwrap_or(20.0),
-            )?,
+            Bearer::Hfdl => {
+                crate::hfdl::decode_file_values(
+                    &source_url,
+                    source.format.as_deref(),
+                    source.center_freq,
+                    source.sample_rate,
+                    receiver.channels.clone(),
+                    source.start_second.unwrap_or(0.0),
+                    source.max_seconds.unwrap_or(20.0),
+                )
+                .await?
+            }
             Bearer::Vhf => {
+                let Some(file) = source.file.as_deref() else {
+                    continue;
+                };
                 crate::vhf::decode_file_values(
                     file,
                     source.format.as_deref(),
@@ -440,6 +458,9 @@ async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow
                 .await?
             }
             Bearer::Vdl2 => {
+                let Some(file) = source.file.as_deref() else {
+                    continue;
+                };
                 crate::vdl2::decode_file_values(
                     file,
                     source.format.as_deref(),
@@ -509,18 +530,6 @@ fn aircraft_summary(bearer: Bearer, value: &Value) -> Option<Value> {
     } else {
         Some(Value::Object(obj))
     }
-}
-
-pub(crate) fn expanduser(path: &str) -> PathBuf {
-    if path == "~" {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(path));
-    }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(path)
 }
 
 #[cfg(test)]
@@ -625,6 +634,27 @@ mod tests {
             Config::load(path.to_str().unwrap())
                 .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
         }
+    }
+
+    #[test]
+    fn removes_nested_timestamp_when_event_has_timestamp() {
+        let mut event = DecodedEvent {
+            event: "message",
+            timestamp: Some(123.0),
+            bearer: Bearer::Vhf,
+            source: SourceMetadata {
+                id: "test".into(),
+                name: "Test".into(),
+                class: SourceClass::Iq,
+                format: None,
+            },
+            receiver: None,
+            aircraft: None,
+            message: serde_json::json!({"timestamp": 123.0, "path": "acars"}),
+            raw: None,
+        };
+        remove_nested_timestamp(&mut event);
+        assert!(event.message.get("timestamp").is_none());
     }
 
     #[test]

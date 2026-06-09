@@ -37,6 +37,7 @@
 - [Decoding Pipeline](40-pipelines/decoding-pipeline.md)
 - [UDP Ingest](40-pipelines/udp-ingest.md)
 - [Normalization Schema](40-pipelines/normalization-schema.md)
+- [Merged Receiver CLI and Source Model](40-pipelines/merged-receiver-cli.md)
 
 # Operations
 

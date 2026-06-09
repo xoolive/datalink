@@ -1,5 +1,12 @@
-mod source;
-
+use crate::iq_pipeline::{collect_iq_frames, FrameContext, IqPipeline};
+use crate::source::{Address, Source};
+#[cfg(feature = "hackrf")]
+use crate::util::hackrf_gain;
+#[cfg(feature = "airspy")]
+use crate::util::parse_airspy_serial;
+use crate::util::{
+    bytes_to_hex, expanduser, infer_capture_params, redis_topic_for_record, RedisPublisher,
+};
 use acars::decode::acars::{parse_acars_frame, MessageDirection};
 use acars::demod::resample::{maybe_resample, ResampleAdapter};
 use acars::demod::vhf::VhfChannel;
@@ -7,60 +14,134 @@ use clap::Parser;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
-use source::{Address, Source, DEFAULT_CHANNELS, DEFAULT_CHUNK_SIZE, KNOWN_ACARS_CHANNELS};
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
-#[derive(Debug, Default, Clone, Deserialize, Parser)]
-#[command(about = "Classic VHF ACARS frontend")]
+const DEFAULT_CENTER_FREQ: u32 = 131_700_000;
+const DEFAULT_CHANNELS: &[u32] = &[131_525_000, 131_725_000, 131_825_000];
+const KNOWN_ACARS_CHANNELS: &[u32] = &[
+    129_125_000,
+    129_525_000,
+    130_025_000,
+    130_425_000,
+    131_125_000,
+    131_525_000,
+    131_725_000,
+    131_825_000,
+    136_900_000,
+];
+const DEFAULT_CHUNK_SIZE: usize = 65_536;
+
+trait SourceExt {
+    fn center_freq(&self) -> u32;
+    fn channels(&self) -> Vec<u32>;
+}
+
+impl SourceExt for Source {
+    fn center_freq(&self) -> u32 {
+        self.center_freq_or(DEFAULT_CENTER_FREQ)
+    }
+
+    fn channels(&self) -> Vec<u32> {
+        self.channels_with(auto_channels)
+    }
+}
+
+fn auto_channels(src: &Source) -> Vec<u32> {
+    auto_channels_for(src.center_freq(), src.sample_rate())
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
 pub(crate) struct Options {
-    /// Activate JSON output (currently JSONL is always emitted; kept for jet1090-style config compatibility)
-    #[arg(short, long)]
     #[serde(default)]
-    verbose: bool,
+    output: Option<String>,
+    #[serde(default)]
+    raw: bool,
+    #[serde(default)]
+    stats: bool,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    center_freq: Option<u32>,
+    #[serde(default)]
+    sample_rate: Option<u32>,
+    #[serde(default, alias = "channels")]
+    channel: Option<Vec<u32>>,
+    #[serde(default)]
+    redis_url: Option<String>,
+    #[serde(default)]
+    redis_retry_interval: Option<u64>,
+    #[serde(default)]
+    source: Option<Source>,
+}
 
+#[derive(Debug, Default, Clone, Parser)]
+#[command(about = "Classic VHF ACARS frontend")]
+pub(crate) struct Cli {
     /// Dump a copy of decoded messages as JSONL
     #[arg(short, long)]
     output: Option<String>,
-
     /// Include the full nested decoder output under raw_decode
     #[arg(long)]
-    #[serde(default)]
     raw: bool,
-
     /// Print demod/decode counters to stderr at end
     #[arg(long)]
-    #[serde(default)]
     stats: bool,
-
     /// I/Q sample format for file input: cu8, cs8, cs16, cf32
-    #[arg(long, default_value = "cu8")]
-    #[serde(default)]
+    #[arg(long)]
     format: Option<String>,
-
     /// Center frequency for file and SDR sources
     #[arg(long)]
-    #[serde(default)]
     center_freq: Option<u32>,
-
     /// Sample rate for file and SDR sources
     #[arg(long)]
-    #[serde(default)]
     sample_rate: Option<u32>,
-
     /// ACARS channel frequencies in Hz
     #[arg(long, num_args = 1..)]
-    #[serde(default)]
     channel: Option<Vec<u32>>,
-
-    /// Dump 12.5 kHz per-channel demod input as float WAV (single source only)
+    /// Publish decoded messages to application-specific Redis pub/sub topics
+    #[arg(long, value_name = "REDIS URL")]
+    redis_url: Option<String>,
+    /// Retry interval (seconds) when publishing to Redis fails; 0 disables retry
     #[arg(long)]
-    #[serde(skip)]
-    dump_demod_wav: Option<String>,
-
+    redis_retry_interval: Option<u64>,
     /// Source URL: file://, rtlsdr://, airspy://, hackrf://, soapy://
-    #[serde(default)]
     source: Option<Source>,
+}
+
+impl Options {
+    fn apply_cli_overrides(&mut self, cli: Cli) {
+        if cli.output.is_some() {
+            self.output = cli.output;
+        }
+        if cli.raw {
+            self.raw = true;
+        }
+        if cli.stats {
+            self.stats = true;
+        }
+        if cli.format.is_some() {
+            self.format = cli.format;
+        }
+        if cli.center_freq.is_some() {
+            self.center_freq = cli.center_freq;
+        }
+        if cli.sample_rate.is_some() {
+            self.sample_rate = cli.sample_rate;
+        }
+        if cli.channel.is_some() {
+            self.channel = cli.channel;
+        }
+        if cli.redis_url.is_some() {
+            self.redis_url = cli.redis_url;
+        }
+        if cli.redis_retry_interval.is_some() {
+            self.redis_retry_interval = cli.redis_retry_interval;
+        }
+        if cli.source.is_some() {
+            self.source = cli.source;
+        }
+        apply_source_overrides(self);
+    }
 }
 
 #[derive(Default)]
@@ -70,9 +151,9 @@ struct DecodeStats {
     parse_fail: u64,
 }
 
-pub(crate) async fn run(cli: Options) -> anyhow::Result<()> {
+pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     let mut options = Options::default();
-    merge_cli(&mut options, cli)?;
+    options.apply_cli_overrides(cli);
 
     anyhow::ensure!(
         options.source.is_some(),
@@ -86,16 +167,22 @@ pub(crate) async fn run(cli: Options) -> anyhow::Result<()> {
         None
     };
 
+    let mut redis = if let Some(url) = options.redis_url.as_deref() {
+        Some(
+            RedisPublisher::connect_with_prefix(
+                url,
+                options.redis_retry_interval.unwrap_or(5),
+                "datalink vhf",
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     let mut total = DecodeStats::default();
     let src = options.source.as_ref().expect("source checked before run");
-    let stats = decode_source(
-        src,
-        options.dump_demod_wav.as_deref(),
-        options.raw,
-        output.as_mut(),
-        None,
-    )
-    .await?;
+    let stats = decode_source(src, options.raw, output.as_mut(), redis.as_mut(), None).await?;
     total.demod_frames += stats.demod_frames;
     total.parsed_ok += stats.parsed_ok;
     total.parse_fail += stats.parse_fail;
@@ -115,41 +202,6 @@ pub(crate) async fn run(cli: Options) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn merge_cli(options: &mut Options, cli: Options) -> anyhow::Result<()> {
-    if cli.verbose {
-        options.verbose = true;
-    }
-    if cli.output.is_some() {
-        options.output = cli.output;
-    }
-    if cli.raw {
-        options.raw = true;
-    }
-    if cli.stats {
-        options.stats = true;
-    }
-    if cli.dump_demod_wav.is_some() {
-        options.dump_demod_wav = cli.dump_demod_wav;
-    }
-    if cli.source.is_some() {
-        options.source = cli.source;
-    }
-    if cli.center_freq.is_some() {
-        options.center_freq = cli.center_freq;
-    }
-    if cli.sample_rate.is_some() {
-        options.sample_rate = cli.sample_rate;
-    }
-    if cli.channel.is_some() {
-        options.channel = cli.channel;
-    }
-    if cli.format.as_deref() != Some("cu8") {
-        options.format = cli.format;
-    }
-    apply_source_overrides(options);
-    Ok(())
-}
-
 fn apply_source_overrides(options: &mut Options) {
     let Some(source) = options.source.as_mut() else {
         return;
@@ -163,7 +215,7 @@ fn apply_source_overrides(options: &mut Options) {
     if options.channel.is_some() {
         source.channels = options.channel.clone();
     }
-    if options.format.as_deref() != Some("cu8") {
+    if options.format.is_some() {
         source.format = options.format.clone();
     }
 }
@@ -192,25 +244,32 @@ pub(crate) async fn decode_file_values(
         format: format.map(str::to_string),
     };
     let mut out = Vec::new();
-    decode_source(&src, None, raw, None, Some(&mut out)).await?;
+    decode_source(&src, raw, None, None, Some(&mut out)).await?;
     Ok(out)
 }
 
 async fn decode_source(
     src: &Source,
-    dump_demod_wav: Option<&str>,
     raw: bool,
     mut output: Option<&mut std::io::BufWriter<std::fs::File>>,
+    mut redis: Option<&mut RedisPublisher>,
     mut collect: Option<&mut Vec<Value>>,
 ) -> anyhow::Result<DecodeStats> {
     if let Address::File { file } = &src.address {
         if file.to_ascii_lowercase().ends_with(".wav") {
-            return decode_wav_source(src, file, raw, output, collect).await;
+            return decode_wav_source(src, file, raw, output, redis, collect).await;
         }
     }
 
-    let center_freq = src.center_freq();
-    let raw_sample_rate = src.sample_rate();
+    let inferred = file_source_path(src).and_then(infer_capture_params);
+    let center_freq = src
+        .center_freq
+        .or_else(|| inferred.map(|params| params.center_freq))
+        .unwrap_or_else(|| src.center_freq());
+    let raw_sample_rate = src
+        .sample_rate
+        .or_else(|| inferred.and_then(|params| params.sample_rate))
+        .unwrap_or_else(|| src.sample_rate());
     let channels = src.channels();
 
     // Resample to nearest valid ACARS-131 demod rate (integer multiple of 12 500 Hz)
@@ -229,19 +288,13 @@ async fn decode_source(
         .map(|&ch_freq| VhfChannel::new(sample_rate as f32, ch_freq as f32 - center_freq as f32))
         .collect();
 
-    let mut demod_wav = if let Some(path) = dump_demod_wav {
-        let spec = hound::WavSpec {
-            channels: channels.len() as u16,
-            sample_rate: 12_500,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        Some(hound::WavWriter::create(path, spec)?)
-    } else {
-        None
-    };
-
-    let mut stream = open_source(src).await?;
+    let mut effective_src = src.clone();
+    effective_src.center_freq = Some(center_freq);
+    effective_src.sample_rate = Some(raw_sample_rate);
+    if effective_src.format.is_none() {
+        effective_src.format = inferred.and_then(|params| params.format.map(str::to_string));
+    }
+    let mut stream = open_source(&effective_src).await?;
     let run_start = SystemTime::now();
     let mut sample_index: u64 = 0;
     let mut stats = DecodeStats::default();
@@ -249,66 +302,87 @@ async fn decode_source(
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
         for raw_sample in &chunk {
-            for sample in adapter.feed(raw_sample.re, raw_sample.im) {
-                sample_index = sample_index.saturating_add(1);
-                let seconds_into_recording = sample_index as f64 / sample_rate as f64;
-                let frame_ts = run_start + Duration::from_secs_f64(seconds_into_recording);
-                let timestamp_unix = frame_ts
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or_default();
-
-                for (idx, d) in demods.iter_mut().enumerate() {
-                    let (frames, maybe_dm) = d.process_sample_with_dm(sample.re, sample.im);
-                    if let (Some(writer), Some(dm)) = (demod_wav.as_mut(), maybe_dm) {
-                        let _ = writer.write_sample(dm);
-                    }
-                    for demod_frame in frames {
-                        stats.demod_frames += 1;
-                        match parse_acars_frame(&demod_frame.bytes, MessageDirection::Unknown) {
-                            Ok(message) => {
-                                stats.parsed_ok += 1;
-                                let mut obj = serde_json::to_value(&message)?;
-                                if let serde_json::Value::Object(ref mut m) = obj {
-                                    let channel_hz = channels[idx] as u64;
-                                    m.insert("timestamp".into(), timestamp_unix.into());
-                                    m.insert(
-                                        "frame".into(),
-                                        bytes_to_hex(&demod_frame.bytes).into(),
-                                    );
-                                    m.insert(
-                                        "metadata".into(),
-                                        serde_json::json!({
-                                            "bearer": "acars_vhf",
-                                            "channel_mhz": channel_hz as f64 / 1_000_000.0,
-                                        }),
-                                    );
-                                }
-                                let obj = acars::decode::compact::compact_acars_value(obj, raw);
-                                if let Some(values) = collect.as_mut() {
-                                    values.push(obj);
-                                } else {
-                                    let line = serde_json::to_string(&obj)?;
-                                    println!("{line}");
-                                    if let Some(writer) = output.as_mut() {
-                                        use std::io::Write;
-                                        writeln!(writer, "{line}")?;
-                                    }
-                                }
-                            }
-                            Err(_) => stats.parse_fail += 1,
-                        }
-                    } // end for demod_frame
-                } // end for (idx, d)
-            } // end for sample in adapter.feed
-        } // end for raw_sample
-    }
-
-    if let Some(writer) = demod_wav.take() {
-        writer.finalize()?;
+            let mut pipeline = IqPipeline::new(
+                &mut adapter,
+                &mut demods,
+                &mut sample_index,
+                sample_rate,
+                run_start,
+            );
+            let frames =
+                collect_iq_frames(&mut pipeline, raw_sample.re, raw_sample.im, |d, re, im| {
+                    Ok(d.process_sample(re, im))
+                })?;
+            for (ctx, demod_frame) in frames {
+                handle_acars_frame(
+                    &channels,
+                    FrameSinks {
+                        raw,
+                        output: output.as_deref_mut(),
+                        redis: redis.as_deref_mut(),
+                        collect: collect.as_deref_mut(),
+                    },
+                    &mut stats,
+                    ctx,
+                    demod_frame,
+                )
+                .await?;
+            }
+        }
     }
 
     Ok(stats)
+}
+
+struct FrameSinks<'a> {
+    raw: bool,
+    output: Option<&'a mut std::io::BufWriter<std::fs::File>>,
+    redis: Option<&'a mut RedisPublisher>,
+    collect: Option<&'a mut Vec<Value>>,
+}
+
+async fn handle_acars_frame(
+    channels: &[u32],
+    mut sinks: FrameSinks<'_>,
+    stats: &mut DecodeStats,
+    ctx: FrameContext,
+    demod_frame: acars::demod::vhf::DemodFrame,
+) -> anyhow::Result<()> {
+    stats.demod_frames += 1;
+    match parse_acars_frame(&demod_frame.bytes, MessageDirection::Unknown) {
+        Ok(message) => {
+            stats.parsed_ok += 1;
+            let mut obj = serde_json::to_value(&message)?;
+            if let serde_json::Value::Object(ref mut m) = obj {
+                let channel_hz = channels[ctx.channel_index] as u64;
+                m.insert("timestamp".into(), ctx.timestamp_unix.into());
+                m.insert("frame".into(), bytes_to_hex(&demod_frame.bytes).into());
+                m.insert(
+                    "metadata".into(),
+                    serde_json::json!({
+                        "bearer": "acars_vhf",
+                        "channel_mhz": channel_hz as f64 / 1_000_000.0,
+                    }),
+                );
+            }
+            let obj = acars::decode::compact::compact_acars_value(obj, sinks.raw);
+            if let Some(values) = sinks.collect.as_mut() {
+                values.push(obj);
+            } else {
+                let line = serde_json::to_string(&obj)?;
+                println!("{line}");
+                if let Some(writer) = sinks.output.as_mut() {
+                    use std::io::Write;
+                    writeln!(writer, "{line}")?;
+                }
+                if let Some(redis) = sinks.redis {
+                    redis.publish(redis_topic_for_record(&obj), &line).await;
+                }
+            }
+        }
+        Err(_) => stats.parse_fail += 1,
+    }
+    Ok(())
 }
 
 async fn decode_wav_source(
@@ -316,6 +390,7 @@ async fn decode_wav_source(
     file: &str,
     raw: bool,
     mut output: Option<&mut std::io::BufWriter<std::fs::File>>,
+    mut redis: Option<&mut RedisPublisher>,
     mut collect: Option<&mut Vec<Value>>,
 ) -> anyhow::Result<DecodeStats> {
     let mut reader = hound::WavReader::open(expanduser(file))?;
@@ -326,10 +401,10 @@ async fn decode_wav_source(
         "VHF WAV input currently supports 16-bit PCM stereo I/Q"
     );
     let raw_sample_rate = spec.sample_rate;
-    let inferred_center = infer_sdruno_center_freq(file);
+    let inferred = infer_capture_params(file);
     let center_freq = src
         .center_freq
-        .or(inferred_center)
+        .or_else(|| inferred.map(|params| params.center_freq))
         .unwrap_or_else(|| src.center_freq());
     let channels = src
         .channels
@@ -349,43 +424,34 @@ async fn decode_wav_source(
     while let (Some(i), Some(q)) = (samples.next(), samples.next()) {
         let i = i? as f32 / 32768.0;
         let q = q? as f32 / 32768.0;
-        for sample in adapter.feed(i, q) {
-            sample_index = sample_index.saturating_add(1);
-            let seconds_into_recording = sample_index as f64 / sample_rate as f64;
-            let frame_ts = run_start + Duration::from_secs_f64(seconds_into_recording);
-            let timestamp_unix = frame_ts
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or_default();
-            for (idx, d) in demods.iter_mut().enumerate() {
-                for demod_frame in d.process_sample(sample.re, sample.im) {
-                    stats.demod_frames += 1;
-                    match parse_acars_frame(&demod_frame.bytes, MessageDirection::Unknown) {
-                        Ok(message) => {
-                            stats.parsed_ok += 1;
-                            let mut obj = serde_json::to_value(&message)?;
-                            if let serde_json::Value::Object(ref mut m) = obj {
-                                let channel_hz = channels[idx] as u64;
-                                m.insert("timestamp".into(), timestamp_unix.into());
-                                m.insert("frame".into(), bytes_to_hex(&demod_frame.bytes).into());
-                                m.insert("metadata".into(), serde_json::json!({"bearer":"acars_vhf", "channel_mhz": channel_hz as f64 / 1_000_000.0}));
-                            }
-                            let obj = acars::decode::compact::compact_acars_value(obj, raw);
-                            if let Some(values) = collect.as_mut() {
-                                values.push(obj);
-                            } else {
-                                let line = serde_json::to_string(&obj)?;
-                                println!("{line}");
-                                if let Some(writer) = output.as_mut() {
-                                    use std::io::Write;
-                                    writeln!(writer, "{line}")?;
-                                }
-                            }
-                        }
-                        Err(_) => stats.parse_fail += 1,
-                    }
-                }
-            }
+        let mut pipeline = IqPipeline::new(
+            &mut adapter,
+            &mut demods,
+            &mut sample_index,
+            sample_rate,
+            run_start,
+        );
+        let frames =
+            collect_iq_frames(
+                &mut pipeline,
+                i,
+                q,
+                |d, re, im| Ok(d.process_sample(re, im)),
+            )?;
+        for (ctx, demod_frame) in frames {
+            handle_acars_frame(
+                &channels,
+                FrameSinks {
+                    raw,
+                    output: output.as_deref_mut(),
+                    redis: redis.as_deref_mut(),
+                    collect: collect.as_deref_mut(),
+                },
+                &mut stats,
+                ctx,
+                demod_frame,
+            )
+            .await?;
         }
     }
     Ok(stats)
@@ -407,19 +473,11 @@ fn auto_channels_for(center_freq: u32, sample_rate: u32) -> Vec<u32> {
     }
 }
 
-fn infer_sdruno_center_freq(path: &str) -> Option<u32> {
-    let name = std::path::Path::new(path).file_name()?.to_string_lossy();
-    let khz_pos = name.find("kHz")?;
-    let prefix = &name[..khz_pos];
-    let digits: String = prefix
-        .chars()
-        .rev()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    digits.parse::<u32>().ok().map(|khz| khz * 1000)
+fn file_source_path(src: &Source) -> Option<&str> {
+    match &src.address {
+        Address::File { file } => Some(file.as_str()),
+        _ => None,
+    }
 }
 
 async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
@@ -511,57 +569,4 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
         #[allow(unreachable_patterns)]
         _ => Err(anyhow::anyhow!("source type is not enabled in this build")),
     }
-}
-
-#[cfg(feature = "hackrf")]
-fn hackrf_gain(src: &Source) -> desperado::Gain {
-    let mut elements = Vec::new();
-    if let Some(value_db) = src.lna_gain {
-        elements.push(desperado::GainElement {
-            name: desperado::GainElementName::Lna,
-            value_db,
-        });
-    }
-    if let Some(value_db) = src.vga_gain {
-        elements.push(desperado::GainElement {
-            name: desperado::GainElementName::Vga,
-            value_db,
-        });
-    }
-    if elements.is_empty() {
-        src.gain(30.0)
-    } else {
-        desperado::Gain::Elements(elements)
-    }
-}
-
-fn parse_airspy_serial(value: &str) -> anyhow::Result<u64> {
-    if let Some(hex) = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-    {
-        return Ok(u64::from_str_radix(hex, 16)?);
-    }
-    value
-        .parse::<u64>()
-        .or_else(|_| u64::from_str_radix(value, 16))
-        .map_err(Into::into)
-}
-
-fn expanduser(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(path)
-}
-
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut s, "{:02X}", b);
-    }
-    s
 }

@@ -2,6 +2,7 @@ pub mod acars;
 pub mod avlc;
 pub mod compact;
 pub mod helpers;
+pub mod hfdl;
 pub mod payload;
 pub mod x25;
 pub mod xid;

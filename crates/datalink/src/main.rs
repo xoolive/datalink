@@ -1,6 +1,9 @@
 mod airframes;
 mod hfdl;
+mod iq_pipeline;
 mod merged;
+mod source;
+mod util;
 mod vdl2;
 mod vhf;
 
@@ -30,10 +33,10 @@ struct Args {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// VDL Mode 2 frontend for I/Q and SDR inputs.
-    Vdl2(vdl2::Options),
+    Vdl2(vdl2::Cli),
     /// Classic VHF ACARS frontend.
     #[command(alias = "acars-vhf")]
-    Vhf(vhf::Options),
+    Vhf(vhf::Cli),
     /// Airframes.io websocket feed.
     #[command(name = "airframes.io", alias = "airframes")]
     AirframesIo(airframes::Options),
@@ -85,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Vdl2(options)) => vdl2::run(options).await,
         Some(Command::Vhf(options)) => vhf::run(options).await,
         Some(Command::AirframesIo(options)) => airframes::run(options).await,
-        Some(Command::Hfdl(options)) => hfdl::run(options),
+        Some(Command::Hfdl(options)) => hfdl::run(options).await,
         Some(Command::Decode { command }) => run_decode(command),
         None => merged::run(args.config).await,
     }
@@ -114,7 +117,7 @@ fn run_decode(command: DecodeCommand) -> anyhow::Result<()> {
             let frame = parse_avlc_frame(&bytes)?;
             let mut obj = serde_json::to_value(&frame)?;
             if let serde_json::Value::Object(ref mut m) = obj {
-                m.insert("frame".into(), bytes_to_hex(&bytes).into());
+                m.insert("frame".into(), crate::util::bytes_to_hex(&bytes).into());
             }
             let out = acars::decode::compact::compact_avlc_value(obj, raw);
             println!("{}", serde_json::to_string_pretty(&out)?);
@@ -139,13 +142,4 @@ fn run_decode(command: DecodeCommand) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut s, "{b:02X}");
-    }
-    s
 }

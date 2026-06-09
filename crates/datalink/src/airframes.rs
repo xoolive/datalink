@@ -9,6 +9,7 @@ use crate::merged::{
     Bearer, DecodedEvent, OutputConfig, OutputSink, ReceiverMetadata, SourceClass, SourceConfig,
     SourceMetadata,
 };
+use crate::util::unix_timestamp_value;
 
 const DEFAULT_AIRFRAMES_WS: &str = "wss://ws.airframes.io/socket.io/?EIO=4&transport=websocket";
 
@@ -279,7 +280,8 @@ fn decode_airframes_message(payload: &Value, include_raw: bool) -> Option<Value>
     let timestamp = row
         .get("timestamp")
         .or_else(|| row.get("created_at"))
-        .cloned()
+        .and_then(unix_timestamp_value)
+        .map(Value::from)
         .unwrap_or(Value::Null);
 
     let Some(text) = text else {
@@ -508,5 +510,22 @@ mod tests {
         let event = normalize_payload(meta, "message", payload, true).unwrap();
         assert_eq!(event.bearer, Bearer::Vdl2);
         assert!(event.raw.is_some());
+    }
+
+    #[test]
+    fn normalize_payload_converts_timestamp_string() {
+        let meta = SourceMetadata {
+            id: "airframes".into(),
+            name: "Airframes".into(),
+            class: SourceClass::Events,
+            format: Some("airframes.io".into()),
+        };
+        let payload = serde_json::json!({"label":"SA", "text":"hello", "from_hex":"A1B2C3", "source_type":"vdl2", "timestamp": "2026-05-22T08:37:19.050Z"});
+        let event = normalize_payload(meta, "message", payload, false).unwrap();
+        assert_eq!(event.timestamp, Some(1779439039.05));
+        assert_eq!(
+            event.message.get("timestamp").and_then(Value::as_f64),
+            Some(1779439039.05)
+        );
     }
 }

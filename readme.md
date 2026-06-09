@@ -1,85 +1,162 @@
 # datalink
 
-`datalink` is a Rust-first aviation datalink workspace.
+`datalink` is a Rust aviation datalink workspace with a reusable decode library and a
+single CLI for demodulating and decoding aviation datalink traffic.
 
-Component layout:
+- `crates/acars` — core library for ACARS, VDL2 AVLC, ADS-C, CPDLC-related payloads,
+  HFDL PDU parsing, and optional demodulators.
+- `crates/datalink` — CLI application for bearer frontends, standalone frame decoding, Airframes.io input, Redis/JSONL output, and merged receiver configurations.
 
-- `acars`: core decoding library (`crates/acars`)
-- `datalink`: payload decoder app for demodulated ACARS/ARINC 622 messages
-- `vdl136`: VDL2 frontend (I/Q and SDR inputs)
-- `acars131`: classic VHF ACARS frontend (initial implementation)
+## Current capabilities
 
-Design direction: demodulation logic is kept in-project and shared through Rust modules in
-the `acars` crate as frontends mature.
+- Decode standalone hex frames/payloads:
+  - ACARS frames
+  - AVLC frames, including FCS status
+  - ADS-C application text payloads
+- Demodulate and decode VDL2 from WAV I/Q recordings, raw I/Q recordings, or SDR sources.
+- Demodulate and decode classic VHF ACARS from WAV I/Q recordings, raw I/Q recordings, or SDR sources.
+- Demodulate and decode HFDL from WAV I/Q recordings, raw I/Q recordings, or SDR sources.
+- Consume Airframes.io websocket events.
+- Run merged receiver configurations from TOML.
+- Emit compact JSON/JSONL, optionally with raw nested decode data.
+- Optionally publish decoded output to Redis.
 
-Current status: VDL2 demod core is now shared from `crates/acars/src/demod/vdl2.rs` and used by `vdl136`.
-Reusable DSP primitives are sourced from `../desperado` where appropriate (currently NCO and
-Chebyshev filter helpers).
+## CLI overview
 
-## Positioning
+```text
+datalink [--config datalink.toml] [COMMAND]
+```
 
-This project sits between two established reference points:
+Commands:
 
-- **`dumpvdl2` + `libacars` parity target** for VDL2 bearer behavior and app decode conventions.
-- **Rust-native implementation goal** for maintainability, portability, and tighter integration with the `jet1090` style ecosystem.
+```text
+vdl2          VDL Mode 2 frontend for I/Q and SDR inputs
+vhf           Classic VHF ACARS frontend
+airframes.io  Airframes.io websocket feed
+hfdl          HF Data Link frontend
+decode        Decode standalone payloads or frames
+```
 
-In practice:
+When no subcommand is provided, `datalink` runs merged receiver mode and expects
+`--config <FILE>`.
 
-- `dumpvdl2` is the primary behavior benchmark for AVLC/X.25 framing choices.
-- `vdlm2dec` is an additional VDL2 operational reference from the same ecosystem.
-- `libacars` is the app-layer semantics reference and fallback strategy model.
-- `acarsdec`/`JAERO` are operational references (filters, routing, output shape).
-- `dumphfdl` is the primary HFDL reference (HF bearer context and long-haul operations).
+### Standalone decode examples
 
-`acars` is not a direct port of libacars. It is a Rust-native implementation with
-libacars-compatible behavior where implemented, and partial overlap at this stage.
+```sh
+# Decode an ACARS frame from hex
+datalink decode acars --direction downlink '<hex>'
 
-## Current Scope
+# Decode an AVLC frame including FCS bytes
+datalink decode avlc '<hex>'
 
-Current runtime pipeline focus:
+# Decode an ADS-C app payload
+datalink decode adsc '/ATSU.ADS....'
+```
 
-- demodulate VDL Mode 2 over VHF from I/Q recordings (`vdl136 file`),
-- decode AVLC and payload layers from recovered VDL2 frames,
-- parse ACARS text and ARINC 622 app envelopes (including ADS-C and partial CPDLC paths).
+Add `--raw` to include the full nested decoder output under `raw_decode`.
 
-Out of scope today:
+### VDL2 frontend
 
-- full parity-validated classic POA VHF ACARS demodulation (initial `acars131` implementation exists, validation pending).
+```sh
+datalink vdl2 --format cu8 --sample-rate 1050000 --center-freq 136850000 \
+  --channel 136875000 136975000 file://capture.cu8
+```
 
-- ACARS frame decoding (header/text/CRC)
-- H1 sublabel/MFI extraction compatible with libacars behavior
-- AVLC decode with payload dispatch (`Acars`, `X25`, `Xid`, `Unknown`)
-- ADS-C app-layer decoding (downlink tags)
-- Partial CPDLC extraction from COTP user data (currently heuristic/free-text oriented)
+Useful options:
 
-## What This Project Is (and Is Not)
+- `--output <file>` — write decoded JSONL in addition to stdout.
+- `--stats` — print demod/decode counters.
+- `--raw` — include raw nested decode.
+- `--redis-url <url>` — publish decoded records to application-specific Redis topics.
 
-- **Is:** a VDL2-first decoder stack with parity-driven evolution against known tools.
-- **Is:** a codebase aiming to keep JSON outputs stable while deepening decode coverage.
-- **Is not:** a one-to-one libacars port today.
-- **Is not yet:** full app-layer parity for MIAM, OHMA, Media Advisory, and structured FANS-1/A CPDLC.
-- **Is not yet:** complete X.25/COTP reassembly parity in all fragmented cases.
+### Classic VHF ACARS frontend
 
-## Near-Term Priorities
+```sh
+datalink vhf --format cu8 --sample-rate 1050000 --center-freq 131700000 \
+  --channel 131525000 131725000 file://capture.cu8
+```
 
-1. Wire ARINC-622 app routing directly into normal `file`/`avlc` decode flow.
-2. Add X.25 reassembly behavior matching `dumpvdl2` expectations.
-3. Preserve non-XID U-frame and S-frame raw payload bytes instead of dropping them.
-4. Expand X.25 inner protocol coverage (ESIS, uncompressed CLNP, SNDCF error report).
-5. Complete structured CPDLC decode and add MIAM/OHMA/Media Advisory coverage.
+Useful options:
 
-## Frontend Roadmap
+- `--output <file>` — write decoded JSONL in addition to stdout.
+- `--stats` — print demod/decode counters.
+- `--raw` — include raw nested decode.
+- `--redis-url <url>` — publish decoded messages to application-specific Redis topics.
 
-- Current frontend: VDL Mode 2 over VHF (`vdl136`).
-- Current early frontend: classic POA VHF ACARS demodulation (`acars131`, needs dataset validation).
+### HFDL frontend
 
-All frontends are intended to feed the same shared decode core (`acars`) and emit a
-consistent output schema with bearer metadata.
+```sh
+datalink hfdl --format cf32 --center-freq 10000000 --sample-rate 8000000 \
+  --max-seconds 20 file://capture.cf32
+```
 
-For implementation details and comparison notes, see `plan.md`.
+Useful options:
 
-For high-level documentation, start with `docs/00-overview/README.md`.
+- `--stats` — print demod/decode counters.
+- `--redis-url <url>` — publish decoded PDUs to application-specific Redis topics.
 
-The docs navigation index is at `docs/index.md`.
+For SDRUno-style 16-bit stereo WAV I/Q files, `.wav` input is auto-detected when
+`--format` is omitted:
 
-For protocol/layer orientation, see `docs/00-overview/architecture.md`.
+```sh
+datalink hfdl --max-seconds 60 file://HFDL_10081kHz.wav
+```
+
+Redis publishing uses application-specific topics across all bearers, for example
+`datalink-sq`, `datalink-acars`, `datalink-cpdlc`, and `datalink-other`.
+
+### Source URLs
+
+VDL2, VHF, and HFDL share the same source direction: WAV I/Q recordings, raw I/Q recordings,
+and live SDR sources.
+
+VDL2 and VHF currently accept:
+
+- `file://...` or a bare file path
+- `-` for stdin
+- `rtlsdr://...` when built with `rtlsdr`
+- `airspy://...` when built with `airspy`
+- `hackrf://...` when built with `hackrf`
+- `soapy://...` when built with `soapy`
+
+Common source query parameters include `format`, `center_freq`/`freq`,
+`sample_rate`/`rate`, `channel`/`channels`, `gain`, `bias_tee`, and device-specific gain
+settings.
+
+For file captures, `datalink` can infer center frequency, sample rate, and `cf32` format
+from Gqrx-style filenames such as `gqrx_20260518_114025_136500000_1800000_fc.raw`. It can
+also infer center frequency from SDRUno-style names containing a trailing `kHz` frequency.
+
+## Library notes
+
+The `acars` crate is the reusable decode library. Its demodulators are behind the optional
+`demod` feature so pure parser users do not need to pull in SDR/DSP dependencies.
+
+- Default `acars` build: decode/parsing only.
+- `acars` with `features = ["demod"]`: adds VDL2, VHF ACARS, HFDL demod support.
+
+The `datalink` CLI enables `acars/demod` because it includes demodulating frontends.
+
+## Cargo features
+
+`datalink` defaults to SDR and websocket support:
+
+```text
+default = ["rtlsdr", "airspy", "hackrf", "soapy", "websocket"]
+```
+
+Individual SDR features can be disabled or selected with normal Cargo feature flags.
+
+## Project direction
+
+The project is Rust-native rather than a direct port of one existing decoder. The goal is a
+shared Rust library plus a consistent JSON-facing CLI across VDL2, VHF ACARS, HFDL, and
+external event sources.
+
+Reference projects:
+
+- https://github.com/szpajder/libacars
+- https://github.com/TLeconte/acarsdec
+- https://github.com/szpajder/dumpvdl2
+- https://github.com/szpajder/dumphfdl
+- https://github.com/jontio/JAERO

@@ -2,21 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use url::Url;
 
-pub const DEFAULT_CENTER_FREQ: u32 = 131_700_000;
 pub const DEFAULT_SAMPLE_RATE: u32 = 1_050_000;
-pub const DEFAULT_CHANNELS: &[u32] = &[131_525_000, 131_725_000, 131_825_000];
-pub const KNOWN_ACARS_CHANNELS: &[u32] = &[
-    129_125_000,
-    129_525_000,
-    130_025_000,
-    130_425_000,
-    131_125_000,
-    131_525_000,
-    131_725_000,
-    131_825_000,
-    136_900_000,
-];
-pub const DEFAULT_CHUNK_SIZE: usize = 65_536;
 
 use desperado::{Gain, IqFormat};
 
@@ -73,35 +59,44 @@ pub struct Source {
 }
 
 impl Source {
-    pub fn center_freq(&self) -> u32 {
-        self.center_freq.unwrap_or(DEFAULT_CENTER_FREQ)
+    pub fn center_freq_or(&self, default: u32) -> u32 {
+        self.center_freq.unwrap_or(default)
     }
 
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE)
     }
 
-    pub fn channels(&self) -> Vec<u32> {
+    pub fn channels_with<F>(&self, auto: F) -> Vec<u32>
+    where
+        F: FnOnce(&Self) -> Vec<u32>,
+    {
         self.channels
             .clone()
             .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| self.auto_channels())
+            .unwrap_or_else(|| auto(self))
     }
 
-    fn auto_channels(&self) -> Vec<u32> {
-        let center = self.center_freq();
-        let half_bw = (self.sample_rate() as f64 * 0.45) as u32;
-        let lo = center.saturating_sub(half_bw);
-        let hi = center.saturating_add(half_bw);
-        let candidates: Vec<u32> = KNOWN_ACARS_CHANNELS
-            .iter()
-            .copied()
-            .filter(|&ch| ch >= lo && ch <= hi)
-            .collect();
-        if candidates.is_empty() {
-            DEFAULT_CHANNELS.to_vec()
-        } else {
-            candidates
+    pub fn label(&self) -> String {
+        if let Some(name) = &self.name {
+            return name.clone();
+        }
+        match &self.address {
+            Address::File { file } => format!("file:{file}"),
+            #[cfg(feature = "rtlsdr")]
+            Address::Rtlsdr { device, serial } => serial
+                .as_ref()
+                .map(|s| format!("rtlsdr:{s}"))
+                .unwrap_or_else(|| format!("rtlsdr:{}", device.unwrap_or(0))),
+            #[cfg(feature = "airspy")]
+            Address::Airspy { device, serial } => serial
+                .as_ref()
+                .map(|s| format!("airspy:{s}"))
+                .unwrap_or_else(|| format!("airspy:{}", device.unwrap_or(0))),
+            #[cfg(feature = "hackrf")]
+            Address::Hackrf { device } => format!("hackrf:{}", device.unwrap_or(0)),
+            #[cfg(feature = "soapy")]
+            Address::Soapy { soapy } => format!("soapy:{soapy}"),
         }
     }
 
@@ -285,9 +280,9 @@ mod tests {
     #[test]
     fn parse_file_url() {
         let src: Source = "file:///tmp/acars.cu8?format=cu8&sample_rate=1050000&center_freq=131700000&channel=131725000".parse().unwrap();
-        assert_eq!(src.center_freq(), 131_700_000);
+        assert_eq!(src.center_freq_or(0), 131_700_000);
         assert_eq!(src.sample_rate(), 1_050_000);
-        assert_eq!(src.channels(), vec![131_725_000]);
+        assert_eq!(src.channels_with(|_| vec![]), vec![131_725_000]);
     }
 
     #[cfg(feature = "rtlsdr")]
@@ -300,7 +295,7 @@ mod tests {
             Address::Rtlsdr { device, .. } => assert_eq!(device, Some(0)),
             _ => panic!("expected rtlsdr"),
         }
-        assert_eq!(src.channels(), vec![131_725_000]);
+        assert_eq!(src.channels_with(|_| vec![]), vec![131_725_000]);
         assert_eq!(src.bias_tee, Some(true));
     }
 
@@ -314,7 +309,10 @@ mod tests {
             Address::Soapy { soapy } => assert_eq!(soapy, "driver=rtlsdr"),
             _ => panic!("expected soapy"),
         }
-        assert_eq!(src.channels(), vec![131_525_000, 131_725_000]);
+        assert_eq!(
+            src.channels_with(|_| vec![]),
+            vec![131_525_000, 131_725_000]
+        );
     }
 
     #[cfg(feature = "airspy")]
@@ -328,7 +326,7 @@ mod tests {
             _ => panic!("expected airspy"),
         }
         assert_eq!(src.sample_rate(), 6_000_000);
-        assert_eq!(src.channels(), vec![131_725_000]);
+        assert_eq!(src.channels_with(|_| vec![]), vec![131_725_000]);
     }
 
     #[cfg(feature = "hackrf")]
@@ -342,8 +340,8 @@ mod tests {
             Address::Hackrf { device } => assert_eq!(device, Some(0)),
             _ => panic!("expected hackrf"),
         }
-        assert_eq!(src.center_freq(), 131_700_000);
-        assert_eq!(src.channels(), vec![131_525_000]);
+        assert_eq!(src.center_freq_or(0), 131_700_000);
+        assert_eq!(src.channels_with(|_| vec![]), vec![131_525_000]);
         assert_eq!(src.amp_enable, Some(true));
         assert_eq!(src.lna_gain, Some(32.0));
         assert_eq!(src.vga_gain, Some(20.0));
@@ -359,6 +357,14 @@ sample_rate = 1050000
 channels = [131525000, 131725000]
 "#;
         let src: Source = toml::from_str(text).unwrap();
-        assert_eq!(src.channels(), vec![131_525_000, 131_725_000]);
+        assert_eq!(
+            src.channels_with(|_| vec![]),
+            vec![131_525_000, 131_725_000]
+        );
+    }
+
+    #[test]
+    fn rejects_airframes_source() {
+        assert!("airframes://live".parse::<Source>().is_err());
     }
 }
