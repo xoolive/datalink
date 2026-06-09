@@ -1,7 +1,7 @@
 [package]
 name = "acars"
 description = "Rust library to decode ACARS, VDL2, ADS-C, and CPDLC payloads"
-repository = "https://github.com/xoolive/vdl136"
+repository = "https://github.com/xoolive/datalink"
 keywords = ["acars", "vdl", "aviation", "decoder"]
 authors.workspace = true
 version.workspace = true
