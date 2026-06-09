@@ -4,8 +4,6 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-#[cfg(test)]
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -616,17 +614,71 @@ mod tests {
     }
 
     #[test]
-    fn parses_example_configs() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for path in [
-            "examples/merged/acars-sdruno-vhf.toml",
-            "examples/merged/gqrx-vdl2-vhf.toml",
-            "examples/merged/hfdl-sdruno.toml",
-            "examples/merged/vdl2-rtlsdr.toml",
+    fn parses_representative_configs() {
+        for text in [
+            r#"
+            [output]
+            jsonl = "-"
+            raw = true
+
+            [[sources]]
+            id = "acars-sdruno-129535"
+            file = "SDRuno_20200908_152020Z_129535kHz.wav"
+
+            [[sources.receivers]]
+            bearer = "vhf"
+            "#,
+            r#"
+            [output]
+            jsonl = "-"
+            raw = true
+
+            [[sources]]
+            id = "gqrx-vdl2-136500"
+            file = "gqrx_20260518_114025_136500000_1800000_fc.raw"
+            format = "cf32"
+            center_freq = 136500000
+            sample_rate = 1800000
+
+            [[sources.receivers]]
+            bearer = "vdl2"
+            channels = [136875000]
+            "#,
+            r#"
+            [output]
+            jsonl = "-"
+            raw = true
+
+            [[sources]]
+            id = "hfdl-sdruno-11404"
+            file = "SDRuno_20200904_143937Z_11404kHz.wav"
+            start_second = 0.0
+            max_seconds = 20.0
+
+            [[sources.receivers]]
+            bearer = "hfdl"
+            channels = [11387000]
+            "#,
+            r#"
+            [output]
+            jsonl = "-"
+            raw = true
+
+            [[sources]]
+            id = "hfdl-hackrf-10m"
+            hackrf = { device = 0 }
+            center_freq = 10000000
+            sample_rate = 8000000
+            start_second = 0.0
+            max_seconds = 20.0
+
+            [[sources.receivers]]
+            bearer = "hfdl"
+            channels = [10081000]
+            "#,
         ] {
-            let path = root.join(path);
-            Config::load(path.to_str().unwrap())
-                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+            let cfg: Config = toml::from_str(text).unwrap();
+            cfg.validate().unwrap();
         }
     }
 

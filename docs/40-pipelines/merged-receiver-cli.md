@@ -167,7 +167,7 @@ The HackRF is opened once. Its I/Q stream is fanned out to two receiver pipeline
 [[sources]]
 id = "hfdl-sdruno"
 name = "SDRuno HFDL sample"
-file = "~/Documents/data/samples/decode_datalink/hfdl/SDRuno_20200904_143937Z_11404kHz.wav"
+file = "./captures/hfdl/SDRuno_20200904_143937Z_11404kHz.wav"
 
   [[sources.receivers]]
   bearer = "hfdl"
@@ -422,8 +422,8 @@ The existing protocol-specific commands can remain thin wrappers that construct 
 
 write a proper configuration for all
 
-~/Downloads/acars/SDRuno_20200908_152020Z_129535kHz.wav
-~/Downloads/hfdl/SDRuno_20200904_143937Z_11404kHz.wav
-~/Documents/data/samples/decode_datalink/rtlsdr_136850000_1050000_dumpvdl_6min.rtl
-~/Documents/data/samples/decode_datalink/gqrx_20260518_114025_136500000_1800000_fc.raw
-~/Documents/data/samples/decode_datalink/gqrx_20260518_114201_131500000_1800000_fc.raw
+./captures/acars/SDRuno_20200908_152020Z_129535kHz.wav
+./captures/hfdl/SDRuno_20200904_143937Z_11404kHz.wav
+./captures/vdl2/rtlsdr_136850000_1050000_dumpvdl_6min.rtl
+./captures/vdl2/gqrx_20260518_114025_136500000_1800000_fc.raw
+./captures/vhf/gqrx_20260518_114201_131500000_1800000_fc.raw

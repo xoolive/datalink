@@ -221,10 +221,7 @@ mod tests {
 
     #[test]
     fn infers_gqrx_capture_params() {
-        let params = infer_capture_params(
-            "~/Documents/data/samples/decode_datalink/gqrx_20260518_114025_136500000_1800000_fc.raw",
-        )
-        .unwrap();
+        let params = infer_capture_params("gqrx_20260518_114025_136500000_1800000_fc.raw").unwrap();
         assert_eq!(params.center_freq, 136_500_000);
         assert_eq!(params.sample_rate, Some(1_800_000));
         assert_eq!(params.format, Some("cf32"));
