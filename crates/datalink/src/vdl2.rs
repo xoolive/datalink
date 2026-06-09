@@ -300,17 +300,11 @@ async fn decode_source(
         }
     }
 
-    let inferred = file_source_path(src).and_then(infer_capture_params);
-    let center_freq = src
-        .center_freq
-        .or_else(|| inferred.map(|params| params.center_freq))
-        .unwrap_or_else(|| src.center_freq());
-    let raw_sample_rate = src
-        .sample_rate
-        .or_else(|| inferred.and_then(|params| params.sample_rate))
-        .unwrap_or_else(|| src.sample_rate());
-    let channels = src.channels();
-    let source_label = src.label();
+    let effective_src = effective_file_source(src, None);
+    let center_freq = effective_src.center_freq();
+    let raw_sample_rate = effective_src.sample_rate();
+    let channels = effective_src.channels();
+    let source_label = effective_src.label();
     let sync_threshold = options.sync_threshold.unwrap_or(3.2);
 
     // Compute the nearest valid VDL2 demod rate (integer multiple of SYMBOL_RATE * SPS = 105 000)
@@ -339,12 +333,6 @@ async fn decode_source(
         })
         .collect();
 
-    let mut effective_src = src.clone();
-    effective_src.center_freq = Some(center_freq);
-    effective_src.sample_rate = Some(raw_sample_rate);
-    if effective_src.format.is_none() {
-        effective_src.format = inferred.and_then(|params| params.format.map(str::to_string));
-    }
     let mut stream = open_source(&effective_src).await?;
     let run_start = SystemTime::now();
     let mut sample_index: u64 = 0;
@@ -468,12 +456,9 @@ async fn decode_wav_source(
         "VDL2 WAV input currently supports 16-bit PCM stereo I/Q"
     );
     let raw_sample_rate = spec.sample_rate;
-    let inferred = infer_capture_params(file);
-    let center_freq = src
-        .center_freq
-        .or_else(|| inferred.map(|params| params.center_freq))
-        .unwrap_or_else(|| src.center_freq());
-    let channels = src.channels();
+    let effective_src = effective_file_source(src, Some(raw_sample_rate));
+    let center_freq = effective_src.center_freq();
+    let channels = effective_src.channels();
     let sync_threshold = options.sync_threshold.unwrap_or(3.2);
     let vdl2_decimated_rate = SYMBOL_RATE * 10;
     let (sample_rate, resample_rs) = maybe_resample(raw_sample_rate, vdl2_decimated_rate);
@@ -528,6 +513,21 @@ async fn decode_wav_source(
         }
     }
     Ok(stats)
+}
+
+fn effective_file_source(src: &Source, sample_rate_override: Option<u32>) -> Source {
+    let inferred = file_source_path(src).and_then(infer_capture_params);
+    let mut effective_src = src.clone();
+    if effective_src.center_freq.is_none() {
+        effective_src.center_freq = inferred.map(|params| params.center_freq);
+    }
+    effective_src.sample_rate = sample_rate_override
+        .or(effective_src.sample_rate)
+        .or_else(|| inferred.and_then(|params| params.sample_rate));
+    if effective_src.format.is_none() {
+        effective_src.format = inferred.and_then(|params| params.format.map(str::to_string));
+    }
+    effective_src
 }
 
 fn file_source_path(src: &Source) -> Option<&str> {
@@ -644,4 +644,58 @@ fn in_window(seconds: f64, start: Option<f64>, end: Option<f64>) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_source(file: &str) -> Source {
+        Source {
+            address: Address::File {
+                file: file.to_string(),
+            },
+            name: None,
+            center_freq: None,
+            sample_rate: None,
+            channels: None,
+            gain: None,
+            bias_tee: None,
+            amp_enable: None,
+            lna_gain: None,
+            vga_gain: None,
+            format: None,
+        }
+    }
+
+    #[test]
+    fn file_auto_channels_use_gqrx_inferred_sample_rate() {
+        let src = file_source("gqrx_20260518_114025_136500000_1800000_fc.raw");
+        let effective = effective_file_source(&src, None);
+        assert_eq!(effective.center_freq(), 136_500_000);
+        assert_eq!(effective.sample_rate(), 1_800_000);
+        assert_eq!(effective.format.as_deref(), Some("cf32"));
+        assert_eq!(effective.channels().first(), Some(&136_600_000));
+        assert_eq!(effective.channels().last(), Some(&137_000_000));
+    }
+
+    #[test]
+    fn wav_auto_channels_use_inferred_center_and_wav_sample_rate() {
+        let src = file_source("SDRuno_20200908_152020Z_136650kHz.wav");
+        let effective = effective_file_source(&src, Some(250_000));
+        assert_eq!(effective.center_freq(), 136_650_000);
+        assert_eq!(effective.sample_rate(), 250_000);
+        assert_eq!(
+            effective.channels(),
+            vec![
+                136_600_000,
+                136_625_000,
+                136_650_000,
+                136_675_000,
+                136_700_000,
+                136_725_000,
+                136_750_000,
+            ]
+        );
+    }
 }

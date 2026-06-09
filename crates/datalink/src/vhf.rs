@@ -261,16 +261,10 @@ async fn decode_source(
         }
     }
 
-    let inferred = file_source_path(src).and_then(infer_capture_params);
-    let center_freq = src
-        .center_freq
-        .or_else(|| inferred.map(|params| params.center_freq))
-        .unwrap_or_else(|| src.center_freq());
-    let raw_sample_rate = src
-        .sample_rate
-        .or_else(|| inferred.and_then(|params| params.sample_rate))
-        .unwrap_or_else(|| src.sample_rate());
-    let channels = src.channels();
+    let effective_src = effective_file_source(src, None);
+    let center_freq = effective_src.center_freq();
+    let raw_sample_rate = effective_src.sample_rate();
+    let channels = effective_src.channels();
 
     // Resample to nearest valid ACARS-131 demod rate (integer multiple of 12 500 Hz)
     let (sample_rate, resample_rs) = maybe_resample(raw_sample_rate, 12_500);
@@ -288,12 +282,6 @@ async fn decode_source(
         .map(|&ch_freq| VhfChannel::new(sample_rate as f32, ch_freq as f32 - center_freq as f32))
         .collect();
 
-    let mut effective_src = src.clone();
-    effective_src.center_freq = Some(center_freq);
-    effective_src.sample_rate = Some(raw_sample_rate);
-    if effective_src.format.is_none() {
-        effective_src.format = inferred.and_then(|params| params.format.map(str::to_string));
-    }
     let mut stream = open_source(&effective_src).await?;
     let run_start = SystemTime::now();
     let mut sample_index: u64 = 0;
@@ -401,16 +389,9 @@ async fn decode_wav_source(
         "VHF WAV input currently supports 16-bit PCM stereo I/Q"
     );
     let raw_sample_rate = spec.sample_rate;
-    let inferred = infer_capture_params(file);
-    let center_freq = src
-        .center_freq
-        .or_else(|| inferred.map(|params| params.center_freq))
-        .unwrap_or_else(|| src.center_freq());
-    let channels = src
-        .channels
-        .clone()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| auto_channels_for(center_freq, raw_sample_rate));
+    let effective_src = effective_file_source(src, Some(raw_sample_rate));
+    let center_freq = effective_src.center_freq();
+    let channels = effective_src.channels();
     let (sample_rate, resample_rs) = maybe_resample(raw_sample_rate, 12_500);
     let mut adapter = ResampleAdapter::new(resample_rs);
     let mut demods: Vec<VhfChannel> = channels
@@ -471,6 +452,21 @@ fn auto_channels_for(center_freq: u32, sample_rate: u32) -> Vec<u32> {
     } else {
         channels
     }
+}
+
+fn effective_file_source(src: &Source, sample_rate_override: Option<u32>) -> Source {
+    let inferred = file_source_path(src).and_then(infer_capture_params);
+    let mut effective_src = src.clone();
+    if effective_src.center_freq.is_none() {
+        effective_src.center_freq = inferred.map(|params| params.center_freq);
+    }
+    effective_src.sample_rate = sample_rate_override
+        .or(effective_src.sample_rate)
+        .or_else(|| inferred.and_then(|params| params.sample_rate));
+    if effective_src.format.is_none() {
+        effective_src.format = inferred.and_then(|params| params.format.map(str::to_string));
+    }
+    effective_src
 }
 
 fn file_source_path(src: &Source) -> Option<&str> {
@@ -568,5 +564,52 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
         }
         #[allow(unreachable_patterns)]
         _ => Err(anyhow::anyhow!("source type is not enabled in this build")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_source(file: &str) -> Source {
+        Source {
+            address: Address::File {
+                file: file.to_string(),
+            },
+            name: None,
+            center_freq: None,
+            sample_rate: None,
+            channels: None,
+            gain: None,
+            bias_tee: None,
+            amp_enable: None,
+            lna_gain: None,
+            vga_gain: None,
+            format: None,
+        }
+    }
+
+    #[test]
+    fn file_auto_channels_use_gqrx_inferred_sample_rate() {
+        let src = file_source("gqrx_20260518_114201_131500000_1800000_fc.raw");
+        let effective = effective_file_source(&src, None);
+        assert_eq!(effective.center_freq(), 131_500_000);
+        assert_eq!(effective.sample_rate(), 1_800_000);
+        assert_eq!(effective.format.as_deref(), Some("cf32"));
+        assert!(effective.channels().contains(&131_525_000));
+        assert!(effective.channels().contains(&131_725_000));
+        assert!(effective.channels().contains(&131_825_000));
+    }
+
+    #[test]
+    fn wav_auto_channels_use_inferred_center_and_wav_sample_rate() {
+        let src = file_source("SDRuno_20200908_152020Z_131725kHz.wav");
+        let effective = effective_file_source(&src, Some(500_000));
+        assert_eq!(effective.center_freq(), 131_725_000);
+        assert_eq!(effective.sample_rate(), 500_000);
+        assert_eq!(
+            effective.channels(),
+            vec![131_525_000, 131_725_000, 131_825_000]
+        );
     }
 }

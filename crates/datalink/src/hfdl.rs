@@ -638,4 +638,14 @@ mod tests {
         assert!(channels.contains(&11387.0));
         assert!(!channels.contains(&6529.0));
     }
+
+    #[test]
+    fn gqrx_inferred_params_cover_hfdl_channels() {
+        let params = infer_capture_params("gqrx_20260518_114025_10000000_8000000_fc.raw").unwrap();
+        let channels = channels_khz_for(None, params.sample_rate.unwrap(), params.center_freq);
+        assert_eq!(params.format, Some("cf32"));
+        assert!(channels.contains(&10081.0));
+        assert!(channels.contains(&11387.0));
+        assert!(!channels.contains(&6529.0));
+    }
 }
