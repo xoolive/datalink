@@ -171,7 +171,7 @@ async fn run_source(
         serde_json::to_string(
             &serde_json::json!({ "token": source.token.as_deref().unwrap_or("") })
         )?
-    )))
+    ).into()))
     .await?;
 
     while let Some(message) = ws.next().await {
@@ -181,7 +181,7 @@ async fn run_source(
                 for packet in text.split('\u{1e}') {
                     if packet == "2" {
                         ws.send(tokio_tungstenite::tungstenite::Message::Text(
-                            "3".to_string(),
+                            "3".to_string().into(),
                         ))
                         .await?;
                         continue;
