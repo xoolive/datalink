@@ -12,7 +12,7 @@ authors = ["Xavier Olive <git@xoolive.org>"]
 [workspace.dependencies]
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-clap = { version = "4.5", features = ["derive", "env"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 deku = "0.20.2"
 desperado = { version = "0.4.1", features = ["resampler"] }
 hex = "0.4"
