@@ -110,7 +110,6 @@ pub(crate) async fn run(options: Options) -> anyhow::Result<()> {
         jsonl: options.output,
         raw: options.raw,
         redis_url: options.redis_url,
-        redis_topic: Some("datalink".to_string()),
         redis_retry_interval: Some(options.redis_retry_interval),
     };
     let mut output = OutputSink::new(&output_config).await?;

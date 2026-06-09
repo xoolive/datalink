@@ -1,4 +1,4 @@
-use crate::util::{expanduser, RedisPublisher};
+use crate::util::{expanduser, redis_topic_for_record, RedisPublisher};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -28,9 +28,7 @@ pub(crate) struct OutputConfig {
     /// Redis URL for pub/sub output.
     #[serde(default)]
     pub redis_url: Option<String>,
-    /// Redis topic. Defaults to "datalink".
-    #[serde(default)]
-    pub redis_topic: Option<String>,
+
     /// Retry interval in seconds when Redis publish fails. Defaults to 5; 0 disables retry.
     #[serde(default)]
     pub redis_retry_interval: Option<u64>,
@@ -42,7 +40,6 @@ impl Default for OutputConfig {
             jsonl: Some("-".to_string()),
             raw: false,
             redis_url: None,
-            redis_topic: Some("datalink".to_string()),
             redis_retry_interval: Some(5),
         }
     }
@@ -301,7 +298,6 @@ pub(crate) struct OutputSink {
     writer: Option<BufWriter<File>>,
     raw: bool,
     redis: Option<RedisPublisher>,
-    redis_topic: String,
 }
 
 impl OutputSink {
@@ -319,10 +315,6 @@ impl OutputSink {
             writer,
             raw: config.raw,
             redis,
-            redis_topic: config
-                .redis_topic
-                .clone()
-                .unwrap_or_else(|| "datalink".to_string()),
         })
     }
 
@@ -342,7 +334,9 @@ impl OutputSink {
             println!("{line}");
         }
         if let Some(redis) = self.redis.as_mut() {
-            redis.publish(&self.redis_topic, &line).await;
+            redis
+                .publish(redis_topic_for_record(&event.message), &line)
+                .await;
         }
         Ok(())
     }
