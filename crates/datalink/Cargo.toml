@@ -2,13 +2,14 @@
 name = "datalink"
 description = "Decode aviation datalink traffic from payloads, SDR, files, and Airframes.io"
 repository = "https://github.com/xoolive/datalink"
+homepage = "https://github.com/xoolive/datalink"
 authors.workspace = true
 version.workspace = true
 license.workspace = true
 edition.workspace = true
 
 [features]
-default = ["rtlsdr", "airspy", "hackrf", "soapy", "websocket"]
+default = ["rtlsdr", "airspy", "hackrf", "websocket"]
 sdr = []
 rtlsdr = ["sdr", "desperado/rtlsdr"]
 airspy = ["sdr", "desperado/airspy"]

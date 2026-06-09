@@ -164,36 +164,6 @@ pub(crate) struct RedisPublisher {
     log_prefix: &'static str,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_airframes_timestamp() {
-        let value = Value::String("2026-05-22T08:37:19.050Z".into());
-        assert_eq!(unix_timestamp_value(&value), Some(1779439039.05));
-    }
-
-    #[test]
-    fn infers_gqrx_capture_params() {
-        let params = infer_capture_params(
-            "~/Documents/data/samples/decode_datalink/gqrx_20260518_114025_136500000_1800000_fc.raw",
-        )
-        .unwrap();
-        assert_eq!(params.center_freq, 136_500_000);
-        assert_eq!(params.sample_rate, Some(1_800_000));
-        assert_eq!(params.format, Some("cf32"));
-    }
-
-    #[test]
-    fn infers_sdruno_center_only() {
-        let params = infer_capture_params("HFDL_10081kHz.wav").unwrap();
-        assert_eq!(params.center_freq, 10_081_000);
-        assert_eq!(params.sample_rate, None);
-        assert_eq!(params.format, None);
-    }
-}
-
 impl RedisPublisher {
     pub(crate) async fn connect(url: &str, retry_interval_secs: u64) -> anyhow::Result<Self> {
         Self::connect_with_prefix(url, retry_interval_secs, "datalink").await
@@ -236,5 +206,35 @@ impl RedisPublisher {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_airframes_timestamp() {
+        let value = Value::String("2026-05-22T08:37:19.050Z".into());
+        assert_eq!(unix_timestamp_value(&value), Some(1779439039.05));
+    }
+
+    #[test]
+    fn infers_gqrx_capture_params() {
+        let params = infer_capture_params(
+            "~/Documents/data/samples/decode_datalink/gqrx_20260518_114025_136500000_1800000_fc.raw",
+        )
+        .unwrap();
+        assert_eq!(params.center_freq, 136_500_000);
+        assert_eq!(params.sample_rate, Some(1_800_000));
+        assert_eq!(params.format, Some("cf32"));
+    }
+
+    #[test]
+    fn infers_sdruno_center_only() {
+        let params = infer_capture_params("HFDL_10081kHz.wav").unwrap();
+        assert_eq!(params.center_freq, 10_081_000);
+        assert_eq!(params.sample_rate, None);
+        assert_eq!(params.format, None);
     }
 }

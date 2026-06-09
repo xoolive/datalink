@@ -1,0 +1,47 @@
+name: Rust
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libsoapysdr-dev
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test all features
+        run: cargo test --workspace --all-features --all-targets
+
+      - name: Test acars without default features
+        run: cargo test -p acars --no-default-features
+
+      - name: Check datalink without default features
+        run: cargo check -p datalink --no-default-features
+
+      - name: Check docs
+        env:
+          RUSTDOCFLAGS: "-D rustdoc::all -A rustdoc::private-doc-tests"
+        run: cargo doc --workspace --all-features --no-deps

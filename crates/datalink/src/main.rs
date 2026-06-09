@@ -1,3 +1,5 @@
+//! Command-line frontend for decoding aviation datalink traffic.
+
 mod airframes;
 mod hfdl;
 mod iq_pipeline;
