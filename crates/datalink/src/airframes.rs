@@ -1,4 +1,5 @@
 use acars::decode::acars::{decode_acars_text_payload, MessageDirection};
+use acars::decode::payload::AcarsAppPayload;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use http::Uri;
@@ -71,7 +72,26 @@ pub struct AirframesMessage {
     #[serde(flatten)]
     pub payload: AirframesPayload,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub app: Option<acars::decode::payload::AcarsAppPayload>,
+    pub src: Option<AirframesAddr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst: Option<AirframesAddr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<AcarsAppPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AirframesAddr {
+    pub icao24: String,
+    #[serde(rename = "type")]
+    pub addr_type: AirframesAddrType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AirframesAddrType {
+    Aircraft,
+    GroundStation,
+    Unknown,
 }
 
 impl Source {
@@ -300,7 +320,13 @@ pub(crate) fn normalize_payload(
         (None, Some(app)) => Some(app),
         (None, None) => None,
     };
-    let af_msg = AirframesMessage { payload, app };
+    let (src, dst) = normalize_airframes_addrs(&payload, app.as_ref());
+    let af_msg = AirframesMessage {
+        payload,
+        src,
+        dst,
+        app,
+    };
     let pmsg = ProtocolMessage::Airframes(Box::new(af_msg));
 
     Ok(DecodedEvent {
@@ -321,23 +347,101 @@ fn parse_socketio_event(packet: &str) -> Option<(String, AirframesPayload)> {
     serde_json::from_str(json).ok()
 }
 
-pub(crate) fn extract_airframes_aircraft(row: &AirframesPayload) -> Option<String> {
-    if let Some(icao) = row
+fn normalize_airframes_addrs(
+    payload: &AirframesPayload,
+    app: Option<&AcarsAppPayload>,
+) -> (Option<AirframesAddr>, Option<AirframesAddr>) {
+    let from = payload.from_hex.as_deref().and_then(normalize_hex_addr);
+    let to = payload.to_hex.as_deref().and_then(normalize_hex_addr);
+    let aircraft_icao = payload
         .airframe
         .as_ref()
         .and_then(|a| a.icao.as_deref())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return Some(icao.to_ascii_lowercase());
-    }
-    if let Some(hex) = &row.from_hex {
-        let addr = hex.trim().to_ascii_lowercase();
-        if addr.len() == 6 {
-            return Some(addr);
+        .and_then(normalize_hex_addr);
+    let is_squitter =
+        matches!(app, Some(AcarsAppPayload::Squitter(_))) || payload.label.as_deref() == Some("SQ");
+
+    let mut src_type = AirframesAddrType::Unknown;
+    let mut dst_type = AirframesAddrType::Unknown;
+
+    if is_squitter {
+        if from.is_some() {
+            src_type = AirframesAddrType::GroundStation;
+        }
+    } else if let Some(aircraft_icao) = aircraft_icao.as_deref() {
+        if from.as_deref() == Some(aircraft_icao) {
+            src_type = AirframesAddrType::Aircraft;
+            if to.is_some() {
+                dst_type = AirframesAddrType::GroundStation;
+            }
+        } else if to.as_deref() == Some(aircraft_icao) {
+            dst_type = AirframesAddrType::Aircraft;
+            if from.is_some() {
+                src_type = AirframesAddrType::GroundStation;
+            }
         }
     }
-    None
+
+    if src_type == AirframesAddrType::Unknown && dst_type == AirframesAddrType::Unknown {
+        match payload.link_direction.as_deref() {
+            Some("downlink") => {
+                if from.is_some() {
+                    src_type = AirframesAddrType::Aircraft;
+                }
+                if to.is_some() {
+                    dst_type = AirframesAddrType::GroundStation;
+                }
+            }
+            Some("uplink") => {
+                if from.is_some() {
+                    src_type = AirframesAddrType::GroundStation;
+                }
+                if to.is_some() {
+                    dst_type = AirframesAddrType::Aircraft;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (
+        from.map(|icao24| AirframesAddr {
+            icao24,
+            addr_type: src_type,
+        }),
+        to.map(|icao24| AirframesAddr {
+            icao24,
+            addr_type: dst_type,
+        }),
+    )
+}
+
+fn normalize_hex_addr(value: &str) -> Option<String> {
+    let value = value
+        .trim()
+        .trim_start_matches("0x")
+        .trim_start_matches("0X");
+    (value.len() == 6 && value.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_lowercase())
+}
+
+pub(crate) fn extract_airframes_aircraft(msg: &AirframesMessage) -> Option<String> {
+    if let Some(icao) = msg
+        .payload
+        .airframe
+        .as_ref()
+        .and_then(|a| a.icao.as_deref())
+        .and_then(normalize_hex_addr)
+    {
+        return Some(icao);
+    }
+
+    msg.src
+        .as_ref()
+        .into_iter()
+        .chain(msg.dst.as_ref())
+        .find(|addr| addr.addr_type == AirframesAddrType::Aircraft)
+        .map(|addr| addr.icao24.clone())
 }
 
 pub(crate) fn extract_airframes_registration(row: &AirframesPayload) -> Option<String> {
@@ -547,6 +651,77 @@ mod tests {
         .unwrap();
         let event = crate::airframes::normalize_payload(meta, "message", payload).unwrap();
         assert_eq!(event.bearer, Bearer::Vdl2);
+    }
+
+    #[test]
+    fn normalizes_airframes_sq_address_as_ground_station() {
+        let meta = SourceMetadata {
+            id: "airframes".into(),
+            name: "Airframes".into(),
+            class: SourceClass::Events,
+            format: Some("airframes.io".into()),
+        };
+        let payload = serde_json::from_str(
+            r#"{
+            "label": "SQ",
+            "text": "02XEGLL EGLL15128N00027WV136975/ARINC",
+            "from_hex": "A1B2C3",
+            "to_hex": "FFFFFF",
+            "source_type": "vdl2",
+            "timestamp": 123.0
+        }"#,
+        )
+        .unwrap();
+        let event = crate::airframes::normalize_payload(meta, "message", payload).unwrap();
+        let ProtocolMessage::Airframes(msg) = event.message else {
+            panic!("expected airframes message");
+        };
+        assert_eq!(msg.src.as_ref().unwrap().icao24, "a1b2c3");
+        assert_eq!(
+            msg.src.as_ref().unwrap().addr_type,
+            AirframesAddrType::GroundStation
+        );
+        assert_eq!(msg.dst.as_ref().unwrap().icao24, "ffffff");
+        assert_eq!(
+            msg.dst.as_ref().unwrap().addr_type,
+            AirframesAddrType::Unknown
+        );
+    }
+
+    #[test]
+    fn normalizes_airframes_downlink_addresses() {
+        let meta = SourceMetadata {
+            id: "airframes".into(),
+            name: "Airframes".into(),
+            class: SourceClass::Events,
+            format: Some("airframes.io".into()),
+        };
+        let payload = serde_json::from_str(
+            r#"{
+            "label": "H1",
+            "text": "hello",
+            "from_hex": "A4463E",
+            "to_hex": "10907A",
+            "link_direction": "downlink",
+            "source_type": "vdl2",
+            "airframe": {"icao": "A4463E"}
+        }"#,
+        )
+        .unwrap();
+        let event = crate::airframes::normalize_payload(meta, "message", payload).unwrap();
+        let ProtocolMessage::Airframes(msg) = event.message else {
+            panic!("expected airframes message");
+        };
+        assert_eq!(msg.src.as_ref().unwrap().icao24, "a4463e");
+        assert_eq!(
+            msg.src.as_ref().unwrap().addr_type,
+            AirframesAddrType::Aircraft
+        );
+        assert_eq!(msg.dst.as_ref().unwrap().icao24, "10907a");
+        assert_eq!(
+            msg.dst.as_ref().unwrap().addr_type,
+            AirframesAddrType::GroundStation
+        );
     }
 
     #[test]

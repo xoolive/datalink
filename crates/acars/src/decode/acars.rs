@@ -223,7 +223,7 @@ pub struct AcarsMessage {
     )]
     pub reassembly: ReassemblyHint,
     /// Decoded application-layer payload — exactly one variant per message.
-    #[serde(rename = "data")]
+    #[serde(rename = "app")]
     pub app: crate::decode::payload::AcarsAppPayload,
 }
 

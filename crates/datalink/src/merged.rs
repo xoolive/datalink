@@ -516,9 +516,9 @@ pub(crate) fn aircraft_summary(msg: &ProtocolMessage) -> Option<Aircraft> {
     match msg {
         ProtocolMessage::Avlc(frame) => {
             let icao24 = if frame.src.is_aircraft() {
-                Some(format!("{:06X}", frame.src.icao24))
+                Some(format!("{:06x}", frame.src.icao24))
             } else if frame.dst.is_aircraft() {
-                Some(format!("{:06X}", frame.dst.icao24))
+                Some(format!("{:06x}", frame.dst.icao24))
             } else {
                 None
             };
@@ -558,7 +558,7 @@ pub(crate) fn aircraft_summary(msg: &ProtocolMessage) -> Option<Aircraft> {
         }
         ProtocolMessage::Airframes(af) => {
             // TODO avoid allocating new strings
-            let icao24 = crate::airframes::extract_airframes_aircraft(&af.payload);
+            let icao24 = crate::airframes::extract_airframes_aircraft(af);
             let registration = crate::airframes::extract_airframes_registration(&af.payload);
             let aircraft_id = af.payload.airframe_id.filter(|id| *id != 0);
             if icao24.is_some() || registration.is_some() || aircraft_id.is_some() {

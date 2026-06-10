@@ -177,7 +177,7 @@ pub struct AvlcFrame {
 pub struct AvlcAddr {
     /// 24-bit station identifier (aircraft ICAO address or ground-station id).
     ///
-    /// Serialised as a 6-digit uppercase hex string (e.g. `"2A3261"`).
+    /// Serialised as a 6-digit lowercase hex string (e.g. `"2a3261"`).
     #[serde(serialize_with = "serialize_addr_hex")]
     #[serde(deserialize_with = "deserialize_addr_hex")]
     pub icao24: u32,
