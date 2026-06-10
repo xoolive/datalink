@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use http::Uri;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use thiserror::Error;
 
 use crate::merged::{
     Bearer, DecodedEvent, OutputConfig, OutputSink, ProtocolMessage, ReceiverMetadata, SourceClass,
@@ -92,19 +93,27 @@ impl Default for Source {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum AirframesSourceError {
+    #[error("unsupported Airframes source scheme: {0}")]
+    UnsupportedScheme(String),
+    #[error("URL parse error: {0}")]
+    UrlParse(#[from] url::ParseError),
+}
+
 impl FromStr for Source {
-    type Err = String;
+    type Err = AirframesSourceError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let default = url::Url::parse("airframes://").unwrap();
-        let url = default.join(input).map_err(|err| err.to_string())?;
+        let url = default.join(input)?;
         let mut source = match url.scheme() {
             "airframes" => Source::default(),
             "ws" | "wss" => Source {
                 websocket: input.to_string(),
                 ..Source::default()
             },
-            other => return Err(format!("unsupported Airframes source scheme: {other}")),
+            other => return Err(AirframesSourceError::UnsupportedScheme(other.to_string())),
         };
         if let Some(query) = url.query() {
             for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
@@ -153,8 +162,7 @@ pub(crate) async fn run(options: Options) -> anyhow::Result<()> {
         .source
         .as_deref()
         .unwrap_or("airframes://")
-        .parse()
-        .map_err(anyhow::Error::msg)?;
+        .parse()?;
     let output_config = OutputConfig {
         jsonl: options.output,
         redis_url: options.redis_url,
@@ -184,8 +192,7 @@ pub(crate) async fn run_config_source(
         .websocket
         .as_deref()
         .unwrap_or("airframes://")
-        .parse::<Source>()
-        .map_err(anyhow::Error::msg)?;
+        .parse::<Source>()?;
     airframes.name = Some(source.display_name().to_string());
     run_source(&airframes, SourceMetadata::from_config(source)?, output).await
 }

@@ -101,7 +101,7 @@ pub(crate) async fn decode_file_values(
     receiver_bearer: crate::merged::Bearer,
 ) -> anyhow::Result<Vec<crate::merged::DecodedEvent>> {
     let options = Options {
-        source: Some(source.parse().map_err(anyhow::Error::msg)?),
+        source: Some(source.parse()?),
         format: format
             .and_then(parse_sample_format)
             .unwrap_or(SampleFormat::Cf32),
@@ -196,8 +196,7 @@ async fn collect_decoded_pdus(
                 channel_khz,
                 use_symbol_sync: true,
             },
-        )
-        .map_err(anyhow::Error::msg)?;
+        )?;
         frame_sync_count += diagnostics.frame_hits.len() as u64;
         candidate_count += diagnostics.pdu_candidates.len() as u64;
         for candidate in &diagnostics.pdu_candidates {

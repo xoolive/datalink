@@ -2,10 +2,37 @@ use std::sync::OnceLock;
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
+use thiserror::Error;
 
 use crate::decode::acars::MessageDirection;
 use crate::decode::payload::PayloadError;
 use crate::decode::{DecodeError, DecodeResult};
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum CpdlcDecodeError {
+    #[error("need {needed} bits, only {remaining} bits remain at bit {bit_pos}")]
+    BitReadOutOfBounds {
+        needed: usize,
+        remaining: usize,
+        bit_pos: usize,
+    },
+    #[error("CPDLC element id {0} out of range")]
+    ElementIdOutOfRange(u16),
+    #[error("invalid CPDLC position choice {0}")]
+    InvalidPositionChoice(u64),
+    #[error("invalid CPDLC direction enum {0}")]
+    InvalidDirectionEnum(u64),
+    #[error("invalid CPDLC procedure type {0}")]
+    InvalidProcedureType(u64),
+    #[error("invalid CPDLC error information enum {0}")]
+    InvalidErrorInformation(u64),
+    #[error("invalid CPDLC IA5 token {0:?}")]
+    InvalidIa5Token(String),
+    #[error("invalid NumericString PER code {0}")]
+    InvalidNumericStringCode(u8),
+    #[error("predeparture clearance body is not decoded yet")]
+    PredepartureClearanceNotDecoded,
+}
 
 /// Initial FANS-1/A CPDLC decode.
 ///
@@ -824,7 +851,7 @@ pub enum PduKind {
     Uplink,
 }
 
-fn parse_pdu_summary(bytes: &[u8], kind: PduKind) -> Result<CpdlcPduSummary, String> {
+fn parse_pdu_summary(bytes: &[u8], kind: PduKind) -> Result<CpdlcPduSummary, CpdlcDecodeError> {
     let mut bits = BitReader::new(bytes);
 
     // FANSATC{Downlink,Uplink}Message has one optional root field:
@@ -872,10 +899,9 @@ fn parse_element(
     bits: &mut BitReader<'_>,
     kind: PduKind,
     is_additional: bool,
-) -> Result<CpdlcElement, String> {
+) -> Result<CpdlcElement, CpdlcDecodeError> {
     let id = bits.read_bits(8)? as u16;
-    let info =
-        element_info(kind, id).ok_or_else(|| format!("CPDLC element id {id} out of range"))?;
+    let info = element_info(kind, id).ok_or(CpdlcDecodeError::ElementIdOutOfRange(id))?;
     let body = parse_element_body(bits, kind, id).ok();
     Ok(CpdlcElement {
         id,
@@ -890,7 +916,7 @@ fn parse_element_body(
     bits: &mut BitReader<'_>,
     kind: PduKind,
     element_id: u16,
-) -> Result<CpdlcElementBody, String> {
+) -> Result<CpdlcElementBody, CpdlcDecodeError> {
     match (kind, element_id) {
         (PduKind::Downlink, id) if is_downlink_null(id) => Ok(CpdlcElementBody::Null),
         (PduKind::Uplink, id) if is_uplink_null(id) => Ok(CpdlcElementBody::Null),
@@ -1071,7 +1097,7 @@ fn parse_element_body(
         (PduKind::Uplink, 8 | 10 | 68 | 74 | 75 | 155) => {
             Ok(CpdlcElementBody::Position(parse_position(bits)?))
         }
-        (PduKind::Uplink, 73) => Err("predeparture clearance body is not decoded yet".to_string()),
+        (PduKind::Uplink, 73) => Err(CpdlcDecodeError::PredepartureClearanceNotDecoded),
         (PduKind::Uplink, 79) => {
             let position = parse_position(bits)?;
             let route_clearance = parse_route_clearance(bits)?;
@@ -1167,7 +1193,7 @@ fn parse_element_body(
     }
 }
 
-fn parse_position(bits: &mut BitReader<'_>) -> Result<CpdlcPosition, String> {
+fn parse_position(bits: &mut BitReader<'_>) -> Result<CpdlcPosition, CpdlcDecodeError> {
     match bits.read_bits(3)? {
         0 => {
             let len = bits.read_bits(3)? as usize + 1;
@@ -1187,11 +1213,11 @@ fn parse_position(bits: &mut BitReader<'_>) -> Result<CpdlcPosition, String> {
             })
         }
         4 => Ok(CpdlcPosition::UnsupportedPlaceBearingDistance),
-        other => Err(format!("invalid CPDLC position choice {other}")),
+        other => Err(CpdlcDecodeError::InvalidPositionChoice(other)),
     }
 }
 
-fn parse_latitude(bits: &mut BitReader<'_>) -> Result<f64, String> {
+fn parse_latitude(bits: &mut BitReader<'_>) -> Result<f64, CpdlcDecodeError> {
     let has_minutes = bits.read_bool()?;
     let deg = bits.read_bits(7)? as f64;
     let min = if has_minutes {
@@ -1206,7 +1232,7 @@ fn parse_latitude(bits: &mut BitReader<'_>) -> Result<f64, String> {
     Ok(value)
 }
 
-fn parse_longitude(bits: &mut BitReader<'_>) -> Result<f64, String> {
+fn parse_longitude(bits: &mut BitReader<'_>) -> Result<f64, CpdlcDecodeError> {
     let has_minutes = bits.read_bool()?;
     let deg = bits.read_bits(8)? as f64;
     let min = if has_minutes {
@@ -1271,7 +1297,7 @@ fn parse_route_clearance_body(bits: &mut BitReader<'_>, _name: &str) -> CpdlcEle
     }
 }
 
-fn parse_route_clearance(bits: &mut BitReader<'_>) -> Result<RouteClearance, String> {
+fn parse_route_clearance(bits: &mut BitReader<'_>) -> Result<RouteClearance, CpdlcDecodeError> {
     let has_airport_departure = bits.read_bool()?;
     let has_airport_destination = bits.read_bool()?;
     let has_runway_departure = bits.read_bool()?;
@@ -1349,7 +1375,7 @@ fn parse_route_clearance(bits: &mut BitReader<'_>) -> Result<RouteClearance, Str
     })
 }
 
-fn parse_route_information(bits: &mut BitReader<'_>) -> Result<RouteInformation, String> {
+fn parse_route_information(bits: &mut BitReader<'_>) -> Result<RouteInformation, CpdlcDecodeError> {
     match bits.read_bits(3)? as u8 {
         0 => {
             let has_position = bits.read_bool()?;
@@ -1389,7 +1415,7 @@ fn parse_route_information(bits: &mut BitReader<'_>) -> Result<RouteInformation,
     }
 }
 
-fn parse_runway(bits: &mut BitReader<'_>) -> Result<String, String> {
+fn parse_runway(bits: &mut BitReader<'_>) -> Result<String, CpdlcDecodeError> {
     let direction = bits.read_bits(6)? as u8 + 1;
     let configuration = match bits.read_bits(2)? {
         0 => "L",
@@ -1401,7 +1427,9 @@ fn parse_runway(bits: &mut BitReader<'_>) -> Result<String, String> {
     Ok(format!("{direction:02}{configuration}"))
 }
 
-fn parse_position_report(bits: &mut BitReader<'_>) -> Result<CpdlcPositionReport, String> {
+fn parse_position_report(
+    bits: &mut BitReader<'_>,
+) -> Result<CpdlcPositionReport, CpdlcDecodeError> {
     let has_next_fix = bits.read_bool()?;
     let has_next_fix_eta = bits.read_bool()?;
     let has_next_plus_one_fix = bits.read_bool()?;
@@ -1474,14 +1502,14 @@ fn parse_position_report(bits: &mut BitReader<'_>) -> Result<CpdlcPositionReport
     })
 }
 
-fn parse_remaining_fuel(bits: &mut BitReader<'_>) -> Result<CpdlcTime, String> {
+fn parse_remaining_fuel(bits: &mut BitReader<'_>) -> Result<CpdlcTime, CpdlcDecodeError> {
     Ok(CpdlcTime {
         hour: bits.read_bits(5)? as u8,
         minute: bits.read_bits(6)? as u8,
     })
 }
 
-fn parse_temperature(bits: &mut BitReader<'_>) -> Result<CpdlcTemperature, String> {
+fn parse_temperature(bits: &mut BitReader<'_>) -> Result<CpdlcTemperature, CpdlcDecodeError> {
     if bits.read_bool()? {
         Ok(CpdlcTemperature::Fahrenheit(
             bits.read_bits(8)? as i16 - 105,
@@ -1491,7 +1519,7 @@ fn parse_temperature(bits: &mut BitReader<'_>) -> Result<CpdlcTemperature, Strin
     }
 }
 
-fn parse_winds(bits: &mut BitReader<'_>) -> Result<CpdlcWinds, String> {
+fn parse_winds(bits: &mut BitReader<'_>) -> Result<CpdlcWinds, CpdlcDecodeError> {
     let direction_degrees = bits.read_bits(9)? as u16 + 1;
     let speed = if bits.read_bool()? {
         CpdlcWindSpeed::Kmh(bits.read_bits(9)? as u16)
@@ -1504,7 +1532,9 @@ fn parse_winds(bits: &mut BitReader<'_>) -> Result<CpdlcWinds, String> {
     })
 }
 
-fn parse_vertical_change(bits: &mut BitReader<'_>) -> Result<CpdlcVerticalChange, String> {
+fn parse_vertical_change(
+    bits: &mut BitReader<'_>,
+) -> Result<CpdlcVerticalChange, CpdlcDecodeError> {
     let direction = if bits.read_bool()? {
         CpdlcVerticalDirection::Down
     } else {
@@ -1518,7 +1548,7 @@ fn parse_vertical_change(bits: &mut BitReader<'_>) -> Result<CpdlcVerticalChange
     Ok(CpdlcVerticalChange { direction, rate })
 }
 
-fn parse_distance(bits: &mut BitReader<'_>) -> Result<CpdlcDistance, String> {
+fn parse_distance(bits: &mut BitReader<'_>) -> Result<CpdlcDistance, CpdlcDecodeError> {
     if bits.read_bool()? {
         Ok(CpdlcDistance::Kilometers(bits.read_bits(10)? as u16 + 1))
     } else {
@@ -1526,7 +1556,7 @@ fn parse_distance(bits: &mut BitReader<'_>) -> Result<CpdlcDistance, String> {
     }
 }
 
-fn parse_speed(bits: &mut BitReader<'_>) -> Result<CpdlcSpeed, String> {
+fn parse_speed(bits: &mut BitReader<'_>) -> Result<CpdlcSpeed, CpdlcDecodeError> {
     match bits.read_bits(3)? {
         0 => Ok(CpdlcSpeed::IndicatedKnots(bits.read_bits(5)? as u16 + 7)),
         1 => Ok(CpdlcSpeed::IndicatedKmh(bits.read_bits(7)? as u16 + 10)),
@@ -1540,7 +1570,7 @@ fn parse_speed(bits: &mut BitReader<'_>) -> Result<CpdlcSpeed, String> {
     }
 }
 
-fn parse_altimeter(bits: &mut BitReader<'_>) -> Result<CpdlcAltimeter, String> {
+fn parse_altimeter(bits: &mut BitReader<'_>) -> Result<CpdlcAltimeter, CpdlcDecodeError> {
     match bits.read_bits(1)? {
         0 => Ok(CpdlcAltimeter::InHgHundredths(
             bits.read_bits(10)? as u16 + 2200,
@@ -1552,7 +1582,9 @@ fn parse_altimeter(bits: &mut BitReader<'_>) -> Result<CpdlcAltimeter, String> {
     }
 }
 
-fn parse_error_information(bits: &mut BitReader<'_>) -> Result<CpdlcErrorInformation, String> {
+fn parse_error_information(
+    bits: &mut BitReader<'_>,
+) -> Result<CpdlcErrorInformation, CpdlcDecodeError> {
     match bits.read_bits(5)? {
         0 => Ok(CpdlcErrorInformation::ApplicationError),
         1 => Ok(CpdlcErrorInformation::DuplicateMsgIdentificationNumber),
@@ -1571,11 +1603,11 @@ fn parse_error_information(bits: &mut BitReader<'_>) -> Result<CpdlcErrorInforma
         14 => Ok(CpdlcErrorInformation::ReservedErrorMsg4),
         15 => Ok(CpdlcErrorInformation::ReservedErrorMsg5),
         16 => Ok(CpdlcErrorInformation::ReservedErrorMsg6),
-        other => Err(format!("invalid CPDLC error information enum {other}")),
+        other => Err(CpdlcDecodeError::InvalidErrorInformation(other)),
     }
 }
 
-fn parse_altitude(bits: &mut BitReader<'_>) -> Result<CpdlcAltitude, String> {
+fn parse_altitude(bits: &mut BitReader<'_>) -> Result<CpdlcAltitude, CpdlcDecodeError> {
     match bits.read_bits(3)? as u8 {
         0 => Ok(CpdlcAltitude::QnhFeet(bits.read_bits(12)? as u16)),
         1 => Ok(CpdlcAltitude::QnhMeters(bits.read_bits(14)? as u16)),
@@ -1591,14 +1623,14 @@ fn parse_altitude(bits: &mut BitReader<'_>) -> Result<CpdlcAltitude, String> {
     }
 }
 
-fn parse_time(bits: &mut BitReader<'_>) -> Result<CpdlcTime, String> {
+fn parse_time(bits: &mut BitReader<'_>) -> Result<CpdlcTime, CpdlcDecodeError> {
     Ok(CpdlcTime {
         hour: bits.read_bits(5)? as u8,
         minute: bits.read_bits(6)? as u8,
     })
 }
 
-fn parse_distance_offset(bits: &mut BitReader<'_>) -> Result<DistanceOffset, String> {
+fn parse_distance_offset(bits: &mut BitReader<'_>) -> Result<DistanceOffset, CpdlcDecodeError> {
     match bits.read_bits(1)? {
         0 => Ok(DistanceOffset::Nm(bits.read_bits(7)? as u16 + 1)),
         1 => Ok(DistanceOffset::Km(bits.read_bits(8)? as u16 + 1)),
@@ -1606,7 +1638,7 @@ fn parse_distance_offset(bits: &mut BitReader<'_>) -> Result<DistanceOffset, Str
     }
 }
 
-fn parse_direction(bits: &mut BitReader<'_>) -> Result<CpdlcDirection, String> {
+fn parse_direction(bits: &mut BitReader<'_>) -> Result<CpdlcDirection, CpdlcDecodeError> {
     match bits.read_bits(4)? {
         0 => Ok(CpdlcDirection::Left),
         1 => Ok(CpdlcDirection::Right),
@@ -1619,11 +1651,11 @@ fn parse_direction(bits: &mut BitReader<'_>) -> Result<CpdlcDirection, String> {
         8 => Ok(CpdlcDirection::NorthWest),
         9 => Ok(CpdlcDirection::SouthEast),
         10 => Ok(CpdlcDirection::SouthWest),
-        other => Err(format!("invalid CPDLC direction enum {other}")),
+        other => Err(CpdlcDecodeError::InvalidDirectionEnum(other)),
     }
 }
 
-fn parse_beacon_code(bits: &mut BitReader<'_>) -> Result<String, String> {
+fn parse_beacon_code(bits: &mut BitReader<'_>) -> Result<String, CpdlcDecodeError> {
     let mut out = String::with_capacity(4);
     for _ in 0..4 {
         out.push(char::from(b'0' + bits.read_bits(3)? as u8));
@@ -1631,7 +1663,7 @@ fn parse_beacon_code(bits: &mut BitReader<'_>) -> Result<String, String> {
     Ok(out)
 }
 
-fn parse_degrees(bits: &mut BitReader<'_>) -> Result<CpdlcDegrees, String> {
+fn parse_degrees(bits: &mut BitReader<'_>) -> Result<CpdlcDegrees, CpdlcDecodeError> {
     let value = bits.read_bits(9)? as u16 + 1;
     if bits.read_bool()? {
         Ok(CpdlcDegrees::True(value))
@@ -1640,13 +1672,13 @@ fn parse_degrees(bits: &mut BitReader<'_>) -> Result<CpdlcDegrees, String> {
     }
 }
 
-fn parse_procedure_name(bits: &mut BitReader<'_>) -> Result<CpdlcProcedureName, String> {
+fn parse_procedure_name(bits: &mut BitReader<'_>) -> Result<CpdlcProcedureName, CpdlcDecodeError> {
     let has_transition = bits.read_bool()?;
     let procedure_type = match bits.read_bits(2)? {
         0 => CpdlcProcedureType::Arrival,
         1 => CpdlcProcedureType::Approach,
         2 => CpdlcProcedureType::Departure,
-        other => return Err(format!("invalid CPDLC procedure type {other}")),
+        other => return Err(CpdlcDecodeError::InvalidProcedureType(other)),
     };
     let procedure_len = bits.read_bits(3)? as usize + 1;
     let procedure = parse_ia5_chars(bits, procedure_len)?;
@@ -1663,17 +1695,17 @@ fn parse_procedure_name(bits: &mut BitReader<'_>) -> Result<CpdlcProcedureName, 
     })
 }
 
-fn parse_free_text(bits: &mut BitReader<'_>) -> Result<String, String> {
+fn parse_free_text(bits: &mut BitReader<'_>) -> Result<String, CpdlcDecodeError> {
     // FANSFreeText is IA5String (SIZE(1..256)) with 7-bit constrained chars.
     let len = bits.read_bits(8)? as usize + 1;
     parse_ia5_chars(bits, len)
 }
 
-fn parse_fixed_ia5(bits: &mut BitReader<'_>, len: usize) -> Result<String, String> {
+fn parse_fixed_ia5(bits: &mut BitReader<'_>, len: usize) -> Result<String, CpdlcDecodeError> {
     parse_ia5_chars(bits, len)
 }
 
-fn parse_token_ia5(bits: &mut BitReader<'_>, len: usize) -> Result<String, String> {
+fn parse_token_ia5(bits: &mut BitReader<'_>, len: usize) -> Result<String, CpdlcDecodeError> {
     let text = parse_ia5_chars(bits, len)?;
     if text
         .bytes()
@@ -1681,11 +1713,11 @@ fn parse_token_ia5(bits: &mut BitReader<'_>, len: usize) -> Result<String, Strin
     {
         Ok(text.trim_end().to_string())
     } else {
-        Err(format!("invalid CPDLC IA5 token {text:?}"))
+        Err(CpdlcDecodeError::InvalidIa5Token(text))
     }
 }
 
-fn parse_ia5_chars(bits: &mut BitReader<'_>, len: usize) -> Result<String, String> {
+fn parse_ia5_chars(bits: &mut BitReader<'_>, len: usize) -> Result<String, CpdlcDecodeError> {
     let mut out = String::with_capacity(len);
     for _ in 0..len {
         let ch = bits.read_bits(7)? as u8;
@@ -1694,7 +1726,7 @@ fn parse_ia5_chars(bits: &mut BitReader<'_>, len: usize) -> Result<String, Strin
     Ok(out)
 }
 
-fn parse_icao_unit_name(bits: &mut BitReader<'_>) -> Result<IcaoUnitName, String> {
+fn parse_icao_unit_name(bits: &mut BitReader<'_>) -> Result<IcaoUnitName, CpdlcDecodeError> {
     let facility = match bits.read_bits(1)? {
         0 => IcaoFacilityIdentification::Designation(parse_fixed_ia5(bits, 4)?),
         1 => {
@@ -1718,7 +1750,7 @@ fn parse_icao_unit_name(bits: &mut BitReader<'_>) -> Result<IcaoUnitName, String
     Ok(IcaoUnitName { facility, function })
 }
 
-fn parse_frequency(bits: &mut BitReader<'_>) -> Result<CpdlcFrequency, String> {
+fn parse_frequency(bits: &mut BitReader<'_>) -> Result<CpdlcFrequency, CpdlcDecodeError> {
     match bits.read_bits(2)? {
         0 => Ok(CpdlcFrequency::HfKhz(bits.read_bits(15)? as u32 + 2850)),
         1 => Ok(CpdlcFrequency::VhfKhz(bits.read_bits(15)? as u32 + 117_000)),
@@ -1728,14 +1760,14 @@ fn parse_frequency(bits: &mut BitReader<'_>) -> Result<CpdlcFrequency, String> {
     }
 }
 
-fn parse_numeric_string(bits: &mut BitReader<'_>, len: usize) -> Result<String, String> {
+fn parse_numeric_string(bits: &mut BitReader<'_>, len: usize) -> Result<String, CpdlcDecodeError> {
     let mut out = String::with_capacity(len);
     for _ in 0..len {
         let code = bits.read_bits(4)? as u8;
         let ch = match code {
             0 => ' ',
             1..=10 => char::from(b'0' + (code - 1)),
-            _ => return Err(format!("invalid NumericString PER code {code}")),
+            _ => return Err(CpdlcDecodeError::InvalidNumericStringCode(code)),
         };
         out.push(ch);
     }
@@ -1785,7 +1817,7 @@ fn atn_catalog() -> &'static CpdlcCatalog {
     })
 }
 
-fn parse_header(bits: &mut BitReader<'_>) -> Result<AtcMessageHeader, String> {
+fn parse_header(bits: &mut BitReader<'_>) -> Result<AtcMessageHeader, CpdlcDecodeError> {
     // FANSATCMessageHeader has two optional root members:
     // msgReferenceNumber and timestamp.
     let has_msg_ref = bits.read_bool()?;
@@ -1823,17 +1855,17 @@ impl<'a> BitReader<'a> {
         Self { bytes, bit_pos: 0 }
     }
 
-    fn read_bool(&mut self) -> Result<bool, String> {
+    fn read_bool(&mut self) -> Result<bool, CpdlcDecodeError> {
         Ok(self.read_bits(1)? != 0)
     }
 
-    fn read_bits(&mut self, n: usize) -> Result<u64, String> {
+    fn read_bits(&mut self, n: usize) -> Result<u64, CpdlcDecodeError> {
         if self.remaining() < n {
-            return Err(format!(
-                "need {n} bits, only {} bits remain at bit {}",
-                self.remaining(),
-                self.bit_pos
-            ));
+            return Err(CpdlcDecodeError::BitReadOutOfBounds {
+                needed: n,
+                remaining: self.remaining(),
+                bit_pos: self.bit_pos,
+            });
         }
         let mut out = 0u64;
         for _ in 0..n {

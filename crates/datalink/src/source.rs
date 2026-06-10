@@ -1,10 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use thiserror::Error;
 use url::Url;
 
 pub const DEFAULT_SAMPLE_RATE: u32 = 1_050_000;
 
 use desperado::{Gain, IqFormat};
+
+#[derive(Debug, Error)]
+pub enum SourceParseError {
+    #[error("unsupported source scheme: {0}")]
+    UnsupportedScheme(String),
+    #[error("URL parse error: {0}")]
+    UrlParse(#[from] url::ParseError),
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", untagged)]
@@ -114,7 +123,7 @@ impl Source {
 }
 
 impl FromStr for Source {
-    type Err = String;
+    type Err = SourceParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "-" {
@@ -135,7 +144,7 @@ impl FromStr for Source {
             });
         }
         let default = Url::parse("file://").unwrap();
-        let url = default.join(s).map_err(|e| e.to_string())?;
+        let url = default.join(s)?;
         let address = match url.scheme() {
             "file" => {
                 let file = if let Some(host) = url.host_str() {
@@ -207,7 +216,7 @@ impl FromStr for Source {
             "soapy" => Address::Soapy {
                 soapy: url.host_str().unwrap_or("").to_string(),
             },
-            other => return Err(format!("unsupported source scheme: {other}")),
+            other => return Err(SourceParseError::UnsupportedScheme(other.to_string())),
         };
 
         let mut source = Source {

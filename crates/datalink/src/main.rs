@@ -1,3 +1,4 @@
+//! Datalink ingestion and decoding CLI
 mod airframes;
 mod hfdl;
 mod iq_pipeline;

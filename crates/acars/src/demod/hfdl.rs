@@ -13,6 +13,7 @@
 use desperado::dsp::{agc::Agc, resampler::ComplexResampler, symsync::SymSync};
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 pub const SYMBOL_RATE: u32 = 1_800;
 pub const SAMPLES_PER_SYMBOL: u32 = 3;
@@ -225,11 +226,25 @@ pub enum HfdlEvent {
     },
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum HfdlDemodError {
+    #[error("resampler error: {0}")]
+    Resampler(String),
+    #[error("invalid M1 value: {0}")]
+    InvalidM1(usize),
+    #[error("not enough symbols for full HFDL frame")]
+    NotEnoughSymbols,
+    #[error("no candidate variants")]
+    NoCandidateVariants,
+    #[error("Viterbi input must contain pairs of soft symbols")]
+    InvalidViterbiInput,
+}
+
 /// One-shot HFDL acquisition diagnostic for a single channel.
 pub fn diagnose_channel(
     samples: &[Complex<f32>],
     config: &HfdlDemodConfig,
-) -> Result<HfdlDiagnostics, String> {
+) -> Result<HfdlDiagnostics, HfdlDemodError> {
     let mut baseband = channel_to_demod_rate(samples, config)?;
     let symbols = if config.use_symbol_sync {
         desperado_symbol_sync(&mut baseband)
@@ -256,7 +271,7 @@ pub fn diagnose_channel(
 pub fn channel_to_demod_rate(
     samples: &[Complex<f32>],
     config: &HfdlDemodConfig,
-) -> Result<Vec<Complex<f32>>, String> {
+) -> Result<Vec<Complex<f32>>, HfdlDemodError> {
     let offset_hz = config.carrier_offset_hz();
     let mut mixed = Vec::with_capacity(samples.len());
     let mut phase = 0.0f64;
@@ -270,7 +285,8 @@ pub fn channel_to_demod_rate(
         }
     }
 
-    let mut resampler = ComplexResampler::new(config.input_sample_rate, DEMOD_RATE)?;
+    let mut resampler = ComplexResampler::new(config.input_sample_rate, DEMOD_RATE)
+        .map_err(|e| HfdlDemodError::Resampler(e.to_string()))?;
     Ok(resampler.process(&mixed))
 }
 
@@ -408,25 +424,25 @@ pub fn decode_frame_candidates(
 pub fn decode_frame_candidate(
     symbols: &[Complex<f32>],
     hit: &FrameSyncHit,
-) -> Result<HfdlPduCandidate, String> {
+) -> Result<HfdlPduCandidate, HfdlDemodError> {
     decode_frame_candidate_variants(symbols, hit)?
         .into_iter()
         .next()
-        .ok_or_else(|| "no candidate variants".into())
+        .ok_or(HfdlDemodError::NoCandidateVariants)
 }
 
 pub fn decode_frame_candidate_variants(
     symbols: &[Complex<f32>],
     hit: &FrameSyncHit,
-) -> Result<Vec<HfdlPduCandidate>, String> {
+) -> Result<Vec<HfdlPduCandidate>, HfdlDemodError> {
     let params = *FRAME_PARAMS
         .get(hit.m1)
-        .ok_or_else(|| format!("invalid M1 {}", hit.m1))?;
+        .ok_or(HfdlDemodError::InvalidM1(hit.m1))?;
     let preamble_len = A_LEN + A_LEN + M1_LEN + M2_LEN + 9 * T_LEN;
     let data_start = hit.symbol_index + preamble_len;
     let frame_symbols = params.data_segment_count * (DATA_FRAME_LEN + T_LEN);
     if symbols.len() < data_start + frame_symbols {
-        return Err("not enough symbols for full HFDL frame".into());
+        return Err(HfdlDemodError::NotEnoughSymbols);
     }
 
     let mut data_symbols = Vec::with_capacity(params.data_segment_count * DATA_FRAME_LEN);
@@ -542,9 +558,9 @@ pub fn deinterleave_soft_bits(soft: &[u8], params: HfdlFrameParams) -> Vec<u8> {
         .collect()
 }
 
-pub fn viterbi_decode_27(symbols: &[u8]) -> Result<Vec<u8>, String> {
+pub fn viterbi_decode_27(symbols: &[u8]) -> Result<Vec<u8>, HfdlDemodError> {
     if !symbols.len().is_multiple_of(2) {
-        return Err("Viterbi input must contain pairs of soft symbols".into());
+        return Err(HfdlDemodError::InvalidViterbiInput);
     }
     let nbits = symbols.len() / 2;
     const STATES: usize = 64;

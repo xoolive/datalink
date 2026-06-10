@@ -8,10 +8,17 @@ use deku::no_std_io::{Read, Seek};
 use deku::prelude::*;
 use deku::reader::Reader;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::decode::acars::MessageDirection;
 use crate::decode::payload::PayloadError;
 use crate::decode::{DecodeError, DecodeResult};
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum Arinc622Error {
+    #[error("could not find hex payload after registration")]
+    MissingHexPayload,
+}
 
 /// ARINC 622 Interline Message Identifier (IMI) — 3-character application
 /// routing code embedded in the envelope address.
@@ -175,10 +182,10 @@ fn read_tail<R: Read + Seek>(reader: &mut Reader<R>) -> Result<Tail, DekuError> 
     }
     let tail =
         String::from_utf8(bytes).map_err(|_| DekuError::Parse("non-UTF8 ARINC 622 tail".into()))?;
-    split_registration_and_payload(&tail).map_err(|e| DekuError::Parse(e.into()))
+    split_registration_and_payload(&tail).map_err(|e| DekuError::Parse(e.to_string().into()))
 }
 
-fn split_registration_and_payload(tail: &str) -> Result<Tail, String> {
+fn split_registration_and_payload(tail: &str) -> Result<Tail, Arinc622Error> {
     // Disconnect/control messages may carry only a CRC after registration,
     // while short CPDLC messages can be 3 payload bytes plus 2 CRC bytes. Keep
     // preferring six-character registrations so hex-looking tails like JA797A
@@ -211,7 +218,7 @@ fn split_registration_and_payload(tail: &str) -> Result<Tail, String> {
             payload_hex_full: tail[i..].to_string(),
         });
     }
-    Err("could not find hex payload after registration".to_string())
+    Err(Arinc622Error::MissingHexPayload)
 }
 
 impl TryFrom<&str> for Message {
