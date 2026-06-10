@@ -34,9 +34,9 @@ pub struct SquitterMessage {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SquitterLink {
-    #[serde(rename="VHF")]
+    #[serde(rename = "VHF")]
     Vhf,
-    #[serde(rename="SAT")]
+    #[serde(rename = "SAT")]
     Satellite,
     Other(char),
 }
