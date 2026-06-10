@@ -1,410 +1,359 @@
-//! Compact, human-oriented JSON views for decoded datalink messages.
-//!
-//! The protocol decoders intentionally expose the full nested wire structure.
-//! This module adds a flatter summary envelope for JSONL browsing while keeping
-//! the full decode available under `raw_decode` when requested.
+use serde::{Deserialize, Serialize};
 
-use serde_json::{json, Map, Value};
+use crate::decode::acars::AcarsMessage;
+use crate::decode::avlc::{AvlcFrame, AvlcPayload};
+use crate::decode::hfdl::{HfdlMessage, HfdlPdu, LpduData, Mpdu};
+use crate::decode::payload::aoc::label32::Label32Message;
+use crate::decode::payload::aoc::oooi::{OooiOffDestination, OooiOffReport};
+use crate::decode::payload::aoc::position::AocPositionMessage;
+use crate::decode::payload::arinc620::squitter::SquitterMessage;
+use crate::decode::payload::arinc622::adsc::{AdscBasicReport, AdscEarthAirReference, AdscTag};
+use crate::decode::payload::arinc622::cpdlc::{
+    CpdlcAltitude, CpdlcDegrees, CpdlcElementBody, CpdlcPosition, CpdlcPositionReport,
+};
+use crate::decode::payload::AcarsAppPayload;
 
-/// Build a compact JSON view from a serialized decoder value.
-///
-/// When `include_raw` is true, the original value is included as `raw_decode`.
-pub fn compact_value(raw: Value, include_raw: bool) -> Value {
-    if raw.get("X25").is_some() || raw.get("Acars").is_some() || raw.get("Xid").is_some() {
-        compact_avlc_value(raw, include_raw)
-    } else if raw.get("label").is_some() && raw.get("text").is_some() {
-        compact_acars_value(raw, include_raw)
-    } else {
-        let mut out = json!({
-            "message_class": "unknown",
-            "summary": "Decoded message",
-        });
-        copy_common(&raw, out.as_object_mut().unwrap());
-        maybe_raw(&mut out, raw, include_raw);
-        out
-    }
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+pub struct Position {
+    pub latitude: f64,
+    pub longitude: f64,
 }
 
-/// Build a compact JSON view for a serialized `AvlcFrame` value.
-pub fn compact_avlc_value(raw: Value, include_raw: bool) -> Value {
-    let mut out = json!({
-        "bearer": "vdl2",
-        "path": "unknown",
-        "protocol_stack": ["vdl2", "avlc"],
-        "message_class": "unknown",
-        "summary": "VDL2 AVLC frame",
-        "app": Value::Null,
-    });
-    let obj = out.as_object_mut().unwrap();
-    copy_common(&raw, obj);
-    copy_if_present(&raw, obj, "src");
-    copy_if_present(&raw, obj, "dst");
-    copy_if_present(&raw, obj, "role");
-    copy_if_present(&raw, obj, "ag_status");
-    copy_if_present(&raw, obj, "lcf");
-
-    if let Some(acars) = raw.get("Acars") {
-        obj.insert("path".into(), "acars".into());
-        obj.insert("protocol_stack".into(), json!(["vdl2", "avlc", "acars"]));
-        obj.insert("message_class".into(), "app_message".into());
-        obj.insert("summary".into(), acars_summary(acars).into());
-        obj.insert("app".into(), acars_app(acars));
-    } else if let Some(x25) = raw.get("X25") {
-        let (class, stack, summary, app, transport) = x25_compact(x25);
-        obj.insert("path".into(), "atn".into());
-        obj.insert("protocol_stack".into(), stack);
-        obj.insert("message_class".into(), class.into());
-        obj.insert("summary".into(), summary.into());
-        obj.insert("app".into(), app);
-        obj.insert("transport".into(), transport);
-    } else if raw.get("Xid").is_some() {
-        obj.insert("path".into(), "xid".into());
-        obj.insert("protocol_stack".into(), json!(["vdl2", "avlc", "xid"]));
-        obj.insert("message_class".into(), "link_management".into());
-        obj.insert(
-            "summary".into(),
-            "VDL2 XID / ground-station information".into(),
-        );
-    } else if let Some(lcf) = raw.get("lcf") {
-        obj.insert("path".into(), "avlc_ctrl".into());
-        obj.insert("message_class".into(), "link_control".into());
-        obj.insert(
-            "summary".into(),
-            format!("AVLC control frame: {}", short_json(lcf)).into(),
-        );
-    }
-
-    maybe_raw(&mut out, raw, include_raw);
-    out
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct Kinematics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<Position>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub altitude_ft: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ground_speed_knots: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<String>,
 }
 
-/// Build a compact JSON view for a serialized `AcarsMessage` value.
-pub fn compact_acars_value(raw: Value, include_raw: bool) -> Value {
-    let mut out = json!({
-        "bearer": raw.pointer("/metadata/bearer").cloned().unwrap_or_else(|| json!("acars")),
-        "path": "acars",
-        "protocol_stack": acars_stack(&raw),
-        "message_class": acars_message_class(&raw),
-        "summary": acars_summary(&raw),
-        "app": acars_app(&raw),
-    });
-    let obj = out.as_object_mut().unwrap();
-    copy_common(&raw, obj);
-    for key in [
-        "tail",
-        "label",
-        "direction",
-        "src",
-        "dst",
-        "block_id",
-        "msg_nb",
-        "flight_id",
-        "metadata",
-    ] {
-        copy_if_present(&raw, obj, key);
-    }
-    maybe_raw(&mut out, raw, include_raw);
-    out
-}
-
-fn x25_compact(x25: &Value) -> (&'static str, Value, String, Value, Value) {
-    let transport = json!({
-        "x25": {
-            "packet_type": x25.get("packet_type").cloned().unwrap_or(Value::Null),
-            "channel": format!("{}/{}", val_u64(x25, "chan_group").unwrap_or(0), val_u64(x25, "chan_num").unwrap_or(0)),
-            "sseq": x25.get("sseq").cloned().unwrap_or(Value::Null),
-            "rseq": x25.get("rseq").cloned().unwrap_or(Value::Null),
-            "more": x25.get("more").cloned().unwrap_or(Value::Null),
+impl Kinematics {
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            position: self.position.or(other.position),
+            altitude_ft: self.altitude_ft.or(other.altitude_ft),
+            track: self.track.or(other.track),
+            ground_speed_knots: self.ground_speed_knots.or(other.ground_speed_knots),
+            derived_from: self.derived_from.or(other.derived_from),
         }
-    });
-
-    let Some(clnp) = x25.pointer("/inner/clnp_compressed") else {
-        return (
-            "network_data",
-            json!(["vdl2", "avlc", "x25"]),
-            format!(
-                "X.25 {}",
-                x25.get("packet_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("packet")
-            ),
-            Value::Null,
-            transport,
-        );
-    };
-
-    if let Some(idrp) = clnp.pointer("/inner/idrp") {
-        let typ = idrp
-            .get("bispdu_type")
-            .and_then(Value::as_str)
-            .unwrap_or("IDRP");
-        return (
-            "network_keepalive",
-            json!(["vdl2", "avlc", "x25", "clnp", "idrp"]),
-            format!(
-                "IDRP {typ}: seq {} ack {}",
-                display_field(idrp, "seq"),
-                display_field(idrp, "ack")
-            ),
-            Value::Null,
-            transport,
-        );
     }
-
-    let Some(cotp) = clnp
-        .pointer("/inner/cotp")
-        .and_then(Value::as_array)
-        .and_then(|a| a.first())
-    else {
-        return (
-            "network_data",
-            json!(["vdl2", "avlc", "x25", "clnp"]),
-            "X.25 / compressed CLNP data".into(),
-            Value::Null,
-            transport,
-        );
-    };
-
-    let tpdu = cotp
-        .get("tpdu_type")
-        .and_then(Value::as_str)
-        .unwrap_or("COTP");
-    let mut transport = transport;
-    if let Some(m) = transport.as_object_mut() {
-        m.insert("cotp".into(), cotp_transport(cotp));
-    }
-
-    if let Some(cpdlc) = cotp.get("atn_cpdlc") {
-        return (
-            "app_message",
-            json!(["vdl2", "avlc", "x25", "clnp", "cotp", "ulcs", "atn_b1", "cpdlc"]),
-            atn_cpdlc_summary(cpdlc),
-            json!({
-                "protocol": "atn_b1_cpdlc",
-                "standard": "ATN B1",
-                "message_id": cpdlc.pointer("/header/msg_id").cloned().unwrap_or(Value::Null),
-                "message_ref": cpdlc.pointer("/header/msg_ref").cloned().unwrap_or(Value::Null),
-                "elements": compact_cpdlc_elements(cpdlc),
-            }),
-            transport,
-        );
-    }
-
-    let class = match tpdu {
-        "Data Ack" => "transport_ack",
-        "Connect Request" => "connect_request",
-        "Connect Confirm" => "connect_confirm",
-        "Disconnect Request" | "Disconnect Confirm" => "disconnect",
-        "Data" => "transport_data",
-        _ => "transport_control",
-    };
-    (
-        class,
-        json!(["vdl2", "avlc", "x25", "clnp", "cotp"]),
-        cotp_summary(cotp),
-        Value::Null,
-        transport,
-    )
 }
 
-fn cotp_transport(cotp: &Value) -> Value {
-    json!({
-        "type": cotp.get("tpdu_type").cloned().unwrap_or(Value::Null),
-        "dst_ref": cotp.get("dst_ref").cloned().unwrap_or(Value::Null),
-        "src_ref": cotp.get("src_ref").cloned().unwrap_or(Value::Null),
-        "sseq": cotp.get("sseq").cloned().unwrap_or(Value::Null),
-        "rseq": cotp.get("rseq").cloned().unwrap_or(Value::Null),
-        "credit": cotp.get("credit").cloned().unwrap_or(Value::Null),
-        "eot": cotp.get("eot").cloned().unwrap_or(Value::Null),
+pub trait ExtractKinematics {
+    fn kinematics(&self) -> Option<Kinematics>;
+}
+
+impl From<&CpdlcPosition> for Option<Position> {
+    fn from(pos: &CpdlcPosition) -> Self {
+        match pos {
+            CpdlcPosition::LatitudeLongitude {
+                latitude,
+                longitude,
+            } => Some(Position {
+                latitude: *latitude,
+                longitude: *longitude,
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl ExtractKinematics for CpdlcPosition {
+    fn kinematics(&self) -> Option<Kinematics> {
+        Option::<Position>::from(self).map(|position| Kinematics {
+            position: Some(position),
+            derived_from: Some("cpdlc".into()),
+            ..Default::default()
+        })
+    }
+}
+
+impl ExtractKinematics for CpdlcAltitude {
+    fn kinematics(&self) -> Option<Kinematics> {
+        let alt = match self {
+            CpdlcAltitude::FlightLevel(fl) => Some(*fl as i32 * 100),
+            CpdlcAltitude::QnhFeet(ft) | CpdlcAltitude::QfeFeet(ft) => Some(*ft as i32),
+            CpdlcAltitude::GnssFeet(ft) => Some(*ft as i32),
+            CpdlcAltitude::FlightLevelMetric(fl) => Some((*fl as i32 * 100000) / 3048),
+            CpdlcAltitude::QnhMeters(m) | CpdlcAltitude::QfeMeters(m) => {
+                Some((*m as i32 * 10000) / 3048)
+            }
+            CpdlcAltitude::GnssMeters(m) => Some((*m as i32 * 10000) / 3048),
+        };
+        alt.map(|altitude_ft| Kinematics {
+            altitude_ft: Some(altitude_ft),
+            derived_from: Some("cpdlc".into()),
+            ..Default::default()
+        })
+    }
+}
+
+impl ExtractKinematics for CpdlcPositionReport {
+    fn kinematics(&self) -> Option<Kinematics> {
+        let position = Option::<Position>::from(&self.current_position);
+        let altitude_ft = self.altitude.kinematics().and_then(|k| k.altitude_ft);
+        let track = self.true_heading.as_ref().map(|deg| match deg {
+            CpdlcDegrees::True(v) | CpdlcDegrees::Magnetic(v) => *v as f64,
+        });
+
+        if position.is_some() || altitude_ft.is_some() {
+            Some(Kinematics {
+                position,
+                altitude_ft,
+                track,
+                ground_speed_knots: self.ground_speed_knots,
+                derived_from: Some("cpdlc_position_report".into()),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl ExtractKinematics for AdscBasicReport {
+    fn kinematics(&self) -> Option<Kinematics> {
+        Some(Kinematics {
+            position: Some(Position {
+                latitude: self.latitude,
+                longitude: self.longitude,
+            }),
+            altitude_ft: Some(self.altitude_ft),
+            derived_from: Some("adsc_basic".into()),
+            ..Default::default()
+        })
+    }
+}
+
+impl ExtractKinematics for AdscEarthAirReference {
+    fn kinematics(&self) -> Option<Kinematics> {
+        Some(Kinematics {
+            track: (!self.heading_invalid).then_some(self.heading_or_track_degrees),
+            derived_from: Some("adsc_earth_air".into()),
+            ..Default::default()
+        })
+    }
+}
+
+impl ExtractKinematics for CpdlcElementBody {
+    fn kinematics(&self) -> Option<Kinematics> {
+        match self {
+            Self::PositionReport(pr) => pr.kinematics(),
+            Self::Position(p) => p.kinematics(),
+            Self::PositionAltitude { position, altitude }
+            | Self::AltitudePosition { altitude, position } => {
+                merge_cpdlc_kinematics(position, altitude)
+            }
+            Self::PositionDistanceOffsetDirection { position, .. }
+            | Self::PositionIcaoUnitNameFrequency { position, .. }
+            | Self::PositionTime { position, .. }
+            | Self::PositionTimeTime { position, .. }
+            | Self::PositionSpeedSpeed { position, .. } => position.kinematics(),
+            Self::TimePositionAltitude {
+                position, altitude, ..
+            }
+            | Self::PositionTimeAltitude {
+                position, altitude, ..
+            }
+            | Self::TimePositionAltitudeSpeed {
+                position, altitude, ..
+            }
+            | Self::PositionAltitudeSpeed {
+                position, altitude, ..
+            } => merge_cpdlc_kinematics(position, altitude),
+            Self::PositionPosition { positions } => positions.first()?.kinematics(),
+            _ => None,
+        }
+    }
+}
+
+fn merge_cpdlc_kinematics(
+    position: &CpdlcPosition,
+    altitude: &CpdlcAltitude,
+) -> Option<Kinematics> {
+    let k = position.kinematics().or_else(|| altitude.kinematics())?;
+    Some(Kinematics {
+        altitude_ft: altitude
+            .kinematics()
+            .and_then(|ak| ak.altitude_ft)
+            .or(k.altitude_ft),
+        derived_from: Some("cpdlc".into()),
+        ..k
     })
 }
 
-fn cotp_summary(cotp: &Value) -> String {
-    match cotp
-        .get("tpdu_type")
-        .and_then(Value::as_str)
-        .unwrap_or("COTP")
-    {
-        "Data Ack" => format!(
-            "COTP Data Ack: acknowledged sequence {}, credit {}",
-            display_field(cotp, "rseq"),
-            display_field(cotp, "credit")
-        ),
-        "Data" => "COTP Data TPDU with no decoded ATN application payload".into(),
-        typ => format!("COTP {typ}"),
-    }
-}
-
-fn acars_stack(raw: &Value) -> Value {
-    if raw.get("data").and_then(|d| d.get("Arinc622")).is_some() {
-        let imi = raw
-            .pointer("/data/Arinc622/imi")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        match imi {
-            "AT1" | "CR1" | "CC1" | "DR1" => json!(["acars", "arinc622", "fans1a_cpdlc"]),
-            "ADS" => json!(["acars", "arinc622", "ads_c"]),
-            _ => json!(["acars", "arinc622"]),
-        }
-    } else {
-        json!(["acars"])
-    }
-}
-
-fn acars_message_class(raw: &Value) -> &'static str {
-    match raw.get("data") {
-        Some(Value::String(s)) if s == "None" => "empty_acars",
-        Some(Value::Object(_)) => "app_message",
-        _ => "app_message",
-    }
-}
-
-fn acars_app(raw: &Value) -> Value {
-    let Some(data) = raw.get("data") else {
-        return Value::Null;
-    };
-    if data == "None" {
-        return Value::Null;
-    }
-    if let Some(arinc) = data.get("Arinc622") {
-        let imi = arinc
-            .get("imi")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let protocol = match imi {
-            "AT1" | "CR1" | "CC1" | "DR1" => "fans1a_cpdlc",
-            "ADS" => "ads_c",
-            _ => "arinc622",
-        };
-        return json!({
-            "protocol": protocol,
-            "standard": "ARINC 622",
-            "imi": imi,
-            "payload": arinc.get("payload").cloned().unwrap_or(Value::Null),
-        });
-    }
-    if let Some(obj) = data.as_object() {
-        if let Some((variant, value)) = obj.iter().next() {
-            return json!({"protocol": variant.to_ascii_lowercase(), "payload": value});
+impl ExtractKinematics for AdscTag {
+    fn kinematics(&self) -> Option<Kinematics> {
+        match self {
+            Self::BasicReport(rep)
+            | Self::EmergencyBasicReport(rep)
+            | Self::LateralDeviationChangeEvent(rep)
+            | Self::VerticalRateChangeEvent(rep)
+            | Self::AltitudeRangeEvent(rep)
+            | Self::WaypointChangeEvent(rep) => rep.kinematics(),
+            Self::EarthReferenceData(erd) => erd.kinematics(),
+            _ => None,
         }
     }
-    data.clone()
 }
 
-fn acars_summary(raw: &Value) -> String {
-    let label = raw.get("label").and_then(Value::as_str).unwrap_or("??");
-    let tail = raw
-        .get("tail")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown tail");
-    if let Some(arinc) = raw.get("data").and_then(|d| d.get("Arinc622")) {
-        let imi = arinc
-            .get("imi")
-            .and_then(Value::as_str)
-            .unwrap_or("ARINC 622");
-        return format!("ACARS {label} {imi} from/to {tail}");
-    }
-    match raw.get("data") {
-        Some(Value::String(s)) if s == "None" => {
-            format!("Empty ACARS label {label} from/to {tail}")
-        }
-        Some(Value::Object(obj)) => {
-            let variant = obj.keys().next().map(String::as_str).unwrap_or("payload");
-            format!("ACARS label {label} {variant} from/to {tail}")
-        }
-        _ => format!("ACARS label {label} from/to {tail}"),
-    }
-}
-
-fn atn_cpdlc_summary(cpdlc: &Value) -> String {
-    let parts: Vec<String> = cpdlc
-        .get("elements")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(cpdlc_element_summary)
-        .collect();
-    if parts.is_empty() {
-        "ATN B1 CPDLC message".into()
-    } else {
-        format!("ATN B1 CPDLC: {}", parts.join("; "))
-    }
-}
-
-fn compact_cpdlc_elements(cpdlc: &Value) -> Value {
-    Value::Array(
-        cpdlc
-            .get("elements")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|e| {
-                json!({
-                    "id": e.get("id").cloned().unwrap_or(Value::Null),
-                    "name": e.get("name").cloned().unwrap_or(Value::Null),
-                    "summary": cpdlc_element_summary(e),
-                    "body": e.get("body").cloned().unwrap_or(Value::Null),
-                })
+impl ExtractKinematics for AocPositionMessage {
+    fn kinematics(&self) -> Option<Kinematics> {
+        if let (Some(lat), Some(lon)) = (self.latitude, self.longitude) {
+            Some(Kinematics {
+                position: Some(Position {
+                    latitude: lat,
+                    longitude: lon,
+                }),
+                altitude_ft: self.altitude_ft,
+                track: self.heading_deg.map(f64::from),
+                derived_from: Some(self.format.clone()),
+                ..Default::default()
             })
-            .collect(),
-    )
-}
-
-fn cpdlc_element_summary(e: &Value) -> String {
-    let name = e
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("CPDLC element");
-    if let Some(text) = e.pointer("/body/free_text").and_then(Value::as_str) {
-        return format!("{name}: {text}");
-    }
-    if let Some(fac) = e.pointer("/body/facility/ICAO").and_then(Value::as_str) {
-        return format!("{name}: {fac}");
-    }
-    if let Some(unit) = e.pointer("/body/icao_unit") {
-        let freq = e
-            .pointer("/body/frequency")
-            .map(short_json)
-            .unwrap_or_default();
-        return format!("{name}: {} {freq}", short_json(unit));
-    }
-    if let Some(t) = e.get("template").and_then(Value::as_str) {
-        return format!("{name}: {t}");
-    }
-    name.to_string()
-}
-
-fn copy_common(raw: &Value, out: &mut Map<String, Value>) {
-    for key in ["timestamp", "frame", "metadata"] {
-        copy_if_present(raw, out, key);
+        } else {
+            None
+        }
     }
 }
 
-fn copy_if_present(raw: &Value, out: &mut Map<String, Value>, key: &str) {
-    if let Some(v) = raw.get(key) {
-        out.insert(key.to_string(), v.clone());
+impl ExtractKinematics for Label32Message {
+    fn kinematics(&self) -> Option<Kinematics> {
+        if let (Some(lat), Some(lon)) = (self.latitude, self.longitude) {
+            Some(Kinematics {
+                position: Some(Position {
+                    latitude: lat,
+                    longitude: lon,
+                }),
+                altitude_ft: self.altitude_ft,
+                track: self.heading_deg.map(f64::from),
+                derived_from: Some("label32".into()),
+                ..Default::default()
+            })
+        } else {
+            None
+        }
     }
 }
 
-fn maybe_raw(out: &mut Value, raw: Value, include_raw: bool) {
-    if include_raw {
-        out.as_object_mut()
-            .unwrap()
-            .insert("raw_decode".into(), raw);
+impl ExtractKinematics for SquitterMessage {
+    fn kinematics(&self) -> Option<Kinematics> {
+        if let (Some(lat), Some(lon)) = (self.latitude, self.longitude) {
+            Some(Kinematics {
+                position: Some(Position {
+                    latitude: lat,
+                    longitude: lon,
+                }),
+                derived_from: Some("squitter".into()),
+                ..Default::default()
+            })
+        } else {
+            None
+        }
     }
 }
 
-fn val_u64(v: &Value, key: &str) -> Option<u64> {
-    v.get(key).and_then(Value::as_u64)
+impl ExtractKinematics for OooiOffDestination {
+    fn kinematics(&self) -> Option<Kinematics> {
+        Some(Kinematics {
+            derived_from: Some("oooi_qf".into()),
+            ..Default::default()
+        })
+    }
 }
 
-fn display_field(v: &Value, key: &str) -> String {
-    v.get(key).map(short_json).unwrap_or_else(|| "?".into())
+impl ExtractKinematics for OooiOffReport {
+    fn kinematics(&self) -> Option<Kinematics> {
+        Some(Kinematics {
+            derived_from: Some("oooi_qq".into()),
+            ..Default::default()
+        })
+    }
 }
 
-fn short_json(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        other => serde_json::to_string(other).unwrap_or_else(|_| "?".into()),
+impl ExtractKinematics for AcarsAppPayload {
+    fn kinematics(&self) -> Option<Kinematics> {
+        match self {
+            Self::AocPosition(p) => p.kinematics(),
+            Self::Label32(p) => p.kinematics(),
+            Self::Squitter(p) => p.kinematics(),
+            Self::OooiOffDestination(p) => p.kinematics(),
+            Self::OooiOffReport(p) => p.kinematics(),
+            Self::Arinc622(arinc) => match &arinc.payload {
+                crate::decode::payload::arinc622::Payload::Adsc(adsc) => {
+                    adsc.tags.iter().find_map(|t| t.kinematics())
+                }
+                crate::decode::payload::arinc622::Payload::Cpdlc(cpdlc) => {
+                    let summaries = [cpdlc.uplink.as_ref(), cpdlc.downlink.as_ref()];
+                    summaries
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|s| &s.elements)
+                        .find_map(|e| e.body.as_ref().and_then(|b| b.kinematics()))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+impl ExtractKinematics for AcarsMessage {
+    fn kinematics(&self) -> Option<Kinematics> {
+        self.app.kinematics()
+    }
+}
+
+impl ExtractKinematics for AvlcFrame {
+    fn kinematics(&self) -> Option<Kinematics> {
+        if let Some(AvlcPayload::Acars(msg)) = &self.payload {
+            msg.kinematics()
+        } else {
+            None
+        }
+    }
+}
+
+impl ExtractKinematics for HfdlMessage {
+    fn kinematics(&self) -> Option<Kinematics> {
+        if let HfdlPdu::Mpdu(Mpdu::Downlink(dl)) = &self.pdu {
+            for lpdu in &dl.lpdus {
+                if let LpduData::Hfnpdu { hfnpdu } = &lpdu.data {
+                    match &hfnpdu.data {
+                        crate::decode::hfdl::Hfnpdu::Performance { performance } => {
+                            return Some(Kinematics {
+                                position: Some(Position {
+                                    latitude: performance.position.lat,
+                                    longitude: performance.position.lon,
+                                }),
+                                derived_from: Some("hfdl_performance".into()),
+                                ..Default::default()
+                            });
+                        }
+                        crate::decode::hfdl::Hfnpdu::Frequency { frequency_data } => {
+                            return Some(Kinematics {
+                                position: Some(Position {
+                                    latitude: frequency_data.position.lat,
+                                    longitude: frequency_data.position.lon,
+                                }),
+                                derived_from: Some("hfdl_frequency".into()),
+                                ..Default::default()
+                            });
+                        }
+                        crate::decode::hfdl::Hfnpdu::Acars { acars } => {
+                            if let Some(kin) = acars.kinematics() {
+                                return Some(kin);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        None
     }
 }

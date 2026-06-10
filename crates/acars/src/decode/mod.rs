@@ -34,4 +34,6 @@ pub enum DecodeError {
     Deku(String),
     #[error("invalid VDL frame")]
     InvalidVdlFrame,
+    #[error("invalid HFDL frame: {0}")]
+    InvalidHfdlFrame(String),
 }

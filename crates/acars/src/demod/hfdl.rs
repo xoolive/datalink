@@ -181,6 +181,50 @@ impl HfdlDemodConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum HfdlEvent {
+    FrameSyncCandidate {
+        bearer: String,
+        channel_khz: f64,
+        carrier_offset_hz: f64,
+        seconds_into_recording: f64,
+        a1_correlation: f64,
+        a2_correlation: f64,
+        m1_correlation: f64,
+        m2_correlation: f64,
+        training_correlation: f64,
+        m1: usize,
+        residual_hz: f64,
+        sample_phase: usize,
+        carrier_phase_rad: f64,
+    },
+    PreambleACandidate {
+        bearer: String,
+        channel_khz: f64,
+        carrier_offset_hz: f64,
+        seconds_into_recording: f64,
+        correlation: f64,
+        residual_hz: f64,
+        sample_phase: usize,
+        carrier_phase_rad: f64,
+    },
+    Activity {
+        bearer: String,
+        channel_khz: f64,
+        carrier_offset_hz: f64,
+        seconds_into_recording: f64,
+        snr_db: f64,
+    },
+    ScanWindow {
+        bearer: String,
+        channel_khz: f64,
+        carrier_offset_hz: f64,
+        seconds_into_recording: f64,
+        snr_db: f64,
+    },
+}
+
 /// One-shot HFDL acquisition diagnostic for a single channel.
 pub fn diagnose_channel(
     samples: &[Complex<f32>],

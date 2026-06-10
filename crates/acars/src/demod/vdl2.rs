@@ -25,6 +25,7 @@ use std::io::{BufWriter, Write};
 use desperado::dsp::chebyshev::Chebyshev2Lpf;
 use desperado::dsp::downsample::EveryN;
 use desperado::dsp::nco::Nco;
+use serde::Serialize;
 
 pub const SYMBOL_RATE: u32 = 10_500;
 /// Samples per symbol in the decimated domain.
@@ -346,6 +347,39 @@ enum DecState {
     Data,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum Vdl2Event {
+    SyncFound {
+        sample_index: u64,
+        seconds_into_recording: f64,
+    },
+    DeinterleaveDataError {
+        sample_index: u64,
+        seconds_into_recording: f64,
+        datalen_bits: u32,
+    },
+    DeinterleaveFecError {
+        sample_index: u64,
+        seconds_into_recording: f64,
+        datalen_bits: u32,
+    },
+    RsDecodeError {
+        sample_index: u64,
+        seconds_into_recording: f64,
+        datalen_bits: u32,
+        block: usize,
+    },
+    BurstDecoded {
+        sample_index: u64,
+        seconds_into_recording: f64,
+        datalen_bits: u32,
+        datalen_octets: u32,
+        num_blocks: u32,
+        raw_frames: usize,
+    },
+}
+
 /// A decoded AVLC frame together with physical-layer metadata.
 pub struct DemodFrame {
     /// Raw frame bytes (including 2-byte FCS).
@@ -569,11 +603,10 @@ impl Vdl2Channel {
                 }
 
                 if self.got_sync() {
-                    self.trace_event(serde_json::json!({
-                        "event": "sync_found",
-                        "sample_index": self.sample_index,
-                        "seconds_into_recording": self.seconds_into_recording(),
-                    }));
+                    self.trace_event(Vdl2Event::SyncFound {
+                        sample_index: self.sample_index,
+                        seconds_into_recording: self.seconds_into_recording(),
+                    });
                     self.demod_state = DemodState::Sync;
                 }
                 Vec::new()
@@ -784,12 +817,11 @@ impl Vdl2Channel {
 
                 let mut rs_tab = vec![[0u8; RS_N]; nb];
                 if deinterleave(&data_bytes, nb, RS_N, &mut rs_tab, RS_K, 0).is_err() {
-                    self.trace_event(serde_json::json!({
-                        "event": "deinterleave_data_error",
-                        "sample_index": self.sample_index,
-                        "seconds_into_recording": self.seconds_into_recording(),
-                        "datalen_bits": self.datalen,
-                    }));
+                    self.trace_event(Vdl2Event::DeinterleaveDataError {
+                        sample_index: self.sample_index,
+                        seconds_into_recording: self.seconds_into_recording(),
+                        datalen_bits: self.datalen,
+                    });
                     self.demod_reset();
                     return Vec::new();
                 }
@@ -799,12 +831,11 @@ impl Vdl2Channel {
                     nb
                 };
                 if deinterleave(&fec_bytes, fec_rows, RS_N, &mut rs_tab, RS_NROOTS, RS_K).is_err() {
-                    self.trace_event(serde_json::json!({
-                        "event": "deinterleave_fec_error",
-                        "sample_index": self.sample_index,
-                        "seconds_into_recording": self.seconds_into_recording(),
-                        "datalen_bits": self.datalen,
-                    }));
+                    self.trace_event(Vdl2Event::DeinterleaveFecError {
+                        sample_index: self.sample_index,
+                        seconds_into_recording: self.seconds_into_recording(),
+                        datalen_bits: self.datalen,
+                    });
                     self.demod_reset();
                     return Vec::new();
                 }
@@ -821,13 +852,12 @@ impl Vdl2Channel {
                     let erasures: Vec<usize> = (RS_K + n_fec..RS_N).take(erasure_cnt).collect();
 
                     if self.rs.decode(&mut rs_tab[r], &erasures).is_none() {
-                        self.trace_event(serde_json::json!({
-                            "event": "rs_decode_error",
-                            "sample_index": self.sample_index,
-                            "seconds_into_recording": self.seconds_into_recording(),
-                            "datalen_bits": self.datalen,
-                            "block": r,
-                        }));
+                        self.trace_event(Vdl2Event::RsDecodeError {
+                            sample_index: self.sample_index,
+                            seconds_into_recording: self.seconds_into_recording(),
+                            datalen_bits: self.datalen,
+                            block: r,
+                        });
                         self.demod_reset();
                         return Vec::new();
                     }
@@ -853,15 +883,14 @@ impl Vdl2Channel {
 
                 // HDLC bit-destuffing: extract one or more AVLC frames.
                 let raw_frames = hdlc_destuff(&bit_stream);
-                self.trace_event(serde_json::json!({
-                    "event": "burst_decoded",
-                    "sample_index": self.sample_index,
-                    "seconds_into_recording": self.seconds_into_recording(),
-                    "datalen_bits": self.datalen,
-                    "datalen_octets": self.datalen_octets,
-                    "num_blocks": self.num_blocks,
-                    "raw_frames": raw_frames.len(),
-                }));
+                self.trace_event(Vdl2Event::BurstDecoded {
+                    sample_index: self.sample_index,
+                    seconds_into_recording: self.seconds_into_recording(),
+                    datalen_bits: self.datalen,
+                    datalen_octets: self.datalen_octets,
+                    num_blocks: self.num_blocks,
+                    raw_frames: raw_frames.len(),
+                });
 
                 // Capture signal metadata before reset clears frame_pwr.
                 let signal_dbfs = 10.0 * self.frame_pwr.max(1e-20_f32).log10();
@@ -893,7 +922,7 @@ impl Vdl2Channel {
         self.sample_index as f64 / self.sample_rate_hz as f64
     }
 
-    fn trace_event(&mut self, event: serde_json::Value) {
+    fn trace_event(&mut self, event: Vdl2Event) {
         let sec = self.seconds_into_recording();
         if let Some(t) = self.trace.as_mut() {
             if let Some(s) = t.window_start_sec {
@@ -906,7 +935,7 @@ impl Vdl2Channel {
                     return;
                 }
             }
-            let _ = writeln!(t.writer, "{}", event);
+            let _ = writeln!(t.writer, "{}", serde_json::to_string(&event).unwrap());
         }
     }
 

@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 
 use acars::decode::acars::MessageDirection;
 use acars::decode::payload::arinc622::{parse_with_direction, Payload};
-use serde_json::Value;
+use serde::Deserialize;
 
 #[derive(Default)]
 struct Counts(BTreeMap<String, usize>);
@@ -22,6 +22,18 @@ impl Counts {
             eprintln!("  {k}: {v}");
         }
     }
+}
+
+#[derive(Deserialize)]
+struct AirframesRow {
+    data: AirframesData,
+}
+
+#[derive(Deserialize)]
+struct AirframesData {
+    label: Option<String>,
+    text: Option<String>,
+    link_direction: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -41,11 +53,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for line in reader.lines() {
         rows += 1;
-        let value: Value = serde_json::from_str(&line?)?;
-        let data = &value["data"];
-        let label = data["label"].as_str().unwrap_or("<null>");
+        let row: AirframesRow = serde_json::from_str(&line?)?;
+        let data = row.data;
+        let label = data.label.as_deref().unwrap_or("<null>");
         labels.inc(label);
-        let Some(text) = data["text"].as_str() else {
+        let Some(text) = data.text.as_deref() else {
             continue;
         };
         text_rows += 1;
@@ -54,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         imis.inc(imi);
         let arinc_text = normalize_arinc622_text(text);
-        let direction = infer_direction(label, text, data["link_direction"].as_str());
+        let direction = infer_direction(label, text, data.link_direction.as_deref());
         match parse_with_direction(&arinc_text, direction) {
             Ok(msg) => match msg.payload {
                 Payload::Adsc(_) => ads_ok += 1,

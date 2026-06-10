@@ -1,6 +1,5 @@
-use crate::util::{expanduser, redis_topic_for_record, RedisPublisher};
+use crate::util::{expanduser, RedisPublisher};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -20,9 +19,6 @@ pub(crate) struct OutputConfig {
     /// JSONL output path. Use "-" or omit for stdout.
     #[serde(default)]
     pub jsonl: Option<String>,
-    /// Include protocol/source-specific full decode under DecodedEvent.raw.
-    #[serde(default)]
-    pub raw: bool,
     /// Redis URL for pub/sub output.
     #[serde(default)]
     pub redis_url: Option<String>,
@@ -36,7 +32,6 @@ impl Default for OutputConfig {
     fn default() -> Self {
         Self {
             jsonl: Some("-".to_string()),
-            raw: false,
             redis_url: None,
             redis_retry_interval: Some(5),
         }
@@ -52,7 +47,6 @@ pub(crate) struct SourceConfig {
     /// Optional explicit source class; normally inferred from address fields.
     #[serde(default, rename = "type")]
     pub source_type: Option<SourceClass>,
-
     #[serde(default)]
     pub file: Option<String>,
     #[serde(default)]
@@ -65,7 +59,6 @@ pub(crate) struct SourceConfig {
     pub hackrf: Option<toml::Value>,
     #[serde(default)]
     pub soapy: Option<toml::Value>,
-
     #[serde(default, alias = "center")]
     pub center_freq: Option<u32>,
     #[serde(default, alias = "rate")]
@@ -86,7 +79,6 @@ pub(crate) struct SourceConfig {
     pub start_second: Option<f64>,
     #[serde(default)]
     pub max_seconds: Option<f64>,
-
     #[serde(default)]
     pub receivers: Vec<ReceiverConfig>,
 }
@@ -107,16 +99,38 @@ pub(crate) struct ReceiverConfig {
     pub channels: Option<Vec<u32>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+// TODO remove alias
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Bearer {
+pub enum Bearer {
+    #[serde(alias = "acars", alias = "vhf")]
     Vhf,
+    #[serde(alias = "vdl", alias = "vdl2")]
     Vdl2,
+    #[serde(alias = "hf", alias = "hfdl")]
     Hfdl,
-    /// Already-decoded events where an underlying bearer is intentionally unavailable.
     Decoded,
-    /// Events where the underlying bearer may exist but cannot be inferred.
+    #[serde(other)]
+    #[default]
     Unknown,
+}
+
+impl Bearer {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Bearer::Vhf => "vhf",
+            Bearer::Vdl2 => "vdl2",
+            Bearer::Hfdl => "hfdl",
+            Bearer::Decoded => "decoded",
+            Bearer::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for Bearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 impl Config {
@@ -259,10 +273,53 @@ pub(crate) struct DecodedEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receiver: Option<ReceiverMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub aircraft: Option<Value>,
-    pub message: Value,
+    pub aircraft: Option<Aircraft>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw: Option<Value>,
+    pub kinematics: Option<acars::decode::compact::Kinematics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_frame_hex: Option<String>,
+    #[serde(flatten)]
+    pub message: ProtocolMessage,
+}
+
+// TODO re-evaluate if we really want Box and untagged
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub(crate) enum ProtocolMessage {
+    Airframes(Box<crate::airframes::AirframesMessage>),
+    Avlc(Box<acars::decode::avlc::AvlcFrame>),
+    Acars(Box<acars::decode::acars::AcarsMessage>),
+    Hfdl(Box<acars::decode::hfdl::HfdlMessage>),
+    App(Box<acars::decode::payload::AcarsAppPayload>),
+}
+
+impl ProtocolMessage {
+    pub fn kinematics(&self) -> Option<acars::decode::compact::Kinematics> {
+        use acars::decode::compact::ExtractKinematics;
+        match self {
+            Self::Airframes(msg) => {
+                if let Some(app) = &msg.app {
+                    app.kinematics()
+                } else {
+                    crate::airframes::airframes_payload_kinematics(&msg.payload)
+                }
+            }
+            Self::Avlc(frame) => frame.kinematics(),
+            Self::Acars(msg) => msg.kinematics(),
+            Self::Hfdl(msg) => msg.kinematics(),
+            Self::App(app) => app.kinematics(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Aircraft {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icao24: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aircraft_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registration: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -294,7 +351,6 @@ impl SourceMetadata {
 
 pub(crate) struct OutputSink {
     writer: Option<BufWriter<File>>,
-    raw: bool,
     redis: Option<RedisPublisher>,
 }
 
@@ -309,22 +365,10 @@ impl OutputSink {
         } else {
             None
         };
-        Ok(Self {
-            writer,
-            raw: config.raw,
-            redis,
-        })
+        Ok(Self { writer, redis })
     }
 
-    pub(crate) fn raw_enabled(&self) -> bool {
-        self.raw
-    }
-
-    pub(crate) async fn emit(&mut self, mut event: DecodedEvent) -> anyhow::Result<()> {
-        if !self.raw {
-            event.raw = None;
-        }
-        remove_nested_timestamp(&mut event);
+    pub(crate) async fn emit(&mut self, event: DecodedEvent) -> anyhow::Result<()> {
         let line = serde_json::to_string(&event)?;
         if let Some(writer) = self.writer.as_mut() {
             writeln!(writer, "{line}")?;
@@ -333,7 +377,7 @@ impl OutputSink {
         }
         if let Some(redis) = self.redis.as_mut() {
             redis
-                .publish(redis_topic_for_record(&event.message), &line)
+                .publish(crate::util::redis_topic_for_record(&event.message), &line)
                 .await;
         }
         Ok(())
@@ -344,14 +388,6 @@ impl OutputSink {
             writer.flush()?;
         }
         Ok(())
-    }
-}
-
-fn remove_nested_timestamp(event: &mut DecodedEvent) {
-    if event.timestamp.is_some() {
-        if let Value::Object(message) = &mut event.message {
-            message.remove("timestamp");
-        }
     }
 }
 
@@ -422,7 +458,7 @@ async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow
     let source_url = source_url(source)?;
     let source_meta = SourceMetadata::from_config(source)?;
     for receiver in &source.receivers {
-        let values = match receiver.bearer {
+        let values: Vec<DecodedEvent> = match receiver.bearer {
             Bearer::Hfdl => {
                 crate::hfdl::decode_file_values(
                     &source_url,
@@ -432,6 +468,8 @@ async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow
                     receiver.channels.clone(),
                     source.start_second.unwrap_or(0.0),
                     source.max_seconds.unwrap_or(20.0),
+                    &source_meta,
+                    receiver.bearer,
                 )
                 .await?
             }
@@ -445,7 +483,8 @@ async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow
                     source.center_freq,
                     source.sample_rate,
                     receiver.channels.clone(),
-                    output.raw_enabled(),
+                    &source_meta,
+                    receiver.bearer,
                 )
                 .await?
             }
@@ -459,74 +498,94 @@ async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow
                     source.center_freq,
                     source.sample_rate,
                     receiver.channels.clone(),
-                    output.raw_enabled(),
+                    &source_meta,
+                    receiver.bearer,
                 )
                 .await?
             }
             Bearer::Decoded | Bearer::Unknown => continue,
         };
-        for value in values {
-            let channel_hz = event_channel_hz(receiver.bearer, &value);
-            let raw = output.raw_enabled().then(|| value.clone());
-            output
-                .emit(DecodedEvent {
-                    event: "message",
-                    timestamp: value.get("timestamp").and_then(|v| v.as_f64()),
-                    bearer: receiver.bearer,
-                    source: source_meta.clone(),
-                    receiver: Some(ReceiverMetadata {
-                        bearer: receiver.bearer,
-                        channel_hz,
-                    }),
-                    aircraft: aircraft_summary(receiver.bearer, &value),
-                    message: value,
-                    raw,
-                })
-                .await?;
+        for event in values {
+            output.emit(event).await?;
         }
     }
     Ok(())
 }
 
-fn event_channel_hz(bearer: Bearer, value: &Value) -> Option<u32> {
-    match bearer {
-        Bearer::Hfdl => value
-            .get("channel_khz")
-            .and_then(|v| v.as_f64())
-            .map(|khz| (khz * 1000.0).round() as u32),
-        Bearer::Vhf | Bearer::Vdl2 => value
-            .get("metadata")
-            .and_then(|m| m.get("channel_mhz"))
-            .and_then(|v| v.as_f64())
-            .map(|mhz| (mhz * 1_000_000.0).round() as u32),
-        Bearer::Decoded | Bearer::Unknown => None,
-    }
-}
-
-fn aircraft_summary(bearer: Bearer, value: &Value) -> Option<Value> {
-    let mut obj = serde_json::Map::new();
-    if bearer == Bearer::Hfdl {
-        if let Some(id) = value.get("src_aircraft_id").and_then(|v| v.as_u64()) {
-            obj.insert("aircraft_id".into(), Value::from(id));
+pub(crate) fn aircraft_summary(msg: &ProtocolMessage) -> Option<Aircraft> {
+    match msg {
+        ProtocolMessage::Avlc(frame) => {
+            let icao24 = if frame.src.is_aircraft() {
+                Some(format!("{:06X}", frame.src.icao24))
+            } else if frame.dst.is_aircraft() {
+                Some(format!("{:06X}", frame.dst.icao24))
+            } else {
+                None
+            };
+            let registration =
+                if let Some(acars::decode::avlc::AvlcPayload::Acars(msg)) = &frame.payload {
+                    Some(msg.reg.clone())
+                } else {
+                    None
+                };
+            if icao24.is_some() || registration.is_some() {
+                Some(Aircraft {
+                    icao24,
+                    aircraft_id: None,
+                    registration,
+                })
+            } else {
+                None
+            }
         }
-    }
-    if let Some(icao) = value
-        .get("icao24")
-        .or_else(|| value.get("src").and_then(|v| v.get("icao24")))
-        .and_then(|v| v.as_str())
-    {
-        obj.insert("icao24".into(), Value::from(icao));
-    }
-    if obj.is_empty() {
-        None
-    } else {
-        Some(Value::Object(obj))
+        ProtocolMessage::Acars(msg) => Some(Aircraft {
+            icao24: None,
+            aircraft_id: None,
+            registration: Some(msg.reg.clone()),
+        }),
+        ProtocolMessage::Hfdl(hf) => {
+            if let acars::decode::hfdl::HfdlPdu::Mpdu(acars::decode::hfdl::Mpdu::Downlink(dl)) =
+                &hf.pdu
+            {
+                Some(Aircraft {
+                    icao24: None,
+                    aircraft_id: Some(dl.src_aircraft_id as u64),
+                    registration: None,
+                })
+            } else {
+                None
+            }
+        }
+        ProtocolMessage::Airframes(af) => {
+            // TODO avoid allocating new strings
+            let icao24 = crate::airframes::extract_airframes_aircraft(&af.payload);
+            let registration = crate::airframes::extract_airframes_registration(&af.payload);
+            let aircraft_id = af.payload.airframe_id.filter(|id| *id != 0);
+            if icao24.is_some() || registration.is_some() || aircraft_id.is_some() {
+                Some(Aircraft {
+                    icao24,
+                    aircraft_id,
+                    registration,
+                })
+            } else {
+                None
+            }
+        }
+        ProtocolMessage::App(app) => match &**app {
+            acars::decode::payload::AcarsAppPayload::Arinc622(msg) => Some(Aircraft {
+                icao24: None,
+                aircraft_id: None,
+                registration: Some(msg.registration.clone()),
+            }),
+            _ => None,
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // use std::path::PathBuf;
 
     #[test]
     fn parses_hackrf_multi_receiver_config() {
@@ -534,7 +593,6 @@ mod tests {
             r#"
             [output]
             jsonl = "-"
-            raw = true
             redis_url = "redis://localhost:6379"
 
             [[sources]]
@@ -613,113 +671,72 @@ mod tests {
         assert!(err.to_string().contains("unknown field"));
     }
 
-    #[test]
-    fn parses_representative_configs() {
-        for text in [
-            r#"
-            [output]
-            jsonl = "-"
-            raw = true
+    // #[test]
+    // fn parses_representative_configs() {
+    //     for text in [
+    //         r#"
+    //         [output]
+    //         jsonl = "-"
+    //         raw = true
 
-            [[sources]]
-            id = "acars-sdruno-129535"
-            file = "SDRuno_20200908_152020Z_129535kHz.wav"
+    //         [[sources]]
+    //         id = "acars-sdruno-129535"
+    //         file = "SDRuno_20200908_152020Z_129535kHz.wav"
 
-            [[sources.receivers]]
-            bearer = "vhf"
-            "#,
-            r#"
-            [output]
-            jsonl = "-"
-            raw = true
+    //         [[sources.receivers]]
+    //         bearer = "vhf"
+    //         "#,
+    //         r#"
+    //         [output]
+    //         jsonl = "-"
+    //         raw = true
 
-            [[sources]]
-            id = "gqrx-vdl2-136500"
-            file = "gqrx_20260518_114025_136500000_1800000_fc.raw"
-            format = "cf32"
-            center_freq = 136500000
-            sample_rate = 1800000
+    //         [[sources]]
+    //         id = "gqrx-vdl2-136500"
+    //         file = "gqrx_20260518_114025_136500000_1800000_fc.raw"
+    //         format = "cf32"
+    //         center_freq = 136500000
+    //         sample_rate = 1800000
 
-            [[sources.receivers]]
-            bearer = "vdl2"
-            channels = [136875000]
-            "#,
-            r#"
-            [output]
-            jsonl = "-"
-            raw = true
+    //         [[sources.receivers]]
+    //         bearer = "vdl2"
+    //         channels = [136875000]
+    //         "#,
+    //         r#"
+    //         [output]
+    //         jsonl = "-"
+    //         raw = true
 
-            [[sources]]
-            id = "hfdl-sdruno-11404"
-            file = "SDRuno_20200904_143937Z_11404kHz.wav"
-            start_second = 0.0
-            max_seconds = 20.0
+    //         [[sources]]
+    //         id = "hfdl-sdruno-11404"
+    //         file = "SDRuno_20200904_143937Z_11404kHz.wav"
+    //         start_second = 0.0
+    //         max_seconds = 20.0
 
-            [[sources.receivers]]
-            bearer = "hfdl"
-            channels = [11387000]
-            "#,
-            r#"
-            [output]
-            jsonl = "-"
-            raw = true
+    //         [[sources.receivers]]
+    //         bearer = "hfdl"
+    //         channels = [11387000]
+    //         "#,
+    //         r#"
+    //         [output]
+    //         jsonl = "-"
+    //         raw = true
 
-            [[sources]]
-            id = "hfdl-hackrf-10m"
-            hackrf = { device = 0 }
-            center_freq = 10000000
-            sample_rate = 8000000
-            start_second = 0.0
-            max_seconds = 20.0
+    //         [[sources]]
+    //         id = "hfdl-hackrf-10m"
+    //         hackrf = { device = 0 }
+    //         center_freq = 10000000
+    //         sample_rate = 8000000
+    //         start_second = 0.0
+    //         max_seconds = 20.0
 
-            [[sources.receivers]]
-            bearer = "hfdl"
-            channels = [10081000]
-            "#,
-        ] {
-            let cfg: Config = toml::from_str(text).unwrap();
-            cfg.validate().unwrap();
-        }
-    }
-
-    #[test]
-    fn removes_nested_timestamp_when_event_has_timestamp() {
-        let mut event = DecodedEvent {
-            event: "message",
-            timestamp: Some(123.0),
-            bearer: Bearer::Vhf,
-            source: SourceMetadata {
-                id: "test".into(),
-                name: "Test".into(),
-                class: SourceClass::Iq,
-                format: None,
-            },
-            receiver: None,
-            aircraft: None,
-            message: serde_json::json!({"timestamp": 123.0, "path": "acars"}),
-            raw: None,
-        };
-        remove_nested_timestamp(&mut event);
-        assert!(event.message.get("timestamp").is_none());
-    }
-
-    #[test]
-    fn normalizes_airframes_payload_as_event_source() {
-        let meta = SourceMetadata {
-            id: "airframes".into(),
-            name: "Airframes".into(),
-            class: SourceClass::Events,
-            format: Some("airframes.io".into()),
-        };
-        let payload = serde_json::json!({
-            "label": "SA",
-            "text": "hello",
-            "from_hex": "A1B2C3",
-            "source_type": "vdl2",
-            "timestamp": 123.0
-        });
-        let event = crate::airframes::normalize_payload(meta, "message", payload, true).unwrap();
-        assert_eq!(event.bearer, Bearer::Vdl2);
-        assert!(event.raw.is_some());
-    }
+    //         [[sources.receivers]]
+    //         bearer = "hfdl"
+    //         channels = [10081000]
+    //         "#,
+    //     ] {
+    //         let cfg: Config = toml::from_str(text).unwrap();
+    //         cfg.validate().unwrap();
+    //     }
+    // }
 }

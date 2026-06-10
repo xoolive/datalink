@@ -5,11 +5,11 @@ use std::io::{BufRead, BufReader};
 
 use acars::decode::acars::MessageDirection;
 use acars::decode::payload::arinc622::cpdlc::{
-    parse_cpdlc_payload_hex_with_direction, CpdlcElementBody, CpdlcMessage, CpdlcPduSummary,
+    parse_cpdlc_payload_hex_with_direction, AtcMessageHeader, CpdlcControlMessage, CpdlcElement,
+    CpdlcElementBody, CpdlcMessage, CpdlcPduSummary,
 };
 use acars::decode::payload::arinc622::{parse_with_direction, Payload as Arinc622Payload};
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 struct FixtureRow {
@@ -39,6 +39,37 @@ struct Stats {
     control_counts: BTreeMap<&'static str, usize>,
 }
 
+#[derive(Serialize)]
+struct CandidateOutput<'a> {
+    direction: &'a str,
+    header: &'a AtcMessageHeader,
+    body_kind: &'static str,
+    elements: &'a [CpdlcElement],
+    remaining_bits_after_element: usize,
+}
+
+#[derive(Serialize)]
+struct OutputRow<'a> {
+    line: usize,
+    airframes_id: &'a str,
+    timestamp: &'a str,
+    tail: &'a str,
+    imi: &'a str,
+    label: &'a str,
+    direction_hint: String,
+    payload_hex: &'a str,
+    control: &'a Option<CpdlcControlMessage>,
+    candidates: Vec<CandidateOutput<'a>>,
+}
+
+#[derive(Serialize)]
+struct ErrorRow<'a> {
+    line: usize,
+    airframes_id: &'a str,
+    payload_hex: &'a str,
+    error: String,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = env::args()
         .nth(1)
@@ -59,15 +90,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(message) => {
                 let mut candidates = Vec::new();
                 if let Some(summary) = &message.downlink {
-                    candidates.push(candidate_json("downlink", summary, &mut stats));
+                    candidates.push(candidate_output("downlink", summary, &mut stats));
                 }
                 if let Some(summary) = &message.uplink {
-                    candidates.push(candidate_json("uplink", summary, &mut stats));
+                    candidates.push(candidate_output("uplink", summary, &mut stats));
                 }
                 let control_kind = message.control.as_ref().map(|control| match control {
-                    acars::decode::payload::arinc622::cpdlc::CpdlcControlMessage::ConnectRequest { .. } => "connect_request",
-                    acars::decode::payload::arinc622::cpdlc::CpdlcControlMessage::ConnectConfirm { .. } => "connect_confirm",
-                    acars::decode::payload::arinc622::cpdlc::CpdlcControlMessage::DisconnectRequest => "disconnect_request",
+                    CpdlcControlMessage::ConnectRequest { .. } => "connect_request",
+                    CpdlcControlMessage::ConnectConfirm { .. } => "connect_confirm",
+                    CpdlcControlMessage::DisconnectRequest => "disconnect_request",
                 });
                 if let Some(kind) = control_kind {
                     *stats.control_counts.entry(kind).or_default() += 1;
@@ -77,30 +108,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 println!(
                     "{}",
-                    serde_json::to_string(&json!({
-                        "line": line_no + 1,
-                        "airframes_id": row.airframes_id,
-                        "timestamp": row.timestamp,
-                        "tail": row.tail,
-                        "imi": row.imi,
-                        "label": row.label,
-                        "direction_hint": format!("{:?}", direction),
-                        "payload_hex": row.payload_hex,
-                        "control": message.control,
-                        "candidates": candidates,
-                    }))?
+                    serde_json::to_string(&OutputRow {
+                        line: line_no + 1,
+                        airframes_id: &row.airframes_id,
+                        timestamp: &row.timestamp,
+                        tail: &row.tail,
+                        imi: &row.imi,
+                        label: &row.label,
+                        direction_hint: format!("{:?}", direction),
+                        payload_hex: &row.payload_hex,
+                        control: &message.control,
+                        candidates,
+                    })?
                 );
             }
             Err(err) => {
                 stats.parse_errors += 1;
                 println!(
                     "{}",
-                    serde_json::to_string(&json!({
-                        "line": line_no + 1,
-                        "airframes_id": row.airframes_id,
-                        "payload_hex": row.payload_hex,
-                        "error": err.to_string(),
-                    }))?
+                    serde_json::to_string(&ErrorRow {
+                        line: line_no + 1,
+                        airframes_id: &row.airframes_id,
+                        payload_hex: &row.payload_hex,
+                        error: err.to_string(),
+                    })?
                 );
             }
         }
@@ -188,11 +219,11 @@ fn infer_direction(row: &FixtureRow) -> MessageDirection {
     }
 }
 
-fn candidate_json(
-    direction: &str,
-    summary: &CpdlcPduSummary,
+fn candidate_output<'a>(
+    direction: &'a str,
+    summary: &'a CpdlcPduSummary,
     stats: &mut Stats,
-) -> serde_json::Value {
+) -> CandidateOutput<'a> {
     stats.candidates += 1;
     if summary.remaining_bits_after_element != 0 {
         stats.remaining_bits_nonzero += 1;
@@ -226,13 +257,13 @@ fn candidate_json(
         }
     }
 
-    json!({
-        "direction": direction,
-        "header": summary.header,
-        "body_kind": first_body_kind,
-        "elements": summary.elements,
-        "remaining_bits_after_element": summary.remaining_bits_after_element,
-    })
+    CandidateOutput {
+        direction,
+        header: &summary.header,
+        body_kind: first_body_kind,
+        elements: &summary.elements,
+        remaining_bits_after_element: summary.remaining_bits_after_element,
+    }
 }
 
 fn body_kind(body: &CpdlcElementBody) -> &'static str {

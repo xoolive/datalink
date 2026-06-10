@@ -1,4 +1,4 @@
-use serde_json::Value;
+use crate::merged::ProtocolMessage;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -11,17 +11,50 @@ pub(crate) fn expanduser(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-pub(crate) fn unix_timestamp_value(value: &Value) -> Option<f64> {
-    if let Some(n) = value.as_f64() {
-        return Some(n);
+pub fn deserialize_timestamp<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct TsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for TsVisitor {
+        type Value = Option<f64>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a float or a timestamp string")
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+            Ok(Some(value))
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+            Ok(Some(value as f64))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            if let Ok(n) = value.parse::<f64>() {
+                Ok(Some(n))
+            } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
+                Ok(Some(dt.timestamp_micros() as f64 / 1_000_000.0))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D2: serde::Deserializer<'de>>(
+            self,
+            deserializer: D2,
+        ) -> Result<Self::Value, D2::Error> {
+            deserializer.deserialize_any(self)
+        }
     }
-    let s = value.as_str()?.trim();
-    if let Ok(n) = s.parse::<f64>() {
-        return Some(n);
-    }
-    chrono::DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|dt| dt.timestamp_micros() as f64 / 1_000_000.0)
+
+    deserializer.deserialize_any(TsVisitor)
 }
 
 pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -119,42 +152,48 @@ pub(crate) fn parse_airspy_serial(value: &str) -> anyhow::Result<u64> {
         .map_err(Into::into)
 }
 
-pub(crate) fn redis_topic_for_record(record: &Value) -> &'static str {
-    if value_contains_app(record, "cpdlc") {
-        "datalink-cpdlc"
-    } else if value_contains_app(record, "squitter")
-        || record.get("label").and_then(Value::as_str) == Some("SQ")
-        || value_contains_app(record, "sq")
-    {
-        "datalink-sq"
-    } else if value_contains_app(record, "acars")
-        || record.get("path").and_then(Value::as_str) == Some("acars")
-    {
-        "datalink-acars"
-    } else {
-        "datalink-other"
+pub(crate) fn redis_topic_for_record(record: &ProtocolMessage) -> &'static str {
+    match record {
+        ProtocolMessage::Avlc(frame) => {
+            if let Some(payload) = &frame.payload {
+                match payload {
+                    acars::decode::avlc::AvlcPayload::Acars(acars) => acars_redis_topic(&acars.app),
+                    acars::decode::avlc::AvlcPayload::X25(_) => "datalink-x25",
+                    acars::decode::avlc::AvlcPayload::Xid(_) => "datalink-xid",
+                    acars::decode::avlc::AvlcPayload::Unknown(_) => "datalink-unknown",
+                }
+            } else {
+                "datalink-vdl2"
+            }
+        }
+        ProtocolMessage::Acars(msg) => acars_redis_topic(&msg.app),
+        ProtocolMessage::Hfdl(_) => "datalink-hfdl",
+        ProtocolMessage::Airframes(af) => {
+            if let Some(app) = &af.app {
+                acars_redis_topic(app)
+            } else if af.payload.label.as_deref() == Some("SQ") {
+                "datalink-sq"
+            } else {
+                "datalink-acars"
+            }
+        }
+        ProtocolMessage::App(app) => acars_redis_topic(app),
     }
 }
 
-fn value_contains_app(value: &Value, needle: &str) -> bool {
-    match value {
-        Value::String(s) => s.to_ascii_lowercase().contains(needle),
-        Value::Array(values) => values.iter().any(|v| value_contains_app(v, needle)),
-        Value::Object(map) => map.iter().any(|(key, value)| {
-            matches!(
-                key.as_str(),
-                "app"
-                    | "protocol"
-                    | "protocol_stack"
-                    | "path"
-                    | "label"
-                    | "acars"
-                    | "hfnpdu"
-                    | "lpdus"
-                    | "aircraft"
-            ) && value_contains_app(value, needle)
-        }),
-        _ => false,
+// TODO maybe use a trait instead?
+fn acars_redis_topic(app: &acars::decode::payload::AcarsAppPayload) -> &'static str {
+    match app {
+        acars::decode::payload::AcarsAppPayload::Arinc622(arinc) => match arinc.imi {
+            acars::decode::payload::arinc622::Imi::At1
+            | acars::decode::payload::arinc622::Imi::Cr1
+            | acars::decode::payload::arinc622::Imi::Cc1
+            | acars::decode::payload::arinc622::Imi::Dr1 => "datalink-cpdlc",
+            acars::decode::payload::arinc622::Imi::Ads => "datalink-adsc",
+            _ => "datalink-acars",
+        },
+        acars::decode::payload::AcarsAppPayload::Squitter(_) => "datalink-sq",
+        _ => "datalink-acars",
     }
 }
 
@@ -215,8 +254,15 @@ mod tests {
 
     #[test]
     fn parses_airframes_timestamp() {
-        let value = Value::String("2026-05-22T08:37:19.050Z".into());
-        assert_eq!(unix_timestamp_value(&value), Some(1779439039.05));
+        use serde::Deserialize;
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_timestamp")]
+            ts: Option<f64>,
+        }
+        let json = r#"{"ts": "2026-05-22T08:37:19.050Z"}"#;
+        let w: Wrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(w.ts, Some(1779439039.05));
     }
 
     #[test]

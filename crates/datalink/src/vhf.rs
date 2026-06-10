@@ -1,19 +1,12 @@
 use crate::iq_pipeline::{collect_iq_frames, FrameContext, IqPipeline};
 use crate::source::{Address, Source};
-#[cfg(feature = "hackrf")]
-use crate::util::hackrf_gain;
-#[cfg(feature = "airspy")]
-use crate::util::parse_airspy_serial;
-use crate::util::{
-    bytes_to_hex, expanduser, infer_capture_params, redis_topic_for_record, RedisPublisher,
-};
+use crate::util::{bytes_to_hex, expanduser, infer_capture_params, RedisPublisher};
 use acars::decode::acars::{parse_acars_frame, MessageDirection};
 use acars::demod::resample::{maybe_resample, ResampleAdapter};
 use acars::demod::vhf::VhfChannel;
 use clap::Parser;
 use futures_util::StreamExt;
 use serde::Deserialize;
-use serde_json::Value;
 use std::time::SystemTime;
 
 const DEFAULT_CENTER_FREQ: u32 = 131_700_000;
@@ -55,8 +48,6 @@ pub(crate) struct Options {
     #[serde(default)]
     output: Option<String>,
     #[serde(default)]
-    raw: bool,
-    #[serde(default)]
     stats: bool,
     #[serde(default)]
     format: Option<String>,
@@ -80,9 +71,6 @@ pub(crate) struct Cli {
     /// Dump a copy of decoded messages as JSONL
     #[arg(short, long)]
     output: Option<String>,
-    /// Include the full nested decoder output under raw_decode
-    #[arg(long)]
-    raw: bool,
     /// Print demod/decode counters to stderr at end
     #[arg(long)]
     stats: bool,
@@ -112,9 +100,6 @@ impl Options {
     fn apply_cli_overrides(&mut self, cli: Cli) {
         if cli.output.is_some() {
             self.output = cli.output;
-        }
-        if cli.raw {
-            self.raw = true;
         }
         if cli.stats {
             self.stats = true;
@@ -182,7 +167,21 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
 
     let mut total = DecodeStats::default();
     let src = options.source.as_ref().expect("source checked before run");
-    let stats = decode_source(src, options.raw, output.as_mut(), redis.as_mut(), None).await?;
+    let source_meta = crate::merged::SourceMetadata {
+        id: "vhf_cli".into(),
+        name: src.label(),
+        class: crate::merged::SourceClass::Iq,
+        format: None,
+    };
+    let stats = decode_source(
+        src,
+        output.as_mut(),
+        redis.as_mut(),
+        None,
+        &source_meta,
+        crate::merged::Bearer::Vhf,
+    )
+    .await?;
     total.demod_frames += stats.demod_frames;
     total.parsed_ok += stats.parsed_ok;
     total.parse_fail += stats.parse_fail;
@@ -226,8 +225,9 @@ pub(crate) async fn decode_file_values(
     center_freq: Option<u32>,
     sample_rate: Option<u32>,
     channels: Option<Vec<u32>>,
-    raw: bool,
-) -> anyhow::Result<Vec<Value>> {
+    source_meta: &crate::merged::SourceMetadata,
+    receiver_bearer: crate::merged::Bearer,
+) -> anyhow::Result<Vec<crate::merged::DecodedEvent>> {
     let src = Source {
         address: Address::File {
             file: file.to_string(),
@@ -244,20 +244,39 @@ pub(crate) async fn decode_file_values(
         format: format.map(str::to_string),
     };
     let mut out = Vec::new();
-    decode_source(&src, raw, None, None, Some(&mut out)).await?;
+    decode_source(
+        &src,
+        None,
+        None,
+        Some(&mut out),
+        source_meta,
+        receiver_bearer,
+    )
+    .await?;
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn decode_source(
     src: &Source,
-    raw: bool,
     mut output: Option<&mut std::io::BufWriter<std::fs::File>>,
     mut redis: Option<&mut RedisPublisher>,
-    mut collect: Option<&mut Vec<Value>>,
+    mut collect: Option<&mut Vec<crate::merged::DecodedEvent>>,
+    source_meta: &crate::merged::SourceMetadata,
+    receiver_bearer: crate::merged::Bearer,
 ) -> anyhow::Result<DecodeStats> {
     if let Address::File { file } = &src.address {
         if file.to_ascii_lowercase().ends_with(".wav") {
-            return decode_wav_source(src, file, raw, output, redis, collect).await;
+            return decode_wav_source(
+                src,
+                file,
+                output,
+                redis,
+                collect,
+                source_meta,
+                receiver_bearer,
+            )
+            .await;
         }
     }
 
@@ -305,7 +324,6 @@ async fn decode_source(
                 handle_acars_frame(
                     &channels,
                     FrameSinks {
-                        raw,
                         output: output.as_deref_mut(),
                         redis: redis.as_deref_mut(),
                         collect: collect.as_deref_mut(),
@@ -313,6 +331,8 @@ async fn decode_source(
                     &mut stats,
                     ctx,
                     demod_frame,
+                    source_meta,
+                    receiver_bearer,
                 )
                 .await?;
             }
@@ -323,10 +343,9 @@ async fn decode_source(
 }
 
 struct FrameSinks<'a> {
-    raw: bool,
     output: Option<&'a mut std::io::BufWriter<std::fs::File>>,
     redis: Option<&'a mut RedisPublisher>,
-    collect: Option<&'a mut Vec<Value>>,
+    collect: Option<&'a mut Vec<crate::merged::DecodedEvent>>,
 }
 
 async fn handle_acars_frame(
@@ -335,36 +354,44 @@ async fn handle_acars_frame(
     stats: &mut DecodeStats,
     ctx: FrameContext,
     demod_frame: acars::demod::vhf::DemodFrame,
+    source_meta: &crate::merged::SourceMetadata,
+    receiver_bearer: crate::merged::Bearer,
 ) -> anyhow::Result<()> {
     stats.demod_frames += 1;
     match parse_acars_frame(&demod_frame.bytes, MessageDirection::Unknown) {
         Ok(message) => {
             stats.parsed_ok += 1;
-            let mut obj = serde_json::to_value(&message)?;
-            if let serde_json::Value::Object(ref mut m) = obj {
-                let channel_hz = channels[ctx.channel_index] as u64;
-                m.insert("timestamp".into(), ctx.timestamp_unix.into());
-                m.insert("frame".into(), bytes_to_hex(&demod_frame.bytes).into());
-                m.insert(
-                    "metadata".into(),
-                    serde_json::json!({
-                        "bearer": "acars_vhf",
-                        "channel_mhz": channel_hz as f64 / 1_000_000.0,
-                    }),
-                );
-            }
-            let obj = acars::decode::compact::compact_acars_value(obj, sinks.raw);
+
+            let pmsg = crate::merged::ProtocolMessage::Acars(Box::new(message.clone()));
+
+            let event = crate::merged::DecodedEvent {
+                event: "message",
+                timestamp: Some(ctx.timestamp_unix),
+                bearer: receiver_bearer,
+                source: source_meta.clone(),
+                receiver: Some(crate::merged::ReceiverMetadata {
+                    bearer: receiver_bearer,
+                    channel_hz: Some(channels[ctx.channel_index]),
+                }),
+                aircraft: crate::merged::aircraft_summary(&pmsg),
+                kinematics: pmsg.kinematics(),
+                raw_frame_hex: Some(bytes_to_hex(&demod_frame.bytes)),
+                message: pmsg,
+            };
+
             if let Some(values) = sinks.collect.as_mut() {
-                values.push(obj);
+                values.push(event);
             } else {
-                let line = serde_json::to_string(&obj)?;
+                let line = serde_json::to_string(&event)?;
                 println!("{line}");
                 if let Some(writer) = sinks.output.as_mut() {
                     use std::io::Write;
                     writeln!(writer, "{line}")?;
                 }
                 if let Some(redis) = sinks.redis {
-                    redis.publish(redis_topic_for_record(&obj), &line).await;
+                    redis
+                        .publish(crate::util::redis_topic_for_record(&event.message), &line)
+                        .await;
                 }
             }
         }
@@ -373,13 +400,15 @@ async fn handle_acars_frame(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn decode_wav_source(
     src: &Source,
     file: &str,
-    raw: bool,
     mut output: Option<&mut std::io::BufWriter<std::fs::File>>,
     mut redis: Option<&mut RedisPublisher>,
-    mut collect: Option<&mut Vec<Value>>,
+    mut collect: Option<&mut Vec<crate::merged::DecodedEvent>>,
+    source_meta: &crate::merged::SourceMetadata,
+    receiver_bearer: crate::merged::Bearer,
 ) -> anyhow::Result<DecodeStats> {
     let mut reader = hound::WavReader::open(expanduser(file))?;
     let spec = reader.spec();
@@ -423,7 +452,6 @@ async fn decode_wav_source(
             handle_acars_frame(
                 &channels,
                 FrameSinks {
-                    raw,
                     output: output.as_deref_mut(),
                     redis: redis.as_deref_mut(),
                     collect: collect.as_deref_mut(),
@@ -431,6 +459,8 @@ async fn decode_wav_source(
                 &mut stats,
                 ctx,
                 demod_frame,
+                source_meta,
+                receiver_bearer,
             )
             .await?;
         }
@@ -520,7 +550,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
         #[cfg(feature = "airspy")]
         Address::Airspy { device, serial } => {
             let selector = if let Some(serial) = serial {
-                desperado::airspy::DeviceSelector::Serial(parse_airspy_serial(serial)?)
+                desperado::airspy::DeviceSelector::Serial(crate::util::parse_airspy_serial(serial)?)
             } else {
                 desperado::airspy::DeviceSelector::Index(device.unwrap_or(0))
             };
@@ -544,7 +574,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 device_index: device.unwrap_or(0),
                 center_freq: center_freq as u64,
                 sample_rate,
-                gain: hackrf_gain(src),
+                gain: crate::util::hackrf_gain(src),
                 amp_enable: src.amp_enable.unwrap_or(false),
                 bias_tee: src.bias_tee.unwrap_or(false),
             };

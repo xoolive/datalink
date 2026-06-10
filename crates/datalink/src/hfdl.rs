@@ -4,7 +4,7 @@ use crate::util::hackrf_gain;
 #[cfg(feature = "airspy")]
 use crate::util::parse_airspy_serial;
 use crate::util::{expanduser, infer_capture_params, redis_topic_for_record, RedisPublisher};
-use acars::decode::hfdl::parse_hfdl_pdu;
+use acars::decode::hfdl::{parse_hfdl_pdu, FcsResult};
 use acars::demod::hfdl::{diagnose_channel, HfdlDemodConfig};
 use clap::{Parser, ValueEnum};
 use futures_util::StreamExt;
@@ -88,6 +88,7 @@ pub(crate) async fn run(options: Options) -> anyhow::Result<()> {
     decode_mode(&options).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn decode_file_values(
     source: &str,
     format: Option<&str>,
@@ -96,7 +97,9 @@ pub(crate) async fn decode_file_values(
     channels: Option<Vec<u32>>,
     start_second: f64,
     max_seconds: f64,
-) -> anyhow::Result<Vec<serde_json::Value>> {
+    source_meta: &crate::merged::SourceMetadata,
+    receiver_bearer: crate::merged::Bearer,
+) -> anyhow::Result<Vec<crate::merged::DecodedEvent>> {
     let options = Options {
         source: Some(source.parse().map_err(anyhow::Error::msg)?),
         format: format
@@ -111,7 +114,12 @@ pub(crate) async fn decode_file_values(
         redis_url: None,
         redis_retry_interval: None,
     };
-    collect_decoded_pdus(&options).await
+
+    let mut out = Vec::new();
+    for parsed in collect_decoded_pdus(&options, source_meta, receiver_bearer).await? {
+        out.push(parsed);
+    }
+    Ok(out)
 }
 
 fn parse_sample_format(value: &str) -> Option<SampleFormat> {
@@ -138,17 +146,34 @@ async fn decode_mode(options: &Options) -> anyhow::Result<()> {
         None
     };
 
-    for parsed in collect_decoded_pdus(options).await? {
+    let source_meta = crate::merged::SourceMetadata {
+        id: "hfdl_cli".into(),
+        name: options
+            .source
+            .as_ref()
+            .map(|s| s.label())
+            .unwrap_or_else(|| "hfdl".into()),
+        class: crate::merged::SourceClass::Iq,
+        format: None,
+    };
+
+    for parsed in collect_decoded_pdus(options, &source_meta, crate::merged::Bearer::Hfdl).await? {
         let line = serde_json::to_string(&parsed)?;
         println!("{line}");
         if let Some(redis) = redis.as_mut() {
-            redis.publish(redis_topic_for_record(&parsed), &line).await;
+            redis
+                .publish(redis_topic_for_record(&parsed.message), &line)
+                .await;
         }
     }
     Ok(())
 }
 
-async fn collect_decoded_pdus(options: &Options) -> anyhow::Result<Vec<serde_json::Value>> {
+async fn collect_decoded_pdus(
+    options: &Options,
+    source_meta: &crate::merged::SourceMetadata,
+    receiver_bearer: crate::merged::Bearer,
+) -> anyhow::Result<Vec<crate::merged::DecodedEvent>> {
     let source = options
         .source
         .as_ref()
@@ -176,18 +201,30 @@ async fn collect_decoded_pdus(options: &Options) -> anyhow::Result<Vec<serde_jso
         frame_sync_count += diagnostics.frame_hits.len() as u64;
         candidate_count += diagnostics.pdu_candidates.len() as u64;
         for candidate in &diagnostics.pdu_candidates {
-            let mut parsed = parse_hfdl_pdu(&candidate.bytes);
-            if parsed.get("fcs_ok").and_then(|v| v.as_bool()) != Some(true) {
+            let Ok(parsed) = parse_hfdl_pdu(&candidate.bytes) else {
+                continue;
+            };
+            if parsed.fcs == FcsResult::Pass {
                 continue;
             }
             pdu_ok += 1;
-            if let Some(obj) = parsed.as_object_mut() {
-                obj.insert("event".into(), "pdu".into());
-                obj.insert("channel_khz".into(), channel_khz.into());
-                obj.insert("m1".into(), candidate.m1.into());
-                obj.insert("raw_hex".into(), hex::encode_upper(&candidate.bytes).into());
-            }
-            out.push(parsed);
+            let pmsg = crate::merged::ProtocolMessage::Hfdl(Box::new(parsed));
+
+            let event = crate::merged::DecodedEvent {
+                event: "message",
+                timestamp: None,
+                bearer: receiver_bearer,
+                source: source_meta.clone(),
+                receiver: Some(crate::merged::ReceiverMetadata {
+                    bearer: receiver_bearer,
+                    channel_hz: Some((channel_khz * 1000.0).round() as u32),
+                }),
+                aircraft: crate::merged::aircraft_summary(&pmsg),
+                kinematics: pmsg.kinematics(),
+                raw_frame_hex: Some(hex::encode_upper(&candidate.bytes)),
+                message: pmsg,
+            };
+            out.push(event);
         }
     }
     if options.stats {
@@ -537,6 +574,7 @@ fn effective_sample_rate(path: &str, format: SampleFormat, requested: u32) -> an
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acars::decode::hfdl::Mpdu;
 
     fn hfdl_fcs(data: &[u8]) -> u16 {
         crc16_ccitt_reflected(data, 0xffff) ^ 0xffff
@@ -564,9 +602,9 @@ mod tests {
         pdu[1] = 12;
         let fcs = crc16_ccitt_reflected(&pdu[..64], 0xffff) ^ 0xffff;
         pdu[64..66].copy_from_slice(&fcs.to_le_bytes());
-        let parsed = parse_hfdl_pdu(&pdu);
-        assert_eq!(parsed["pdu"], "spdu");
-        assert_eq!(parsed["fcs_ok"], true);
+        let parsed = parse_hfdl_pdu(&pdu).unwrap();
+        assert!(matches!(parsed.pdu, acars::decode::hfdl::HfdlPdu::Spdu(_)));
+        assert!(parsed.fcs == FcsResult::Pass);
     }
 
     #[test]
@@ -583,13 +621,23 @@ mod tests {
         pdu.extend_from_slice(&hdr_fcs.to_le_bytes());
         pdu.extend_from_slice(&lpdu);
 
-        let parsed = parse_hfdl_pdu(&pdu);
-        assert_eq!(parsed["pdu"], "mpdu");
-        assert_eq!(parsed["direction"], "downlink");
-        assert_eq!(parsed["fcs_ok"], true);
-        assert_eq!(parsed["lpdus"][0]["fcs_ok"], true);
-        assert_eq!(parsed["lpdus"][0]["hfnpdu"]["type"], "0xD2");
-        assert_eq!(parsed["lpdus"][0]["hfnpdu"]["request_data"], 0x1234);
+        let parsed = parse_hfdl_pdu(&pdu).unwrap();
+        let acars::decode::hfdl::HfdlPdu::Mpdu(Mpdu::Downlink(dl)) = parsed.pdu else {
+            panic!()
+        };
+        assert!(parsed.fcs == FcsResult::Pass);
+        assert!(dl.lpdus[0].fcs == FcsResult::Pass);
+        if let acars::decode::hfdl::LpduData::Hfnpdu { hfnpdu, .. } = &dl.lpdus[0].data {
+            if let acars::decode::hfdl::Hfnpdu::SystemTableRequest { request_data, .. } =
+                &hfnpdu.data
+            {
+                assert_eq!(*request_data, 0x1234);
+            } else {
+                panic!("expected SystemTableRequest");
+            }
+        } else {
+            panic!("expected Hfnpdu LPDU type");
+        }
     }
 
     #[test]
@@ -603,16 +651,23 @@ mod tests {
         pdu.extend_from_slice(&hdr_fcs.to_le_bytes());
         pdu.extend_from_slice(&lpdu);
 
-        let parsed = parse_hfdl_pdu(&pdu);
-        assert_eq!(parsed["pdu"], "mpdu");
-        assert_eq!(parsed["direction"], "uplink");
-        assert_eq!(parsed["fcs_ok"], true);
-        assert_eq!(parsed["aircraft"][0]["lpdu_count"], 1);
-        assert_eq!(parsed["aircraft"][0]["lpdus"][0]["hfnpdu"]["type"], "0xFF");
-        assert_eq!(
-            parsed["aircraft"][0]["lpdus"][0]["hfnpdu"]["acars"]["parse_ok"],
-            false
-        );
+        let parsed = parse_hfdl_pdu(&pdu).unwrap();
+        assert!(parsed.fcs == FcsResult::Pass);
+        let acars::decode::hfdl::HfdlPdu::Mpdu(Mpdu::Uplink(ul)) = parsed.pdu else {
+            panic!()
+        };
+        assert_eq!(ul.aircraft[0].lpdu_count, 1);
+        if let acars::decode::hfdl::LpduData::Hfnpdu { hfnpdu, .. } = &ul.aircraft[0].lpdus[0].data
+        {
+            if let acars::decode::hfdl::Hfnpdu::Unknown { raw_hex, .. } = &hfnpdu.data {
+                assert_eq!(hfnpdu.kind_code, "0xFF");
+                assert_eq!(raw_hex, "010203");
+            } else {
+                panic!("expected Hfnpdu::Unknown (due to invalid acars frame)");
+            }
+        } else {
+            panic!("expected Hfnpdu LPDU type");
+        }
     }
 
     #[test]

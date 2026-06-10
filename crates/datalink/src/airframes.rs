@@ -2,14 +2,13 @@ use acars::decode::acars::{decode_acars_text_payload, MessageDirection};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use http::Uri;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 use crate::merged::{
-    Bearer, DecodedEvent, OutputConfig, OutputSink, ReceiverMetadata, SourceClass, SourceConfig,
-    SourceMetadata,
+    Bearer, DecodedEvent, OutputConfig, OutputSink, ProtocolMessage, ReceiverMetadata, SourceClass,
+    SourceConfig, SourceMetadata,
 };
-use crate::util::unix_timestamp_value;
 
 const DEFAULT_AIRFRAMES_WS: &str = "wss://ws.airframes.io/socket.io/?EIO=4&transport=websocket";
 
@@ -19,6 +18,59 @@ pub(crate) struct Source {
     token: Option<String>,
     events: Vec<String>,
     name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AirframesAuth<'a> {
+    token: &'a str,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct AirframesPayload {
+    pub label: Option<String>,
+    pub text: Option<String>,
+    pub from_hex: Option<String>,
+    pub to_hex: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub altitude: Option<f64>,
+    pub track: Option<f64>,
+    #[serde(default)]
+    pub source_type: Bearer,
+    #[serde(deserialize_with = "crate::util::deserialize_timestamp", default)]
+    pub timestamp: Option<f64>,
+    #[serde(deserialize_with = "crate::util::deserialize_timestamp", default)]
+    pub created_at: Option<f64>,
+    pub frequency: Option<f64>,
+    pub id: Option<String>,
+    pub airframe_id: Option<u64>,
+    pub flight_id: Option<u64>,
+    pub tail: Option<String>,
+    pub link_direction: Option<String>,
+    pub airframe: Option<AirframesAirframe>,
+    pub flight: Option<AirframesFlight>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct AirframesAirframe {
+    pub icao: Option<String>,
+    pub tail: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct AirframesFlight {
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub altitude: Option<f64>,
+    pub track: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AirframesMessage {
+    #[serde(flatten)]
+    pub payload: AirframesPayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<acars::decode::payload::AcarsAppPayload>,
 }
 
 impl Source {
@@ -88,9 +140,6 @@ pub(crate) struct Options {
     /// Dump a copy of decoded websocket rows as JSONL
     #[arg(short, long)]
     output: Option<String>,
-    /// Include the original websocket payload under raw
-    #[arg(long)]
-    raw: bool,
     /// Publish decoded application messages to Redis pub/sub topics
     #[arg(long, value_name = "REDIS URL")]
     redis_url: Option<String>,
@@ -108,7 +157,6 @@ pub(crate) async fn run(options: Options) -> anyhow::Result<()> {
         .map_err(anyhow::Error::msg)?;
     let output_config = OutputConfig {
         jsonl: options.output,
-        raw: options.raw,
         redis_url: options.redis_url,
         redis_retry_interval: Some(options.redis_retry_interval),
     };
@@ -166,14 +214,12 @@ async fn run_source(
             }
         }
     }
+
+    let auth = AirframesAuth {
+        token: source.token.as_deref().unwrap_or(""),
+    };
     ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        format!(
-            "40{}",
-            serde_json::to_string(
-                &serde_json::json!({ "token": source.token.as_deref().unwrap_or("") })
-            )?
-        )
-        .into(),
+        format!("40{}", serde_json::to_string(&auth)?).into(),
     ))
     .await?;
 
@@ -195,12 +241,7 @@ async fn run_source(
                     if !capture_all && !selected_events.iter().any(|wanted| wanted == &event) {
                         continue;
                     }
-                    let decoded = normalize_payload(
-                        source_meta.clone(),
-                        &event,
-                        payload,
-                        output.raw_enabled(),
-                    )?;
+                    let decoded = normalize_payload(source_meta.clone(), &event, payload)?;
                     output.emit(decoded).await?;
                 }
             }
@@ -218,135 +259,148 @@ async fn run_source(
 pub(crate) fn normalize_payload(
     source: SourceMetadata,
     event: &str,
-    payload: Value,
-    raw: bool,
+    payload: AirframesPayload,
 ) -> anyhow::Result<DecodedEvent> {
-    let record = airframes_record(&source.name, event, payload, raw);
-    let bearer = infer_bearer(&record);
-    Ok(DecodedEvent {
-        event: "message",
-        timestamp: record.pointer("/decoded/timestamp").and_then(Value::as_f64),
-        bearer,
-        source,
-        receiver: None::<ReceiverMetadata>,
-        aircraft: aircraft_summary(&record),
-        message: record.get("decoded").cloned().unwrap_or(Value::Null),
-        raw: raw.then_some(record),
-    })
-}
+    let bearer = payload.source_type;
 
-fn parse_socketio_event(packet: &str) -> Option<(String, Value)> {
-    let json = packet.strip_prefix("42")?;
-    let value: Value = serde_json::from_str(json).ok()?;
-    let array = value.as_array()?;
-    let event = array.first()?.as_str()?.to_string();
-    let payload = if array.len() == 2 {
-        array[1].clone()
-    } else {
-        Value::Array(array.iter().skip(1).cloned().collect())
-    };
-    Some((event, payload))
-}
-
-fn airframes_record(source_label: &str, event: &str, payload: Value, raw: bool) -> Value {
-    let decoded = if event == "message" {
-        decode_airframes_message(&payload, raw)
+    let app = if event == "message" && payload.text.is_some() {
+        let text = payload.text.as_deref().unwrap();
+        let normalized_text = normalize_arinc622_text(text).unwrap_or_else(|| text.to_string());
+        let direction = infer_airframes_direction(
+            payload.label.as_deref().unwrap_or(""),
+            payload.link_direction.as_deref(),
+        );
+        let parsed = decode_acars_text_payload(
+            payload.label.as_deref().unwrap_or(""),
+            None,
+            &normalized_text,
+            direction,
+        );
+        Some(parsed)
     } else {
         None
     };
-    let mut record = serde_json::json!({
-        "source": source_label,
-        "bearer": "airframes.io",
-        "event": event,
-        "decoded": decoded,
+
+    let timestamp = payload.timestamp.or(payload.created_at);
+    let raw_kinematics = airframes_payload_kinematics(&payload);
+    let app_kinematics = app.as_ref().and_then(|app| {
+        use acars::decode::compact::ExtractKinematics;
+        app.kinematics()
     });
-    if raw {
-        record
-            .as_object_mut()
-            .unwrap()
-            .insert("raw".into(), payload);
-    }
-    record
+    let kinematics = match (raw_kinematics, app_kinematics) {
+        (Some(raw), Some(app)) => Some(raw.merge(app)),
+        (Some(raw), None) => Some(raw),
+        (None, Some(app)) => Some(app),
+        (None, None) => None,
+    };
+    let af_msg = AirframesMessage { payload, app };
+    let pmsg = ProtocolMessage::Airframes(Box::new(af_msg));
+
+    Ok(DecodedEvent {
+        event: "message",
+        timestamp,
+        bearer,
+        source,
+        receiver: None::<ReceiverMetadata>,
+        aircraft: crate::merged::aircraft_summary(&pmsg),
+        kinematics,
+        raw_frame_hex: None,
+        message: pmsg,
+    })
 }
 
-fn decode_airframes_message(payload: &Value, include_raw: bool) -> Option<Value> {
-    let row = if payload.is_array() {
-        payload.as_array()?.first()?
-    } else {
-        payload
-    };
-    let text = row.get("text").and_then(Value::as_str);
-    let label = row.get("label").and_then(Value::as_str).unwrap_or_default();
-    let link_direction = row.get("link_direction").and_then(Value::as_str);
-    let direction = infer_airframes_direction(label, link_direction);
-    let timestamp = row
-        .get("timestamp")
-        .or_else(|| row.get("created_at"))
-        .and_then(unix_timestamp_value)
-        .map(Value::from)
-        .unwrap_or(Value::Null);
+fn parse_socketio_event(packet: &str) -> Option<(String, AirframesPayload)> {
+    let json = packet.strip_prefix("42")?;
+    serde_json::from_str(json).ok()
+}
 
-    let Some(text) = text else {
-        return Some(serde_json::json!({
-            "path": "unknown",
-            "message_class": "metadata_only",
-            "summary": "Airframes row without ACARS text payload",
-            "airframes_id": row.get("id").cloned().unwrap_or(Value::Null),
-            "timestamp": timestamp,
-            "label": row.get("label").cloned().unwrap_or(Value::Null),
-            "tail": row.get("tail").cloned().unwrap_or(Value::Null),
-            "src": airframes_addr_value(row, "from_hex"),
-            "dst": airframes_addr_value(row, "to_hex"),
-            "source_type": row.get("source_type").cloned().unwrap_or(Value::Null),
-            "frequency": row.get("frequency").cloned().unwrap_or(Value::Null),
-            "app": Value::Null,
-        }));
-    };
-
-    let normalized_text = normalize_arinc622_text(text).unwrap_or_else(|| text.to_string());
-    let app = decode_acars_text_payload(label, None, &normalized_text, direction);
-    let raw_val = serde_json::json!({
-        "timestamp": timestamp,
-        "label": label,
-        "tail": row.get("tail").cloned().unwrap_or(Value::Null),
-        "text": text,
-        "direction": direction,
-        "src": airframes_addr_value(row, "from_hex"),
-        "dst": airframes_addr_value(row, "to_hex"),
-        "data": app,
-        "metadata": {
-            "bearer": "airframes.io",
-            "source": row.get("source").cloned().unwrap_or(Value::Null),
-            "source_type": row.get("source_type").cloned().unwrap_or(Value::Null),
-            "frequency": row.get("frequency").cloned().unwrap_or(Value::Null),
-            "link_direction": link_direction,
-            "airframes_id": row.get("id").cloned().unwrap_or(Value::Null),
+pub(crate) fn extract_airframes_aircraft(row: &AirframesPayload) -> Option<String> {
+    if let Some(icao) = row
+        .airframe
+        .as_ref()
+        .and_then(|a| a.icao.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(icao.to_ascii_lowercase());
+    }
+    if let Some(hex) = &row.from_hex {
+        let addr = hex.trim().to_ascii_lowercase();
+        if addr.len() == 6 {
+            return Some(addr);
         }
-    });
-    Some(acars::decode::compact::compact_acars_value(
-        raw_val,
-        include_raw,
-    ))
+    }
+    None
 }
 
-fn airframes_addr_value(row: &Value, key: &str) -> Value {
-    let Some(hex) = row.get(key).and_then(Value::as_str) else {
-        return Value::Null;
-    };
-    let addr = hex.trim().to_ascii_lowercase();
-    if addr.len() != 6 || !addr.chars().all(|c| c.is_ascii_hexdigit()) {
-        return serde_json::json!({ "icao24": addr });
+pub(crate) fn extract_airframes_registration(row: &AirframesPayload) -> Option<String> {
+    row.tail
+        .as_deref()
+        .or_else(|| row.airframe.as_ref().and_then(|a| a.tail.as_deref()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+pub(crate) fn airframes_payload_kinematics(
+    payload: &AirframesPayload,
+) -> Option<acars::decode::compact::Kinematics> {
+    let payload_kinematics = kinematics_from_airframes_position(
+        payload.latitude,
+        payload.longitude,
+        payload.altitude,
+        payload.track,
+        "airframes_payload",
+    );
+    let flight_kinematics = payload.flight.as_ref().and_then(|flight| {
+        kinematics_from_airframes_position(
+            flight.latitude,
+            flight.longitude,
+            flight.altitude,
+            flight.track,
+            "airframes_flight",
+        )
+    });
+    match (payload_kinematics, flight_kinematics) {
+        (Some(payload), Some(flight)) => Some(payload.merge(flight)),
+        (Some(payload), None) => Some(payload),
+        (None, Some(flight)) => Some(flight),
+        (None, None) => None,
     }
-    let aircraft_icao = row
-        .pointer("/airframe/icao")
-        .and_then(Value::as_str)
-        .map(str::to_ascii_lowercase);
-    let addr_type = if aircraft_icao.as_deref() == Some(addr.as_str()) {
-        "aircraft"
-    } else {
-        "ground_station"
+}
+
+fn kinematics_from_airframes_position(
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    altitude: Option<f64>,
+    track: Option<f64>,
+    derived_from: &str,
+) -> Option<acars::decode::compact::Kinematics> {
+    let (Some(latitude), Some(longitude)) = (latitude, longitude) else {
+        return None;
     };
-    serde_json::json!({ "icao24": addr, "type": addr_type })
+    if latitude == 0.0 && longitude == 0.0 {
+        return None;
+    }
+    Some(acars::decode::compact::Kinematics {
+        position: Some(acars::decode::compact::Position {
+            latitude,
+            longitude,
+        }),
+        altitude_ft: normalize_airframes_altitude(altitude),
+        track,
+        ground_speed_knots: None,
+        derived_from: Some(derived_from.to_string()),
+    })
+}
+
+fn normalize_airframes_altitude(altitude: Option<f64>) -> Option<i32> {
+    altitude.and_then(|value| {
+        let rounded = value.round();
+        ((i32::MIN as f64)..=(i32::MAX as f64))
+            .contains(&rounded)
+            .then_some(rounded as i32)
+    })
 }
 
 fn normalize_arinc622_text(text: &str) -> Option<String> {
@@ -376,40 +430,6 @@ fn infer_airframes_direction(label: &str, link_direction: Option<&str>) -> Messa
             Some("downlink") => MessageDirection::AirToGround,
             _ => MessageDirection::Unknown,
         },
-    }
-}
-
-fn infer_bearer(record: &Value) -> Bearer {
-    let source_type = record
-        .pointer("/decoded/metadata/source_type")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if source_type.contains("vdl") {
-        Bearer::Vdl2
-    } else if source_type.contains("hfdl") || source_type.contains("hf") {
-        Bearer::Hfdl
-    } else if source_type.contains("acars") || source_type.contains("vhf") {
-        Bearer::Vhf
-    } else if record.get("decoded").is_some_and(|v| !v.is_null()) {
-        Bearer::Decoded
-    } else {
-        Bearer::Unknown
-    }
-}
-
-fn aircraft_summary(record: &Value) -> Option<Value> {
-    let mut obj = serde_json::Map::new();
-    if let Some(icao) = record
-        .pointer("/decoded/src/icao24")
-        .and_then(Value::as_str)
-    {
-        obj.insert("icao24".into(), Value::from(icao));
-    }
-    if obj.is_empty() {
-        None
-    } else {
-        Some(Value::Object(obj))
     }
 }
 
@@ -501,33 +521,129 @@ mod tests {
     }
 
     #[test]
-    fn normalize_payload_sets_bearer() {
+    fn normalizes_airframes_payload_as_event_source() {
         let meta = SourceMetadata {
             id: "airframes".into(),
             name: "Airframes".into(),
             class: SourceClass::Events,
             format: Some("airframes.io".into()),
         };
-        let payload = serde_json::json!({"label":"SA", "text":"hello", "from_hex":"A1B2C3", "source_type":"vdl2", "timestamp": 123.0});
-        let event = normalize_payload(meta, "message", payload, true).unwrap();
+        let payload = serde_json::from_str(
+            r#"{
+            "label": "SA",
+            "text": "hello",
+            "from_hex": "A1B2C3",
+            "source_type": "vdl2",
+            "timestamp": 123.0
+        }"#,
+        )
+        .unwrap();
+        let event = crate::airframes::normalize_payload(meta, "message", payload).unwrap();
         assert_eq!(event.bearer, Bearer::Vdl2);
-        assert!(event.raw.is_some());
     }
 
     #[test]
-    fn normalize_payload_converts_timestamp_string() {
+    fn parses_live_socketio_payload_with_created_at_and_timestamp() {
+        let packet = r#"42["message",{
+            "id":"6853529784",
+            "created_at":"2026-06-09T20:34:43.090487Z",
+            "updated_at":"2026-06-09T20:34:43.090487Z",
+            "timestamp":"2026-06-09T20:34:42.157Z",
+            "source_type":"acars",
+            "frequency":131.725,
+            "label":"H1",
+            "tail":"C-FRAX",
+            "airframe":{"icao":"C02CFC"}
+        }]"#;
+
+        let (event, payload) = parse_socketio_event(packet).expect("parse socket.io event");
+        assert_eq!(event, "message");
+        assert!(payload.created_at.is_some());
+        assert!(payload.timestamp.is_some());
+        assert_eq!(payload.source_type, Bearer::Vhf);
+
         let meta = SourceMetadata {
             id: "airframes".into(),
             name: "Airframes".into(),
             class: SourceClass::Events,
             format: Some("airframes.io".into()),
         };
-        let payload = serde_json::json!({"label":"SA", "text":"hello", "from_hex":"A1B2C3", "source_type":"vdl2", "timestamp": "2026-05-22T08:37:19.050Z"});
-        let event = normalize_payload(meta, "message", payload, false).unwrap();
-        assert_eq!(event.timestamp, Some(1779439039.05));
+        let normalized = normalize_payload(meta, &event, payload).expect("normalize payload");
+        assert_eq!(normalized.timestamp, Some(1_781_037_282.157));
+    }
+
+    #[test]
+    fn normalizes_airframes_flight_kinematics_and_identity() {
+        let meta = SourceMetadata {
+            id: "airframes".into(),
+            name: "Airframes".into(),
+            class: SourceClass::Events,
+            format: Some("airframes.io".into()),
+        };
+        let payload = serde_json::from_str(
+            r#"{
+            "source_type": "vdl2",
+            "airframe_id": 6624,
+            "airframe": {"icao": "A4463E", "tail": "N3749D"},
+            "latitude": 0,
+            "longitude": 0,
+            "flight": {
+                "latitude": 60.797974,
+                "longitude": -148.846657,
+                "altitude": 17000,
+                "track": 295.81
+            }
+        }"#,
+        )
+        .unwrap();
+
+        let event = normalize_payload(meta, "message", payload).expect("normalize payload");
+        let aircraft = event.aircraft.expect("aircraft summary");
+        assert_eq!(aircraft.icao24.as_deref(), Some("a4463e"));
+        assert_eq!(aircraft.aircraft_id, Some(6624));
+        assert_eq!(aircraft.registration.as_deref(), Some("N3749D"));
+
+        let kinematics = event.kinematics.expect("kinematics");
+        assert_eq!(kinematics.position.unwrap().latitude, 60.797974);
+        assert_eq!(kinematics.position.unwrap().longitude, -148.846657);
+        assert_eq!(kinematics.altitude_ft, Some(17000));
+        assert_eq!(kinematics.track, Some(295.81));
+        assert_eq!(kinematics.derived_from.as_deref(), Some("airframes_flight"));
+    }
+
+    #[test]
+    fn prefers_top_level_airframes_coordinates_over_flight_coordinates() {
+        let meta = SourceMetadata {
+            id: "airframes".into(),
+            name: "Airframes".into(),
+            class: SourceClass::Events,
+            format: Some("airframes.io".into()),
+        };
+        let payload = serde_json::from_str(
+            r#"{
+            "source_type": "vdl2",
+            "latitude": 51.4706,
+            "longitude": -0.461941,
+            "track": 92.5,
+            "flight": {
+                "latitude": 60.797974,
+                "longitude": -148.846657,
+                "altitude": 17000,
+                "track": 295.81
+            }
+        }"#,
+        )
+        .unwrap();
+
+        let event = normalize_payload(meta, "message", payload).expect("normalize payload");
+        let kinematics = event.kinematics.expect("kinematics");
+        assert_eq!(kinematics.position.unwrap().latitude, 51.4706);
+        assert_eq!(kinematics.position.unwrap().longitude, -0.461941);
+        assert_eq!(kinematics.altitude_ft, Some(17000));
+        assert_eq!(kinematics.track, Some(92.5));
         assert_eq!(
-            event.message.get("timestamp").and_then(Value::as_f64),
-            Some(1779439039.05)
+            kinematics.derived_from.as_deref(),
+            Some("airframes_payload")
         );
     }
 }

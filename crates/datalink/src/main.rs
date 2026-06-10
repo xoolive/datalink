@@ -1,5 +1,3 @@
-//! Command-line frontend for decoding aviation datalink traffic.
-
 mod airframes;
 mod hfdl;
 mod iq_pipeline;
@@ -60,25 +58,16 @@ enum DecodeCommand {
         hex: String,
         #[arg(short, long, value_enum, default_value_t = Direction::Unknown)]
         direction: Direction,
-        /// Include the full nested decoder output under raw_decode
-        #[arg(long)]
-        raw: bool,
     },
     /// Decode a hex AVLC frame (including 2-byte FCS).
     Avlc {
         #[arg(help = "Hex-encoded AVLC frame bytes (with FCS)")]
         hex: String,
-        /// Include the full nested decoder output under raw_decode
-        #[arg(long)]
-        raw: bool,
     },
     /// Decode an ADS-C application-layer text payload.
     Adsc {
         #[arg(help = "ADS-C app text payload")]
         payload: String,
-        /// Include the full nested decoder output under raw_decode
-        #[arg(long)]
-        raw: bool,
     },
 }
 
@@ -98,11 +87,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn run_decode(command: DecodeCommand) -> anyhow::Result<()> {
     match command {
-        DecodeCommand::Acars {
-            hex,
-            direction,
-            raw,
-        } => {
+        DecodeCommand::Acars { hex, direction } => {
             let bytes = hex::decode(hex.trim())?;
             let dir = match direction {
                 Direction::Unknown => MessageDirection::Unknown,
@@ -110,36 +95,81 @@ fn run_decode(command: DecodeCommand) -> anyhow::Result<()> {
                 Direction::Downlink => MessageDirection::AirToGround,
             };
             let message = parse_acars_frame(&bytes, dir)?;
-            let raw_value = serde_json::to_value(&message)?;
-            let out = acars::decode::compact::compact_acars_value(raw_value, raw);
-            println!("{}", serde_json::to_string_pretty(&out)?);
+            let pmsg = crate::merged::ProtocolMessage::Acars(Box::new(message));
+
+            let event = crate::merged::DecodedEvent {
+                event: "message",
+                timestamp: None,
+                bearer: crate::merged::Bearer::Vhf,
+                source: crate::merged::SourceMetadata {
+                    id: "decode_cli".into(),
+                    name: "decode_cli".into(),
+                    class: crate::merged::SourceClass::Frames,
+                    format: None,
+                },
+                receiver: None,
+                aircraft: crate::merged::aircraft_summary(&pmsg),
+                kinematics: pmsg.kinematics(),
+                raw_frame_hex: Some(hex.clone()),
+                message: pmsg,
+            };
+            println!("{}", serde_json::to_string_pretty(&event)?);
         }
-        DecodeCommand::Avlc { hex, raw } => {
+        DecodeCommand::Avlc { hex } => {
             let bytes = hex::decode(hex.trim())?;
             let frame = parse_avlc_frame(&bytes)?;
-            let mut obj = serde_json::to_value(&frame)?;
-            if let serde_json::Value::Object(ref mut m) = obj {
-                m.insert("frame".into(), crate::util::bytes_to_hex(&bytes).into());
-            }
-            let out = acars::decode::compact::compact_avlc_value(obj, raw);
-            println!("{}", serde_json::to_string_pretty(&out)?);
+
+            let pmsg = crate::merged::ProtocolMessage::Avlc(Box::new(frame));
+
+            let event = crate::merged::DecodedEvent {
+                event: "message",
+                timestamp: None,
+                bearer: crate::merged::Bearer::Vdl2,
+                source: crate::merged::SourceMetadata {
+                    id: "decode_cli".into(),
+                    name: "decode_cli".into(),
+                    class: crate::merged::SourceClass::Frames,
+                    format: None,
+                },
+                receiver: None,
+                aircraft: crate::merged::aircraft_summary(&pmsg),
+                kinematics: pmsg.kinematics(),
+                raw_frame_hex: Some(hex.clone()),
+                message: pmsg,
+            };
+            println!("{}", serde_json::to_string_pretty(&event)?);
         }
-        DecodeCommand::Adsc { payload, raw } => {
+        DecodeCommand::Adsc { payload } => {
             let adsc = parse_adsc_app_text(payload.trim())?;
-            let raw_value = serde_json::to_value(&adsc)?;
-            let mut out = serde_json::json!({
-                "path": "acars",
-                "protocol_stack": ["acars", "arinc622", "ads_c"],
-                "message_class": "app_message",
-                "summary": "ADS-C application payload",
-                "app": { "protocol": "ads_c", "standard": "ARINC 622", "payload": raw_value.clone() },
-            });
-            if raw {
-                out.as_object_mut()
-                    .unwrap()
-                    .insert("raw_decode".into(), raw_value);
-            }
-            println!("{}", serde_json::to_string_pretty(&out)?);
+
+            let acars_app = acars::decode::payload::AcarsAppPayload::Arinc622(
+                acars::decode::payload::arinc622::Message {
+                    atsu_address: adsc.atsu_address.clone(),
+                    imi: acars::decode::payload::arinc622::Imi::Ads,
+                    registration: adsc.registration.clone(),
+                    payload: acars::decode::payload::arinc622::Payload::Adsc(adsc.clone()),
+                },
+            );
+
+            let pmsg = crate::merged::ProtocolMessage::App(Box::new(acars_app));
+
+            let event = crate::merged::DecodedEvent {
+                event: "message",
+                timestamp: None,
+                bearer: crate::merged::Bearer::Decoded,
+                source: crate::merged::SourceMetadata {
+                    id: "decode_cli".into(),
+                    name: "decode_cli".into(),
+                    class: crate::merged::SourceClass::Frames,
+                    format: None,
+                },
+                receiver: None,
+                aircraft: crate::merged::aircraft_summary(&pmsg),
+                kinematics: pmsg.kinematics(),
+                raw_frame_hex: None,
+                message: pmsg,
+            };
+            println!("{}", serde_json::to_string_pretty(&event)?);
         }
     }
 
