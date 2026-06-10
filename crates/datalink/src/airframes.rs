@@ -270,20 +270,20 @@ pub(crate) fn normalize_payload(
 ) -> anyhow::Result<DecodedEvent> {
     let bearer = payload.source_type;
 
-    let app = if event == "message" && payload.text.is_some() {
-        let text = payload.text.as_deref().unwrap();
-        let normalized_text = normalize_arinc622_text(text).unwrap_or_else(|| text.to_string());
-        let direction = infer_airframes_direction(
-            payload.label.as_deref().unwrap_or(""),
-            payload.link_direction.as_deref(),
-        );
-        let parsed = decode_acars_text_payload(
-            payload.label.as_deref().unwrap_or(""),
-            None,
-            &normalized_text,
-            direction,
-        );
-        Some(parsed)
+    let app = if event == "message" {
+        payload.text.as_deref().map(|text| {
+            let normalized_text = normalize_arinc622_text(text).unwrap_or_else(|| text.to_string());
+            let direction = infer_airframes_direction(
+                payload.label.as_deref().unwrap_or(""),
+                payload.link_direction.as_deref(),
+            );
+            decode_acars_text_payload(
+                payload.label.as_deref().unwrap_or(""),
+                None,
+                &normalized_text,
+                direction,
+            )
+        })
     } else {
         None
     };

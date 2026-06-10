@@ -86,7 +86,7 @@ pub(crate) fn infer_capture_params(path: &str) -> Option<CaptureParams> {
 fn infer_gqrx_capture_params(path: &str) -> Option<CaptureParams> {
     let stem = Path::new(path).file_stem()?.to_string_lossy();
     let parts: Vec<&str> = stem.split('_').collect();
-    let fc_pos = parts.iter().rposition(|part| *part == "fc")?;
+    let fc_pos = parts.iter().rposition(|&part| part == "fc")?;
     if fc_pos < 2 {
         return None;
     }

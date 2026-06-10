@@ -15,26 +15,11 @@ const DEFAULT_CENTER_FREQ: u32 = 136_850_000;
 const DEFAULT_CHANNELS: &[u32] = &[136_875_000, 136_975_000];
 const DEFAULT_CHUNK_SIZE: usize = 65_536;
 
-trait SourceExt {
-    fn center_freq(&self) -> u32;
-    fn channels(&self) -> Vec<u32>;
-}
-
-impl SourceExt for Source {
-    fn center_freq(&self) -> u32 {
-        self.center_freq_or(DEFAULT_CENTER_FREQ)
-    }
-
-    fn channels(&self) -> Vec<u32> {
-        self.channels_with(auto_channels)
-    }
-}
-
 /// When no channels are explicitly configured, return all standard VDL2 channels
 /// (25 kHz spacing) that fall within the recording's bandwidth.
 /// Falls back to DEFAULT_CHANNELS when the bandwidth is too narrow.
 fn auto_channels(src: &Source) -> Vec<u32> {
-    let center = src.center_freq();
+    let center = src.center_freq_or(DEFAULT_CENTER_FREQ);
     let sr = src.sample_rate();
     let half_bw = (sr as f64 * 0.45) as u32;
     let lo = center.saturating_sub(half_bw);
@@ -324,9 +309,9 @@ async fn decode_source(
     }
 
     let effective_src = effective_file_source(src, None);
-    let center_freq = effective_src.center_freq();
+    let center_freq = effective_src.center_freq_or(DEFAULT_CENTER_FREQ);
     let raw_sample_rate = effective_src.sample_rate();
-    let channels = effective_src.channels();
+    let channels = effective_src.channels_with(auto_channels);
     let sync_threshold = options.sync_threshold.unwrap_or(3.2);
 
     // Compute the nearest valid VDL2 demod rate (integer multiple of SYMBOL_RATE * SPS = 105 000)
@@ -486,8 +471,8 @@ async fn decode_wav_source(
     );
     let raw_sample_rate = spec.sample_rate;
     let effective_src = effective_file_source(src, Some(raw_sample_rate));
-    let center_freq = effective_src.center_freq();
-    let channels = effective_src.channels();
+    let center_freq = effective_src.center_freq_or(DEFAULT_CENTER_FREQ);
+    let channels = effective_src.channels_with(auto_channels);
     let sync_threshold = options.sync_threshold.unwrap_or(3.2);
     let vdl2_decimated_rate = SYMBOL_RATE * 10;
     let (sample_rate, resample_rs) = maybe_resample(raw_sample_rate, vdl2_decimated_rate);
@@ -569,7 +554,7 @@ fn file_source_path(src: &Source) -> Option<&str> {
 async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
     use desperado::{DeviceConfig, IqAsyncSource};
 
-    let center_freq = src.center_freq();
+    let center_freq = src.center_freq_or(DEFAULT_CENTER_FREQ);
     let sample_rate = src.sample_rate();
     match &src.address {
         Address::File { file } if file == "-" => Ok(IqAsyncSource::from_stdin(
@@ -697,21 +682,27 @@ mod tests {
     fn file_auto_channels_use_gqrx_inferred_sample_rate() {
         let src = file_source("gqrx_20260518_114025_136500000_1800000_fc.raw");
         let effective = effective_file_source(&src, None);
-        assert_eq!(effective.center_freq(), 136_500_000);
+        assert_eq!(effective.center_freq_or(DEFAULT_CENTER_FREQ), 136_500_000);
         assert_eq!(effective.sample_rate(), 1_800_000);
         assert_eq!(effective.format.as_deref(), Some("cf32"));
-        assert_eq!(effective.channels().first(), Some(&136_600_000));
-        assert_eq!(effective.channels().last(), Some(&137_000_000));
+        assert_eq!(
+            effective.channels_with(auto_channels).first(),
+            Some(&136_600_000)
+        );
+        assert_eq!(
+            effective.channels_with(auto_channels).last(),
+            Some(&137_000_000)
+        );
     }
 
     #[test]
     fn wav_auto_channels_use_inferred_center_and_wav_sample_rate() {
         let src = file_source("SDRuno_20200908_152020Z_136650kHz.wav");
         let effective = effective_file_source(&src, Some(250_000));
-        assert_eq!(effective.center_freq(), 136_650_000);
+        assert_eq!(effective.center_freq_or(DEFAULT_CENTER_FREQ), 136_650_000);
         assert_eq!(effective.sample_rate(), 250_000);
         assert_eq!(
-            effective.channels(),
+            effective.channels_with(auto_channels),
             vec![
                 136_600_000,
                 136_625_000,

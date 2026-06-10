@@ -24,23 +24,8 @@ const KNOWN_ACARS_CHANNELS: &[u32] = &[
 ];
 const DEFAULT_CHUNK_SIZE: usize = 65_536;
 
-trait SourceExt {
-    fn center_freq(&self) -> u32;
-    fn channels(&self) -> Vec<u32>;
-}
-
-impl SourceExt for Source {
-    fn center_freq(&self) -> u32 {
-        self.center_freq_or(DEFAULT_CENTER_FREQ)
-    }
-
-    fn channels(&self) -> Vec<u32> {
-        self.channels_with(auto_channels)
-    }
-}
-
 fn auto_channels(src: &Source) -> Vec<u32> {
-    auto_channels_for(src.center_freq(), src.sample_rate())
+    auto_channels_for(src.center_freq_or(DEFAULT_CENTER_FREQ), src.sample_rate())
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -281,9 +266,9 @@ async fn decode_source(
     }
 
     let effective_src = effective_file_source(src, None);
-    let center_freq = effective_src.center_freq();
+    let center_freq = effective_src.center_freq_or(DEFAULT_CENTER_FREQ);
     let raw_sample_rate = effective_src.sample_rate();
-    let channels = effective_src.channels();
+    let channels = effective_src.channels_with(auto_channels);
 
     // Resample to nearest valid ACARS-131 demod rate (integer multiple of 12 500 Hz)
     let (sample_rate, resample_rs) = maybe_resample(raw_sample_rate, 12_500);
@@ -419,8 +404,8 @@ async fn decode_wav_source(
     );
     let raw_sample_rate = spec.sample_rate;
     let effective_src = effective_file_source(src, Some(raw_sample_rate));
-    let center_freq = effective_src.center_freq();
-    let channels = effective_src.channels();
+    let center_freq = effective_src.center_freq_or(DEFAULT_CENTER_FREQ);
+    let channels = effective_src.channels_with(auto_channels);
     let (sample_rate, resample_rs) = maybe_resample(raw_sample_rate, 12_500);
     let mut adapter = ResampleAdapter::new(resample_rs);
     let mut demods: Vec<VhfChannel> = channels
@@ -509,7 +494,7 @@ fn file_source_path(src: &Source) -> Option<&str> {
 async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
     use desperado::{DeviceConfig, IqAsyncSource};
 
-    let center_freq = src.center_freq();
+    let center_freq = src.center_freq_or(DEFAULT_CENTER_FREQ);
     let sample_rate = src.sample_rate();
     match &src.address {
         Address::File { file } if file == "-" => Ok(IqAsyncSource::from_stdin(
@@ -623,22 +608,28 @@ mod tests {
     fn file_auto_channels_use_gqrx_inferred_sample_rate() {
         let src = file_source("gqrx_20260518_114201_131500000_1800000_fc.raw");
         let effective = effective_file_source(&src, None);
-        assert_eq!(effective.center_freq(), 131_500_000);
+        assert_eq!(effective.center_freq_or(DEFAULT_CENTER_FREQ), 131_500_000);
         assert_eq!(effective.sample_rate(), 1_800_000);
         assert_eq!(effective.format.as_deref(), Some("cf32"));
-        assert!(effective.channels().contains(&131_525_000));
-        assert!(effective.channels().contains(&131_725_000));
-        assert!(effective.channels().contains(&131_825_000));
+        assert!(effective
+            .channels_with(auto_channels)
+            .contains(&131_525_000));
+        assert!(effective
+            .channels_with(auto_channels)
+            .contains(&131_725_000));
+        assert!(effective
+            .channels_with(auto_channels)
+            .contains(&131_825_000));
     }
 
     #[test]
     fn wav_auto_channels_use_inferred_center_and_wav_sample_rate() {
         let src = file_source("SDRuno_20200908_152020Z_131725kHz.wav");
         let effective = effective_file_source(&src, Some(500_000));
-        assert_eq!(effective.center_freq(), 131_725_000);
+        assert_eq!(effective.center_freq_or(DEFAULT_CENTER_FREQ), 131_725_000);
         assert_eq!(effective.sample_rate(), 500_000);
         assert_eq!(
-            effective.channels(),
+            effective.channels_with(auto_channels),
             vec![131_525_000, 131_725_000, 131_825_000]
         );
     }
