@@ -164,7 +164,7 @@ pub struct AvlcFrame {
     ///
     /// Present only for I-frames and XID U-frames with a passing FCS.
     /// `None` for S-frames, non-XID U-frames, or FCS failures.
-    #[serde(flatten)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<AvlcPayload>,
 }
 
@@ -182,7 +182,6 @@ pub struct AvlcAddr {
     #[serde(deserialize_with = "deserialize_addr_hex")]
     pub icao24: u32,
     /// Typed address category.
-    #[serde(rename = "type")]
     pub addr_type: AddrType,
     /// Raw status bit.
     ///

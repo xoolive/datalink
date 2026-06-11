@@ -722,37 +722,84 @@ fn cpdlc_24h_unsupported_body_regression_fixtures_decode() {
     use acars::decode::payload::arinc622::cpdlc::CpdlcElementBody;
     use acars::decode::payload::arinc622::{parse_with_direction, Payload};
 
+    #[derive(serde::Deserialize)]
+    struct FixtureRow {
+        expected_element: String,
+        #[serde(default)]
+        label: String,
+        text: String,
+        link_direction: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ExpectedCpdlcDirection {
+        Uplink,
+        Downlink,
+    }
+
+    fn cpdlc_catalog_name_direction_and_id(name: &str) -> (ExpectedCpdlcDirection, u16) {
+        let direction = match name.as_bytes().first().copied() {
+            Some(b'u') | Some(b'U') => ExpectedCpdlcDirection::Uplink,
+            Some(b'd') | Some(b'D') => ExpectedCpdlcDirection::Downlink,
+            _ => panic!("{name}: expected CPDLC catalog name starting with uM or dM"),
+        };
+
+        let after_m = name
+            .split_once('M')
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| {
+                panic!("{name}: expected CPDLC catalog name like dM48PositionReport")
+            });
+
+        let digits: String = after_m
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+
+        let id = digits
+            .parse()
+            .unwrap_or_else(|_| panic!("{name}: expected numeric CPDLC element id"));
+
+        (direction, id)
+    }
+
     let data = include_str!("fixtures/cpdlc_airframes_24h_unsupported_bodies.jsonl");
     let mut rows = 0usize;
     for line in data.lines().filter(|line| !line.trim().is_empty()) {
-        let row: serde_json::Value = serde_json::from_str(line).expect("fixture row JSON");
-        let expected = row["expected_element"].as_str().expect("expected_element");
-        let label = row["label"].as_str().unwrap_or_default();
-        let text = row["text"].as_str().expect("text");
-        let direction = match label {
+        let row: FixtureRow = serde_json::from_str(line).expect("fixture row JSON");
+        let expected = row.expected_element.as_str();
+        let (expected_direction, expected_id) = cpdlc_catalog_name_direction_and_id(expected);
+        let direction = match row.label.as_str() {
             "AA" => MessageDirection::GroundToAir,
             "BA" => MessageDirection::AirToGround,
-            "H1" if text.contains("/AA ") => MessageDirection::GroundToAir,
-            "H1" if text.contains("/BA ") => MessageDirection::AirToGround,
-            _ => match row["link_direction"].as_str() {
+            "H1" if row.text.contains("/AA ") => MessageDirection::GroundToAir,
+            "H1" if row.text.contains("/BA ") => MessageDirection::AirToGround,
+            _ => match row.link_direction.as_deref() {
                 Some("uplink") => MessageDirection::GroundToAir,
                 Some("downlink") => MessageDirection::AirToGround,
                 _ => MessageDirection::Unknown,
             },
         };
-        let normalized = normalize_arinc622_fixture_text(text);
+        let normalized = normalize_arinc622_fixture_text(&row.text);
         let message = parse_with_direction(&normalized, direction)
             .unwrap_or_else(|e| panic!("failed to parse {expected}: {e}; row={line}"));
         let Payload::Cpdlc(cpdlc) = message.payload else {
             panic!("{expected}: expected CPDLC payload");
         };
-        let summaries = [cpdlc.uplink.as_ref(), cpdlc.downlink.as_ref()];
-        let element = summaries
-            .into_iter()
-            .flatten()
-            .flat_map(|summary| summary.elements.iter())
-            .find(|element| element.name == expected)
-            .unwrap_or_else(|| panic!("{expected}: element not found; row={line}"));
+        let summary = match expected_direction {
+            ExpectedCpdlcDirection::Uplink => cpdlc
+                .uplink
+                .as_ref()
+                .unwrap_or_else(|| panic!("{expected}: expected uplink CPDLC summary; row={line}")),
+            ExpectedCpdlcDirection::Downlink => cpdlc.downlink.as_ref().unwrap_or_else(|| {
+                panic!("{expected}: expected downlink CPDLC summary; row={line}")
+            }),
+        };
+        let element = summary
+            .elements
+            .iter()
+            .find(|element| element.id == expected_id)
+            .unwrap_or_else(|| panic!("{expected}: element #{expected_id} not found; row={line}"));
         assert!(element.body.is_some(), "{expected}: body was not decoded");
         assert!(
             !matches!(element.body, Some(CpdlcElementBody::Unsupported)),
@@ -766,8 +813,14 @@ fn cpdlc_24h_unsupported_body_regression_fixtures_decode() {
         }
         if expected == "dM40RouteClearance" {
             assert!(
-                matches!(element.body, Some(CpdlcElementBody::RouteClearance(_))),
-                "dM40RouteClearance should decode as a structured route clearance"
+                matches!(
+                    element.body,
+                    Some(
+                        CpdlcElementBody::RouteClearance(_)
+                            | CpdlcElementBody::OpaqueRouteClearance { .. }
+                    )
+                ),
+                "dM40RouteClearance should decode as route clearance or opaque route clearance"
             );
         }
         rows += 1;

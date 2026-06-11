@@ -45,7 +45,7 @@ pub(crate) struct SourceConfig {
     #[serde(default)]
     pub name: Option<String>,
     /// Optional explicit source class; normally inferred from address fields.
-    #[serde(default, rename = "type")]
+    #[serde(default)]
     pub source_type: Option<SourceClass>,
     #[serde(default)]
     pub file: Option<String>,
@@ -278,13 +278,12 @@ pub(crate) struct DecodedEvent {
     pub kinematics: Option<acars::decode::compact::Kinematics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_frame_hex: Option<String>,
-    #[serde(flatten)]
     pub message: ProtocolMessage,
 }
 
-// TODO re-evaluate if we really want Box and untagged
+// TODO re-evaluate if we really want Box
 #[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub(crate) enum ProtocolMessage {
     Airframes(Box<crate::airframes::AirframesMessage>),
     Avlc(Box<acars::decode::avlc::AvlcFrame>),

@@ -7,7 +7,7 @@ use deku::ctx::Order;
 use deku::no_std_io::{Read, Seek};
 use deku::prelude::*;
 use deku::reader::Reader;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::decode::acars::MessageDirection;
@@ -22,8 +22,7 @@ pub enum Arinc622Error {
 
 /// ARINC 622 Interline Message Identifier (IMI) — 3-character application
 /// routing code embedded in the envelope address.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Imi {
     /// ADS-C report (`ADS`)
     Ads,
@@ -40,8 +39,26 @@ pub enum Imi {
     /// ADS-C disconnect (`DIS`)
     Dis,
     /// Any other 3-character IMI not listed above.
-    #[serde(untagged)]
     Unknown(String),
+}
+
+impl Serialize for Imi {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Imi {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::parse(&value))
+    }
 }
 
 impl Imi {
@@ -90,7 +107,7 @@ pub struct Message {
 
 /// ARINC 622 payload decoded according to `Message::imi`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", content = "data")]
+#[serde(tag = "kind", content = "data")]
 pub enum Payload {
     /// ADS-C message with fully decoded tag list.
     Adsc(adsc::AdscMessage),

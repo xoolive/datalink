@@ -69,7 +69,6 @@ pub struct AirframesFlight {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AirframesMessage {
-    #[serde(flatten)]
     pub payload: AirframesPayload,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub src: Option<AirframesAddr>,
@@ -82,7 +81,6 @@ pub struct AirframesMessage {
 #[derive(Debug, Clone, Serialize)]
 pub struct AirframesAddr {
     pub icao24: String,
-    #[serde(rename = "type")]
     pub addr_type: AirframesAddrType,
 }
 

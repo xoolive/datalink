@@ -50,7 +50,7 @@ pub struct AdscContractRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case", tag = "type", content = "value")]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum AdscContractGroup {
     ReportInterval {
         interval_secs: u32,

@@ -55,7 +55,7 @@ pub struct CpdlcMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CpdlcControlMessage {
     ConnectRequest {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,9 +85,6 @@ pub struct CpdlcPduSummary {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct CpdlcElement {
     pub id: u16,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub template: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<CpdlcElementBody>,
     pub is_additional: bool,
@@ -102,22 +99,12 @@ impl Serialize for CpdlcElement {
             .body
             .as_ref()
             .filter(|body| !matches!(body, CpdlcElementBody::Null));
-        let include_template = self.template.is_some()
-            && !matches!(body, Some(CpdlcElementBody::FreeText(_)))
-            && (body.is_some() || matches!(self.body, Some(CpdlcElementBody::Null)));
-        let mut len = 3;
-        if include_template {
-            len += 1;
-        }
+        let mut len = 2;
         if body.is_some() {
             len += 1;
         }
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("id", &self.id)?;
-        map.serialize_entry("name", &self.name)?;
-        if include_template {
-            map.serialize_entry("template", &self.template)?;
-        }
         if let Some(body) = body {
             map.serialize_entry("body", body)?;
         }
@@ -136,7 +123,6 @@ struct CpdlcCatalog {
 pub struct CpdlcElementInfo {
     pub id: u16,
     pub name: String,
-    pub template: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -457,7 +443,7 @@ pub struct RouteClearance {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", content = "value")]
+#[serde(tag = "kind", content = "value")]
 pub enum RouteInformation {
     PublishedIdentifier {
         fix: String,
@@ -539,7 +525,7 @@ pub struct IcaoUnitName {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", content = "value")]
+#[serde(tag = "kind", content = "value")]
 pub enum IcaoFacilityIdentification {
     Designation(String),
     Name(String),
@@ -558,7 +544,7 @@ pub enum IcaoFacilityFunction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", content = "value")]
+#[serde(tag = "kind", content = "value")]
 pub enum CpdlcFrequency {
     HfKhz(u32),
     VhfKhz(u32),
@@ -589,7 +575,7 @@ pub enum CpdlcDirection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", content = "value")]
+#[serde(tag = "kind", content = "value")]
 pub enum CpdlcPosition {
     FixName(String),
     Navaid(String),
@@ -712,7 +698,7 @@ pub enum CpdlcProcedureType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", content = "value")]
+#[serde(tag = "kind", content = "value")]
 pub enum CpdlcSpeed {
     IndicatedKnots(u16),
     IndicatedKmh(u16),
@@ -901,12 +887,10 @@ fn parse_element(
     is_additional: bool,
 ) -> Result<CpdlcElement, CpdlcDecodeError> {
     let id = bits.read_bits(8)? as u16;
-    let info = element_info(kind, id).ok_or(CpdlcDecodeError::ElementIdOutOfRange(id))?;
+    element_info(kind, id).ok_or(CpdlcDecodeError::ElementIdOutOfRange(id))?;
     let body = parse_element_body(bits, kind, id).ok();
     Ok(CpdlcElement {
         id,
-        name: info.name.clone(),
-        template: info.template.clone(),
         body,
         is_additional,
     })

@@ -12,9 +12,9 @@ use rasn_atn_cpdlc::{
 };
 
 use crate::decode::payload::arinc622::cpdlc::{
-    atn_element_info, AtcMessageHeader as FansHeader, CpdlcElement, CpdlcElementBody,
-    CpdlcFrequency, CpdlcPduSummary, CpdlcTimestamp, IcaoFacilityFunction,
-    IcaoFacilityIdentification, IcaoUnitName, PduKind,
+    AtcMessageHeader as FansHeader, CpdlcElement, CpdlcElementBody, CpdlcFrequency,
+    CpdlcPduSummary, CpdlcTimestamp, IcaoFacilityFunction, IcaoFacilityIdentification,
+    IcaoUnitName, PduKind,
 };
 
 /// Attempt to decode ATN B1 CPDLC from the inner bytes of a ULCS PDV-list
@@ -78,23 +78,9 @@ fn convert_header(h: &rasn_atn_cpdlc::AtcMessageHeader) -> FansHeader {
     }
 }
 
-fn make_element(id: u16, kind: PduKind, body: Option<CpdlcElementBody>) -> CpdlcElement {
-    let info = atn_element_info(kind, id);
-    let template = match &body {
-        Some(CpdlcElementBody::FreeText(_)) => None,
-        Some(CpdlcElementBody::Null) | Some(_) => info.and_then(|i| i.template.clone()),
-        None => None,
-    };
+fn make_element(id: u16, _kind: PduKind, body: Option<CpdlcElementBody>) -> CpdlcElement {
     CpdlcElement {
         id,
-        name: info.map(|i| i.name.clone()).unwrap_or_else(|| {
-            let prefix = match kind {
-                PduKind::Uplink => "uM",
-                PduKind::Downlink => "dM",
-            };
-            format!("{prefix}{id}Unknown")
-        }),
-        template,
         body,
         is_additional: false,
     }
@@ -259,18 +245,18 @@ mod tests {
         let (s, kind) = decode_fixture("00a7332790001e2f39c6c1c6404fe7ce32");
         assert!(matches!(kind, PduKind::Uplink));
         assert_eq!(s.header.msg_id, 0);
-        assert_eq!(s.elements[0].name, "uM227NULL");
-        assert_eq!(
-            s.elements[0].template.as_deref(),
-            Some("LOGICAL ACKNOWLEDGMENT")
-        );
+        assert_eq!(s.elements[0].id, 227);
+        assert!(matches!(
+            s.elements[0].body.as_ref(),
+            Some(CpdlcElementBody::Null)
+        ));
     }
 
     #[test]
     fn contact_with_freetext() {
         let (s, _) = decode_fixture("00a82693304548878bce74009d622c7a950e64f9d127ce03222b7369d16c54414e2c3a93e920874224c868274fa8824ce41569c54156754933104e9f524c693162205a82ad38a82b4f930e2903d51eb7c8");
         assert_eq!(s.header.msg_id, 4);
-        assert_eq!(s.elements[0].name, "uM117UnitNameFrequency");
+        assert_eq!(s.elements[0].id, 117);
         // verify facility EGTT
         if let Some(CpdlcElementBody::IcaoUnitNameFrequency { unit, frequency }) =
             &s.elements[0].body
@@ -295,11 +281,7 @@ mod tests {
     #[test]
     fn next_data_authority() {
         let (s, _) = decode_fixture("00a808e32ae8678bce7c2028226468b14808a578d140");
-        assert_eq!(s.elements[0].name, "uM160Facility");
-        assert_eq!(
-            s.elements[0].template.as_deref(),
-            Some("NEXT DATA AUTHORITY [facility]")
-        );
+        assert_eq!(s.elements[0].id, 160);
         if let Some(CpdlcElementBody::IcaoFacilityDesignation(f)) = &s.elements[0].body {
             assert_eq!(f, "LFEE");
         } else {

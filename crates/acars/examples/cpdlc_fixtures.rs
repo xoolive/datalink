@@ -238,7 +238,7 @@ fn candidate_output<'a>(
     for element in &summary.elements {
         *stats
             .element_counts
-            .entry(format!("{direction}:{}", element.name))
+            .entry(format!("{direction}:{}", element.id))
             .or_default() += 1;
         let element_body_kind = element
             .body
@@ -250,7 +250,7 @@ fn candidate_output<'a>(
             stats.unsupported_bodies += 1;
             *stats
                 .unsupported_counts
-                .entry(format!("{direction}:{}", element.name))
+                .entry(format!("{direction}:{}", element.id))
                 .or_default() += 1;
         } else if element.body.is_some() {
             stats.decoded_bodies += 1;
