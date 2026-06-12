@@ -3,7 +3,7 @@
 //! Media Advisory messages inform the ground about which communication link
 //! an aircraft is currently using and what links are available.
 //!
-//! ## Wire format (ARINC 620 / libacars `media-adv.c`)
+//! ## Wire format (ARINC 620 media advisory)
 //!
 //! ```text
 //! ┌──────────┬──────────┬──────────────┬──────────────────┬─────────────────────────┬──────────────┐

@@ -358,7 +358,7 @@ fn parse_clnp_payload(buf: &[u8]) -> ClnpInner {
             return ClnpInner::Idrp(idrp);
         }
     }
-    // Assume COTP otherwise (same logic as dumpvdl2's parse_clnp_pdu_payload)
+    // In observed VDL2 ATN traffic, non-IDRP CLNP payloads here are COTP segments.
     let cot = parse_cotp_concatenated(buf);
     if !cot.is_empty() {
         return ClnpInner::Cotp(cot);

@@ -1,3 +1,10 @@
+//! Source URL and TOML parsing shared by bearer frontends.
+//!
+//! A [`Source`] describes where samples or frames come from: files, stdin,
+//! RTL-SDR, Airspy, HackRF, or SoapySDR. The parser accepts both CLI URL forms
+//! such as `rtlsdr://0?gain=auto` and TOML-friendly structs used by merged
+//! receiver configuration.
+
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use thiserror::Error;
@@ -7,20 +14,23 @@ pub const DEFAULT_SAMPLE_RATE: u32 = 1_050_000;
 
 use desperado::{Gain, IqFormat};
 
+/// Errors produced while parsing source URLs.
 #[derive(Debug, Error)]
 pub enum SourceParseError {
+    /// The URL scheme is not one of the supported source types.
     #[error("unsupported source scheme: {0}")]
     UnsupportedScheme(String),
+    /// The source string could not be parsed as a URL.
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
 }
 
+/// Concrete source address selected after parsing CLI or TOML input.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", untagged)]
 pub enum Address {
-    File {
-        file: String,
-    },
+    /// File path or `-` for stdin.
+    File { file: String },
     #[cfg(feature = "rtlsdr")]
     Rtlsdr {
         device: Option<usize>,
@@ -32,35 +42,41 @@ pub enum Address {
         serial: Option<String>,
     },
     #[cfg(feature = "hackrf")]
-    Hackrf {
-        device: Option<usize>,
-    },
+    Hackrf { device: Option<usize> },
     #[cfg(feature = "soapy")]
-    Soapy {
-        soapy: String,
-    },
+    Soapy { soapy: String },
 }
 
+/// Complete source description including address and RF/I/Q parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Source {
+    /// Physical or logical input address.
     #[serde(flatten)]
     pub address: Address,
+    /// Optional display name for output metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Recording or tuner center frequency in Hz.
     #[serde(default)]
     pub center_freq: Option<u32>,
+    /// Source sample rate in samples per second.
     #[serde(default)]
     pub sample_rate: Option<u32>,
+    /// Channel center frequencies in Hz.
     #[serde(default, alias = "channel")]
     pub channels: Option<Vec<u32>>,
     #[serde(default)]
-    pub gain: Option<f64>,
+    pub gain: Option<Gain>,
     #[serde(default)]
     pub bias_tee: Option<bool>,
     #[serde(default, alias = "rf_amp")]
     pub amp_enable: Option<bool>,
+    #[serde(default)]
+    pub rf_gain: Option<f64>,
     #[serde(default, alias = "if_gain")]
     pub lna_gain: Option<f64>,
+    #[serde(default)]
+    pub mixer_gain: Option<f64>,
     #[serde(default, alias = "bb_gain")]
     pub vga_gain: Option<f64>,
     #[serde(default, alias = "iq_format")]
@@ -117,8 +133,13 @@ impl Source {
             .unwrap_or(IqFormat::Cu8)
     }
 
-    pub fn gain(&self, default: f64) -> Gain {
-        self.gain.map(Gain::Manual).unwrap_or(Gain::Manual(default))
+    pub fn gain_or(&self, default: Gain) -> Gain {
+        self.gain.clone().unwrap_or(default)
+    }
+
+    pub fn hackrf_amp_enable(&self) -> bool {
+        self.amp_enable
+            .unwrap_or_else(|| self.rf_gain.is_some_and(|gain| gain > 0.0))
     }
 }
 
@@ -138,7 +159,9 @@ impl FromStr for Source {
                 gain: None,
                 bias_tee: None,
                 amp_enable: None,
+                rf_gain: None,
                 lna_gain: None,
+                mixer_gain: None,
                 vga_gain: None,
                 format: None,
             });
@@ -228,7 +251,9 @@ impl FromStr for Source {
             gain: None,
             bias_tee: None,
             amp_enable: None,
+            rf_gain: None,
             lna_gain: None,
+            mixer_gain: None,
             vga_gain: None,
             format: None,
         };
@@ -245,10 +270,12 @@ impl FromStr for Source {
                             source.channels.get_or_insert_with(Vec::new).extend(parsed);
                         }
                     }
-                    "gain" => source.gain = value.parse::<f64>().ok(),
+                    "gain" => source.gain = Gain::parse(&value).ok(),
                     "bias_tee" => source.bias_tee = parse_bool(&value),
                     "amp_enable" | "rf_amp" => source.amp_enable = parse_bool(&value),
+                    "rf_gain" => source.rf_gain = value.parse::<f64>().ok(),
                     "lna_gain" | "if_gain" => source.lna_gain = value.parse::<f64>().ok(),
+                    "mixer_gain" | "mix_gain" => source.mixer_gain = value.parse::<f64>().ok(),
                     "vga_gain" | "bb_gain" => source.vga_gain = value.parse::<f64>().ok(),
                     "format" | "iq_format" => source.format = Some(value.into_owned()),
                     _ if !key.is_empty() && value.is_empty() => {
@@ -342,7 +369,7 @@ mod tests {
     #[test]
     fn parse_hackrf_url() {
         let src: Source =
-            "hackrf://0?center_freq=131.7M&channel=131.525M&rf_amp=true&if_gain=32&bb_gain=20"
+            "hackrf://0?center_freq=131.7M&channel=131.525M&rf_gain=14&if_gain=32&bb_gain=20"
                 .parse()
                 .unwrap();
         match src.address {
@@ -351,7 +378,8 @@ mod tests {
         }
         assert_eq!(src.center_freq_or(0), 131_700_000);
         assert_eq!(src.channels_with(|_| vec![]), vec![131_525_000]);
-        assert_eq!(src.amp_enable, Some(true));
+        assert_eq!(src.rf_gain, Some(14.0));
+        assert!(src.hackrf_amp_enable());
         assert_eq!(src.lna_gain, Some(32.0));
         assert_eq!(src.vga_gain, Some(20.0));
     }

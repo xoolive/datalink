@@ -1,3 +1,15 @@
+//! Compact, cross-protocol extraction helpers.
+//!
+//! The full protocol structs in [`crate::decode`] preserve bearer-specific
+//! details. This module provides small shared summary types used by the CLI to
+//! expose common information across ACARS, VDL2, HFDL, and application payloads.
+//!
+//! The main type is [`Kinematics`], a best-effort aircraft state summary
+//! extracted from payloads such as ADS-C basic reports, CPDLC position reports,
+//! AOC position messages, Airframes.io metadata, or HFDL MPDUs. Implementations
+//! of [`ExtractKinematics`] never replace the original decode; they only add a
+//! convenient normalized view for downstream JSON consumers.
+
 use serde::{Deserialize, Serialize};
 
 use crate::decode::acars::AcarsMessage;

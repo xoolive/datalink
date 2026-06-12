@@ -283,7 +283,7 @@ impl RsDecoder {
                     break;
                 }
             }
-            // update k AFTER body (matching C for-loop increment order)
+            // Update k after the body so the loop state matches the symbol-search ordering.
             k = modnn(k + RS_IPRIM);
         }
         if deg_lambda != count {
@@ -990,7 +990,7 @@ impl Vdl2Channel {
 }
 
 /// Fit a parabola through three equally-spaced points and return the x-coordinate
-/// of its vertex. Ported from dumpvdl2 `calc_para_vertex`.
+/// of its vertex.
 ///
 /// Points are at x-coordinates `x - 2*d`, `x - d`, `x` with y-values `y1`, `y2`, `y3`.
 fn calc_para_vertex(x: f32, d: i32, y1: f32, y2: f32, y3: f32) -> f32 {

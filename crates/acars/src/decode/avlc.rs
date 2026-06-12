@@ -13,7 +13,8 @@
 //! └─────────────┴─────────────┴───────┴─────────────────┴───────┘
 //! ```
 //!
-//! References: dumpvdl2 `avlc.c`, ICAO Doc 9776 (VDL Mode 2 SARPs).
+//! The frame structure follows the VDL Mode 2 AVLC link-layer model defined by
+//! ICAO VDL Mode 2 SARPs.
 
 use deku::prelude::*;
 use serde::{Deserialize, Serialize};

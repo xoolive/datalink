@@ -1,3 +1,10 @@
+//! HFDL frontend for files, SDR streams, and native diagnostics.
+//!
+//! The frontend channelizes HF I/Q sources, runs the experimental native HFDL
+//! demodulator diagnostics, parses candidate PDUs with `acars::decode::hfdl`,
+//! and emits JSON or Redis messages. It shares source parsing with the VDL2 and
+//! VHF frontends but uses HFDL-specific channel defaults and frequency handling.
+
 use crate::source::{Address, Source};
 #[cfg(feature = "hackrf")]
 use crate::util::hackrf_gain;
@@ -21,10 +28,14 @@ const DEFAULT_HFDL_CHANNELS_KHZ: &[f64] = &[
     13342.0, 13351.0,
 ];
 
+/// Supported raw I/Q sample formats for HFDL file and stream input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum SampleFormat {
+    /// Unsigned interleaved 8-bit complex samples.
     U8,
+    /// Signed interleaved 16-bit complex samples.
     Cs16,
+    /// Interleaved 32-bit floating-point complex samples.
     Cf32,
     /// 16-bit stereo WAV I/Q file (auto-selected for .wav sources when --format is omitted).
     Wav16,
@@ -41,6 +52,7 @@ impl SampleFormat {
     }
 }
 
+/// Command-line options for the standalone `datalink hfdl` frontend.
 #[derive(Debug, Parser)]
 #[command(about = "HF Data Link frontend for WAV and I/Q captures")]
 pub(crate) struct Options {
@@ -84,10 +96,12 @@ pub(crate) struct Options {
     redis_retry_interval: Option<u64>,
 }
 
+/// Run the standalone HFDL frontend.
 pub(crate) async fn run(options: Options) -> anyhow::Result<()> {
     decode_mode(&options).await
 }
 
+/// Decode HFDL PDUs from a file source and collect common decoded events for merged mode.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn decode_file_values(
     source: &str,
@@ -169,6 +183,7 @@ async fn decode_mode(options: &Options) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run HFDL diagnostics over the configured source and collect CRC-valid parsed PDUs.
 async fn collect_decoded_pdus(
     options: &Options,
     source_meta: &crate::merged::SourceMetadata,
@@ -358,7 +373,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 device: selector,
                 center_freq,
                 sample_rate,
-                gain: src.gain(49.6),
+                gain: src.gain_or(desperado::Gain::Manual(49.6)),
                 bias_tee: src.bias_tee.unwrap_or(false),
                 freq_correction_ppm: 0,
             };
@@ -375,12 +390,12 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 device: selector,
                 center_freq,
                 sample_rate,
-                gain: src.gain(50.0),
+                gain: src.gain_or(desperado::Gain::Manual(50.0)),
                 bias_tee: src.bias_tee.unwrap_or(false),
                 packing: false,
-                lna_gain: None,
-                mixer_gain: None,
-                vga_gain: None,
+                lna_gain: src.lna_gain.map(|v| v as u8),
+                mixer_gain: src.mixer_gain.map(|v| v as u8),
+                vga_gain: src.vga_gain.map(|v| v as u8),
                 gain_mode: desperado::airspy::AirspyGainMode::Sensitivity,
             };
             Ok(IqAsyncSource::from_device_config(&DeviceConfig::Airspy(cfg)).await?)
@@ -392,7 +407,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 center_freq: center_freq as u64,
                 sample_rate,
                 gain: hackrf_gain(src),
-                amp_enable: src.amp_enable.unwrap_or(false),
+                amp_enable: src.hackrf_amp_enable(),
                 bias_tee: src.bias_tee.unwrap_or(false),
             };
             Ok(IqAsyncSource::from_device_config(&DeviceConfig::HackRf(cfg)).await?)
@@ -404,7 +419,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 center_freq: center_freq as f64,
                 sample_rate: sample_rate as f64,
                 channel: 0,
-                gain: src.gain(49.6),
+                gain: src.gain_or(desperado::Gain::Manual(49.6)),
                 bias_tee: src.bias_tee.unwrap_or(false),
             };
             Ok(IqAsyncSource::from_device_config(&DeviceConfig::Soapy(cfg)).await?)
@@ -516,6 +531,7 @@ fn decode_complex_bytes(format: SampleFormat, raw: &[u8], out: &mut [Complex<f32
     }
 }
 
+/// Resolve requested channels or derive default HFDL channels within the source bandwidth.
 fn channels_khz_for(
     configured_channels: Option<&Vec<f64>>,
     sample_rate: u32,

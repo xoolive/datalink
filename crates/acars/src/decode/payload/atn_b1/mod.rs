@@ -3,6 +3,9 @@
 //! ATN B1 protocols are carried over the VDL2 X.25/COTP path.
 //! After COTP DT reassembly, the user data is a null-session/presentation
 //! header (`0x00`) followed by a UPER-encoded `Fully-encoded-data` PDU.
+//! The observed CPDLC chain is COTP DT user data → ULCS
+//! `FullyEncodedData` → protected ground/aircraft PDU → shared
+//! [`crate::decode::payload::arinc622::cpdlc::CpdlcPduSummary`] output.
 //!
 //! ## Application types
 //!

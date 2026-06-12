@@ -1,3 +1,14 @@
+//! HFDL (High Frequency Data Link) PDU parsing.
+//!
+//! This module decodes already-demodulated HFDL frames into typed SPDU and MPDU
+//! structures. SPDUs carry ground-station system-table information; MPDUs carry
+//! uplink/downlink link PDUs, some of which contain embedded ACARS frames that
+//! are dispatched through [`crate::decode::acars`].
+//!
+//! The parser is intentionally separate from the optional native HF demodulator
+//! in [`crate::demod::hfdl`]. Parser-only users can decode captured HFDL bytes
+//! without enabling the `demod` feature.
+
 use crate::decode::acars::{parse_acars_frame, AcarsMessage, MessageDirection};
 use crate::decode::DecodeError;
 use serde::{Deserialize, Serialize};

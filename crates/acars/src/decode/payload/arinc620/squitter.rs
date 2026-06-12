@@ -1,3 +1,9 @@
+//! ARINC 620 / ACARS `SQ` squitter messages.
+//!
+//! Squitters are ground-station broadcasts that advertise station identity,
+//! airport, provider, link, frequency, and sometimes station coordinates. They
+//! are useful as link metadata rather than aircraft application traffic.
+
 use serde::{Deserialize, Serialize};
 
 use crate::decode::payload::PayloadError;

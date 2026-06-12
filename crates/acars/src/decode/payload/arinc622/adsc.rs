@@ -1,3 +1,14 @@
+//! ARINC 622 ADS-C application payloads.
+//!
+//! ADS-C (Automatic Dependent Surveillance — Contract) messages are carried in
+//! FANS-1/A ARINC 622 envelopes with IMI `ADS`. Downlink reports from the
+//! aircraft include position, altitude, route, meteo, and event tags; uplink
+//! messages from the ground request or cancel contracts.
+//!
+//! The public entry point for standalone application text is
+//! [`parse_adsc_app_text`]. Normal ACARS label routing reaches this module via
+//! [`super::parse_with_direction`] and [`super::parse_and_dispatch`].
+
 use deku::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -622,9 +633,9 @@ pub fn parse_adsc_payload_bytes_with_direction(
 fn parse_contract_request(buf: &[u8], idx: &mut usize) -> DecodeResult<AdscContractRequest> {
     let contract_number = take(buf, idx, 1)?[0];
     let mut groups = Vec::new();
-    // Request sub-tags follow until end of buffer or an unknown tag id appears
-    // (libacars stops at the first unrecognized request tag, treating it as the
-    // start of the next uplink tag).
+    // Request sub-tags follow until end of buffer or an unknown tag id appears.
+    // Unknown values are treated as the start of the next uplink tag so partial
+    // contract requests can still be decoded.
     const KNOWN_REQUEST_TAGS: &[u8] = &[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
     while *idx < buf.len() {
         let sub = buf[*idx];

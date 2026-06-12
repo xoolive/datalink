@@ -1,15 +1,28 @@
+//! Shared I/Q sample-processing loop for channelized demodulators.
+//!
+//! `IqPipeline` owns the repeated mechanics common to VDL2, VHF ACARS, and
+//! merged receivers: feed raw complex samples through a resampler, update a
+//! recording timestamp, run every channel demodulator, and return decoded frame
+//! candidates with a [`FrameContext`].
+
 use acars::demod::resample::ResampleAdapter;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
+/// Timing and channel metadata attached to a demodulated frame candidate.
 pub(crate) struct FrameContext {
+    /// Index of the demodulator/channel that produced the frame.
     pub channel_index: usize,
+    /// Number of output-rate samples processed since the start of the run.
     pub sample_index: u64,
+    /// Seconds elapsed from the beginning of the recording or live run.
     pub seconds_into_recording: f64,
+    /// Best-effort Unix timestamp derived from the run start plus elapsed samples.
     pub timestamp_unix: f64,
 }
 
+/// Stateful adapter that feeds one resampled I/Q stream into many demodulators.
 pub(crate) struct IqPipeline<'a, D> {
     adapter: &'a mut ResampleAdapter,
     demods: &'a mut [D],
@@ -36,6 +49,7 @@ impl<'a, D> IqPipeline<'a, D> {
     }
 }
 
+/// Feed one chunk of complex samples through the pipeline and collect emitted frames.
 pub(crate) fn collect_iq_frames<D, Frame, Frames, Process>(
     pipeline: &mut IqPipeline<'_, D>,
     re: f32,

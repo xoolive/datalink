@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 
 #[test]
-fn acars_raw_frame_vectors_from_libacars_docs() {
+fn acars_raw_frame_vectors_from_documented_examples() {
     let data = include_str!("fixtures/acars_raw_frames.txt");
 
     for line in data
@@ -75,7 +75,7 @@ fn acars_raw_frame_vectors_from_libacars_docs() {
 }
 
 #[test]
-fn h1_sublabel_mfi_vectors_from_libacars_examples() {
+fn h1_sublabel_mfi_vectors_from_documented_examples() {
     let data = include_str!("fixtures/h1_sublabel_mfi.txt");
 
     for line in data
@@ -113,7 +113,7 @@ fn h1_sublabel_mfi_vectors_from_libacars_examples() {
 }
 
 #[test]
-fn acars_app_payload_prefix_vectors_from_libacars_examples() {
+fn acars_app_payload_prefix_vectors_from_documented_examples() {
     let data = include_str!("fixtures/acars_app_payloads.txt");
 
     for line in data

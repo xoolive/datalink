@@ -6,11 +6,6 @@
 //!
 //! The outer MIAM frame consists of a single-character frame-id byte followed by text.
 //! The inner MIAM CORE PDU header + body are base85-encoded and separated by `|`.
-//!
-//! References:
-//! - `../../github/libacars/libacars/miam.c`
-//! - `../../github/libacars/libacars/miam-core.c`
-//! - `../../github/libacars/libacars/miam-core.h`
 
 use deku::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -56,7 +51,7 @@ impl MiamFrameId {
     }
 }
 
-// Byte layout (big-endian bit ordering, matching libacars miam-core.c):
+// MIAM CORE byte layout (big-endian bit ordering):
 //
 //  byte 0:  [pdu_type:4][version:4]
 //  bytes 1-3: [pdu_len:24] (big-endian)
@@ -64,8 +59,8 @@ impl MiamFrameId {
 //  byte 11: [msg_num:7][ack_option:1]
 //  bytes 12-13: [compression:10 split as {8 from byte12, 2 from byte13_hi}][encoding:4][app_type:4]
 //               = effectively byte12 is [compression[9:2]], byte13 is [compression[1:0]|encoding|app_type]
-//               libacars: compression = ((b[0]<<2) | ((b[1]>>6)&3)) & 7
-//               That's a 3-bit field split across two bytes (bits [9:7] of the pair, then [6:5])
+//               compression = ((b[0]<<2) | ((b[1]>>6)&3)) & 7
+//               This is a 3-bit field split across two bytes (bits [9:7] of the pair, then [6:5])
 //               In practice only bits 2..0 of the first byte and bits 7..6 of the second are used.
 //  bytes 14+: app_id[2|4|6], then crc32[4]
 
@@ -85,7 +80,7 @@ pub(crate) struct MiamCoreV1RawHdr {
     #[deku(bits = 1)]
     pub ack_option: u8,
     // compression is 3 bits split: bits[9:7] from byte12, bits[6:5] from byte13
-    // libacars reads: compression = ((b[0]<<2) | ((b[1]>>6)&3)) & 7
+    // compression = ((b[0]<<2) | ((b[1]>>6)&3)) & 7
     // = (b12[2:0] << 2) | b13[7:6]  → but the outer <<2 means b12 contributes only 1 bit at bit2
     // More precisely: take full byte12 and byte13, then:
     //   compression = ((byte12 << 2) | (byte13 >> 6)) & 7

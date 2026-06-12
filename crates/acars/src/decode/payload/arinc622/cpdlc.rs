@@ -1,3 +1,15 @@
+//! FANS-1/A CPDLC decoder for ARINC 622 payloads.
+//!
+//! This module decodes CPDLC application bodies carried by ARINC 622 IMIs such
+//! as `AT1`, `CR1`, `CC1`, and `DR1`. It parses the FANS-1/A ATC message header,
+//! message elements, and common element bodies into the shared
+//! [`CpdlcPduSummary`] / [`CpdlcElement`] representation used by both FANS-1/A
+//! and ATN B1 CPDLC output.
+//!
+//! Element names and message templates are backed by the bundled
+//! `data/cpdlc_fans.json` catalog; unsupported bodies are preserved as element
+//! IDs and names instead of causing the entire payload to be dropped.
+
 use std::sync::OnceLock;
 
 use serde::ser::SerializeMap;

@@ -1,3 +1,11 @@
+//! Parsers and normalized helper types for aviation datalink frames.
+//!
+//! The `decode` tree is intentionally independent from SDR input. It accepts
+//! already-demodulated bytes or application text and returns typed Rust structs
+//! with serde support. Bearer modules such as [`acars`], [`avlc`], [`hfdl`],
+//! [`x25`], and [`xid`] preserve protocol-specific detail; [`compact`] adds
+//! small cross-protocol extraction helpers.
+
 pub mod acars;
 pub mod avlc;
 pub mod compact;

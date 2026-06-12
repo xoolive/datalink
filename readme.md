@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="logo.png" alt="datalink Logo" width="200"/>
+</div>
+
 # datalink
 
 `datalink` is a Rust aviation datalink workspace with a reusable decode library and a
@@ -7,19 +11,9 @@ single CLI for demodulating and decoding aviation datalink traffic.
   HFDL PDU parsing, and optional demodulators.
 - `crates/datalink` — CLI application for bearer frontends, standalone frame decoding, Airframes.io input, Redis/JSONL output, and merged receiver configurations.
 
-## Current capabilities
-
-- Decode standalone hex frames/payloads:
-  - ACARS frames
-  - AVLC frames, including FCS status
-  - ADS-C application text payloads
-- Demodulate and decode VDL2 from WAV I/Q recordings, raw I/Q recordings, or SDR sources.
-- Demodulate and decode classic VHF ACARS from WAV I/Q recordings, raw I/Q recordings, or SDR sources.
-- Demodulate and decode HFDL from WAV I/Q recordings, raw I/Q recordings, or SDR sources.
-- Consume Airframes.io websocket events.
-- Run merged receiver configurations from TOML.
-- Emit compact JSON/JSONL, optionally with raw nested decode data.
-- Optionally publish decoded output to Redis.
+`datalink` can decode standalone frames, demodulate VDL2 / VHF ACARS / HFDL I/Q sources,
+consume Airframes.io websocket events, run merged TOML receiver configurations, and emit
+JSONL or Redis pub/sub output.
 
 ## CLI overview
 
@@ -53,8 +47,6 @@ datalink decode avlc '<hex>'
 datalink decode adsc '/ATSU.ADS....'
 ```
 
-Add `--raw` to include the full nested decoder output under `raw_decode`.
-
 ### VDL2 frontend
 
 ```sh
@@ -66,7 +58,6 @@ Useful options:
 
 - `--output <file>` — write decoded JSONL in addition to stdout.
 - `--stats` — print demod/decode counters.
-- `--raw` — include raw nested decode.
 - `--redis-url <url>` — publish decoded records to application-specific Redis topics.
 
 ### Classic VHF ACARS frontend
@@ -80,7 +71,6 @@ Useful options:
 
 - `--output <file>` — write decoded JSONL in addition to stdout.
 - `--stats` — print demod/decode counters.
-- `--raw` — include raw nested decode.
 - `--redis-url <url>` — publish decoded messages to application-specific Redis topics.
 
 ### HFDL frontend
@@ -121,7 +111,10 @@ VDL2 and VHF currently accept:
 
 Common source query parameters include `format`, `center_freq`/`freq`,
 `sample_rate`/`rate`, `channel`/`channels`, `gain`, `bias_tee`, and device-specific gain
-settings.
+settings. If `gain` is omitted, datalink applies its per-device default; `gain=auto`
+explicitly requests device automatic gain control where supported. HackRF accepts
+`amp_enable`/`rf_amp` for its 14 dB RF amplifier plus `lna_gain`/`if_gain` and
+`vga_gain`/`bb_gain` for stage gains.
 
 For file captures, `datalink` can infer center frequency, sample rate, and `cf32` format
 from Gqrx-style filenames such as `gqrx_20260518_114025_136500000_1800000_fc.raw`. It can
@@ -133,30 +126,24 @@ The `acars` crate is the reusable decode library. Its demodulators are behind th
 `demod` feature so pure parser users do not need to pull in SDR/DSP dependencies.
 
 - Default `acars` build: decode/parsing only.
-- `acars` with `features = ["demod"]`: adds VDL2, VHF ACARS, HFDL demod support.
+- `acars` with `features = ["demod"]`: adds VDL2, VHF ACARS, and HFDL demod support.
 
-The `datalink` CLI enables `acars/demod` because it includes demodulating frontends.
+The `datalink` CLI enables `acars/demod` because it includes demodulating frontends. See
+`crates/acars/readme.md` for the library API overview until the crate is published on docs.rs.
 
 ## Cargo features
 
 `datalink` defaults to SDR and websocket support:
 
 ```text
-default = ["rtlsdr", "airspy", "hackrf", "soapy", "websocket"]
+default = ["rtlsdr", "airspy", "hackrf", "websocket"]
 ```
 
 Individual SDR features can be disabled or selected with normal Cargo feature flags.
 
 ## Project direction
 
-The project is Rust-native rather than a direct port of one existing decoder. The goal is a
+The project is Rust-native rather than a direct port of an existing decoder. The goal is a
 shared Rust library plus a consistent JSON-facing CLI across VDL2, VHF ACARS, HFDL, and
-external event sources.
-
-Reference projects:
-
-- https://github.com/szpajder/libacars
-- https://github.com/TLeconte/acarsdec
-- https://github.com/szpajder/dumpvdl2
-- https://github.com/szpajder/dumphfdl
-- https://github.com/jontio/JAERO
+external event sources, following the relevant datalink standards and preserving unknown
+or vendor-specific payloads for later analysis.

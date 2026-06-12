@@ -1,3 +1,10 @@
+//! Airframes.io websocket ingestion and normalization.
+//!
+//! This module connects to the Airframes Socket.IO websocket, subscribes to the
+//! selected events, maps upstream rows into the common [`crate::merged::DecodedEvent`]
+//! envelope, and reuses the ACARS payload dispatcher when an event contains
+//! label/text application data.
+
 use acars::decode::acars::{decode_acars_text_payload, MessageDirection};
 use acars::decode::payload::AcarsAppPayload;
 use clap::Parser;
@@ -15,10 +22,15 @@ use crate::merged::{
 const DEFAULT_AIRFRAMES_WS: &str = "wss://ws.airframes.io/socket.io/?EIO=4&transport=websocket";
 
 #[derive(Debug, Clone)]
+/// Parsed Airframes.io websocket source configuration.
 pub(crate) struct Source {
+    /// Socket.IO websocket endpoint.
     websocket: String,
+    /// Optional authentication token passed during the Socket.IO handshake.
     token: Option<String>,
+    /// Event names to consume; `*` captures every event.
     events: Vec<String>,
+    /// Optional display name used in output metadata.
     name: Option<String>,
 }
 
@@ -28,6 +40,10 @@ struct AirframesAuth<'a> {
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
+/// Upstream Airframes.io message payload.
+///
+/// Fields are optional because the global stream contains a mix of fully decoded
+/// ACARS rows, metadata-only VDL rows, station events, and partial records.
 pub struct AirframesPayload {
     pub label: Option<String>,
     pub text: Option<String>,
@@ -68,6 +84,7 @@ pub struct AirframesFlight {
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// Airframes row plus best-effort normalized addresses and decoded app payload.
 pub struct AirframesMessage {
     pub payload: AirframesPayload,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,8 +104,11 @@ pub struct AirframesAddr {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AirframesAddrType {
+    /// Address is believed to identify an aircraft.
     Aircraft,
+    /// Address is believed to identify a ground station.
     GroundStation,
+    /// Address role could not be inferred from the row.
     Unknown,
 }
 
@@ -175,6 +195,7 @@ pub(crate) struct Options {
     redis_retry_interval: u64,
 }
 
+/// Run the standalone `datalink airframes.io` frontend.
 pub(crate) async fn run(options: Options) -> anyhow::Result<()> {
     let source: Source = options
         .source
@@ -202,6 +223,7 @@ pub(crate) async fn run(options: Options) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run an Airframes event source declared in merged receiver configuration.
 pub(crate) async fn run_config_source(
     source: &SourceConfig,
     output: &mut OutputSink,
@@ -281,6 +303,7 @@ async fn run_source(
     Ok(())
 }
 
+/// Convert one upstream Airframes event payload into the common decoded-event envelope.
 pub(crate) fn normalize_payload(
     source: SourceMetadata,
     event: &str,
@@ -423,6 +446,7 @@ fn normalize_hex_addr(value: &str) -> Option<String> {
         .then(|| value.to_ascii_lowercase())
 }
 
+/// Extract the best available aircraft ICAO24 address from an Airframes message.
 pub(crate) fn extract_airframes_aircraft(msg: &AirframesMessage) -> Option<String> {
     if let Some(icao) = msg
         .payload
@@ -442,6 +466,7 @@ pub(crate) fn extract_airframes_aircraft(msg: &AirframesMessage) -> Option<Strin
         .map(|addr| addr.icao24.clone())
 }
 
+/// Extract the best available aircraft registration from an Airframes row.
 pub(crate) fn extract_airframes_registration(row: &AirframesPayload) -> Option<String> {
     row.tail
         .as_deref()
@@ -451,6 +476,7 @@ pub(crate) fn extract_airframes_registration(row: &AirframesPayload) -> Option<S
         .map(str::to_string)
 }
 
+/// Build normalized kinematics from Airframes top-level and nested flight fields.
 pub(crate) fn airframes_payload_kinematics(
     payload: &AirframesPayload,
 ) -> Option<acars::decode::compact::Kinematics> {

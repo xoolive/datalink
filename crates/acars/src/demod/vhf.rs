@@ -1,3 +1,10 @@
+//! Classic VHF ACARS MSK demodulator.
+//!
+//! This module turns complex baseband samples into candidate ACARS frame bytes.
+//! It performs filtering, timing recovery, frame synchronization, and byte
+//! extraction for 2,400 bit/s plain ACARS channels. Frame parsing itself remains
+//! in [`crate::decode::acars`].
+
 use std::f32::consts::PI;
 
 use desperado::dsp::chebyshev::Chebyshev2Lpf;

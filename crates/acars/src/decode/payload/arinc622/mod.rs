@@ -1,3 +1,11 @@
+//! ARINC 622 envelope parsing and IMI-based application dispatch.
+//!
+//! ARINC 622 messages are embedded in ACARS text as `/<ATSU>.<IMI>.<REG>...`.
+//! The ATSU address identifies the ground endpoint, the IMI selects the
+//! application, and the rest of the text is application-specific data. This
+//! module parses the common envelope and routes implemented IMIs to ADS-C,
+//! FANS-1/A CPDLC, AFN, oceanic clearance, or preserved raw payloads.
+
 pub mod adsc;
 pub mod afn;
 pub mod cpdlc;

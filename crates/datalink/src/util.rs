@@ -1,7 +1,14 @@
+//! Miscellaneous helpers shared by frontends and merged receiver mode.
+//!
+//! This module contains path expansion, timestamp deserialization, hexadecimal
+//! formatting, capture-parameter inference from common SDR filenames, hardware
+//! gain helpers, and Redis pub/sub publishing for decoded application messages.
+
 use crate::merged::ProtocolMessage;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Expand a leading `~/` path segment to the current user's home directory.
 pub(crate) fn expanduser(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
@@ -11,6 +18,7 @@ pub(crate) fn expanduser(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Deserialize either numeric epoch seconds or an RFC 3339 timestamp into epoch seconds.
 pub fn deserialize_timestamp<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -57,6 +65,7 @@ where
     deserializer.deserialize_any(TsVisitor)
 }
 
+/// Format bytes as uppercase hexadecimal for JSON output.
 pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -66,13 +75,18 @@ pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// RF/I/Q parameters inferred from a capture filename.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CaptureParams {
+    /// Center frequency in Hz.
     pub center_freq: u32,
+    /// Sample rate in samples per second, when present in the filename.
     pub sample_rate: Option<u32>,
+    /// I/Q format hint, such as `cf32` for Gqrx float captures.
     pub format: Option<&'static str>,
 }
 
+/// Infer capture parameters from known filename conventions.
 pub(crate) fn infer_capture_params(path: &str) -> Option<CaptureParams> {
     infer_gqrx_capture_params(path).or_else(|| {
         infer_sdruno_center_freq(path).map(|center_freq| CaptureParams {
@@ -132,7 +146,7 @@ pub(crate) fn hackrf_gain(src: &crate::source::Source) -> desperado::Gain {
         });
     }
     if elements.is_empty() {
-        src.gain(30.0)
+        src.gain_or(desperado::Gain::Manual(30.0))
     } else {
         desperado::Gain::Elements(elements)
     }
@@ -140,25 +154,43 @@ pub(crate) fn hackrf_gain(src: &crate::source::Source) -> desperado::Gain {
 
 #[cfg(feature = "airspy")]
 pub(crate) fn parse_airspy_serial(value: &str) -> anyhow::Result<u64> {
-    if let Some(hex) = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-    {
-        return Ok(u64::from_str_radix(hex, 16)?);
-    }
-    value
-        .parse::<u64>()
-        .or_else(|_| u64::from_str_radix(value, 16))
-        .map_err(Into::into)
+    desperado::sdr::parse_airspy_serial(value).map_err(anyhow::Error::msg)
 }
 
+/// Select the Redis pub/sub topic for a decoded protocol message.
 pub(crate) fn redis_topic_for_record(record: &ProtocolMessage) -> &'static str {
     match record {
         ProtocolMessage::Avlc(frame) => {
             if let Some(payload) = &frame.payload {
                 match payload {
                     acars::decode::avlc::AvlcPayload::Acars(acars) => acars_redis_topic(&acars.app),
-                    acars::decode::avlc::AvlcPayload::X25(_) => "datalink-x25",
+                    acars::decode::avlc::AvlcPayload::X25(x25) => {
+                        // Publish on datalink-cpdlc if the X.25/COTP payload
+                        // contains an ATN B1 CPDLC message; otherwise datalink-x25.
+                        let has_atn_cpdlc = x25
+                            .inner
+                            .as_ref()
+                            .and_then(|inner| {
+                                if let acars::decode::x25::X25Inner::ClnpCompressed(clnp) = inner {
+                                    clnp.inner.as_ref()
+                                } else {
+                                    None
+                                }
+                            })
+                            .map(|clnp_inner| {
+                                if let acars::decode::x25::ClnpInner::Cotp(pdus) = clnp_inner {
+                                    pdus.iter().any(|p| p.atn_cpdlc.is_some())
+                                } else {
+                                    false
+                                }
+                            })
+                            .unwrap_or(false);
+                        if has_atn_cpdlc {
+                            "datalink-cpdlc"
+                        } else {
+                            "datalink-x25"
+                        }
+                    }
                     acars::decode::avlc::AvlcPayload::Xid(_) => "datalink-xid",
                     acars::decode::avlc::AvlcPayload::Unknown(_) => "datalink-unknown",
                 }
@@ -197,6 +229,7 @@ fn acars_redis_topic(app: &acars::decode::payload::AcarsAppPayload) -> &'static 
     }
 }
 
+/// Minimal Redis pub/sub publisher with optional retry-on-failure behaviour.
 pub(crate) struct RedisPublisher {
     connection: redis::aio::MultiplexedConnection,
     retry_interval: Duration,
@@ -204,10 +237,12 @@ pub(crate) struct RedisPublisher {
 }
 
 impl RedisPublisher {
+    /// Connect to Redis using the default log prefix.
     pub(crate) async fn connect(url: &str, retry_interval_secs: u64) -> anyhow::Result<Self> {
         Self::connect_with_prefix(url, retry_interval_secs, "datalink").await
     }
 
+    /// Connect to Redis using a caller-specific log prefix.
     pub(crate) async fn connect_with_prefix(
         url: &str,
         retry_interval_secs: u64,
@@ -222,6 +257,7 @@ impl RedisPublisher {
         })
     }
 
+    /// Publish one payload to a topic, retrying after reconnect when configured.
     pub(crate) async fn publish(&mut self, topic: &str, payload: &str) {
         use redis::AsyncCommands;
         loop {

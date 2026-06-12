@@ -1,3 +1,10 @@
+//! Classic VHF ACARS frontend.
+//!
+//! This module implements the `datalink vhf` command: open a file or SDR source,
+//! channelize classic ACARS frequencies, demodulate 2,400 bit/s MSK frames,
+//! parse ACARS messages, and emit normalized JSONL or Redis messages.
+//! Configuration can come from CLI options or merged receiver TOML.
+
 use crate::iq_pipeline::{collect_iq_frames, FrameContext, IqPipeline};
 use crate::source::{Address, Source};
 use crate::util::{bytes_to_hex, expanduser, infer_capture_params, RedisPublisher};
@@ -5,6 +12,7 @@ use acars::decode::acars::{parse_acars_frame, MessageDirection};
 use acars::demod::resample::{maybe_resample, ResampleAdapter};
 use acars::demod::vhf::VhfChannel;
 use clap::Parser;
+use desperado::dsp::channelizer::Channelizer;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use std::time::SystemTime;
@@ -28,6 +36,7 @@ fn auto_channels(src: &Source) -> Vec<u32> {
     auto_channels_for(src.center_freq_or(DEFAULT_CENTER_FREQ), src.sample_rate())
 }
 
+/// Internal VHF ACARS configuration after merging TOML, source URL, and CLI values.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub(crate) struct Options {
     #[serde(default)]
@@ -50,6 +59,7 @@ pub(crate) struct Options {
     source: Option<Source>,
 }
 
+/// Command-line options for the standalone `datalink vhf` frontend.
 #[derive(Debug, Default, Clone, Parser)]
 #[command(about = "Classic VHF ACARS frontend")]
 pub(crate) struct Cli {
@@ -121,6 +131,7 @@ struct DecodeStats {
     parse_fail: u64,
 }
 
+/// Run the standalone classic VHF ACARS frontend from CLI arguments.
 pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
     let mut options = Options::default();
     options.apply_cli_overrides(cli);
@@ -204,6 +215,7 @@ fn apply_source_overrides(options: &mut Options) {
     }
 }
 
+/// Decode a VHF ACARS file source and collect common decoded events for merged mode.
 pub(crate) async fn decode_file_values(
     file: &str,
     format: Option<&str>,
@@ -224,7 +236,9 @@ pub(crate) async fn decode_file_values(
         gain: None,
         bias_tee: None,
         amp_enable: None,
+        rf_gain: None,
         lna_gain: None,
+        mixer_gain: None,
         vga_gain: None,
         format: format.map(str::to_string),
     };
@@ -269,57 +283,60 @@ async fn decode_source(
     let center_freq = effective_src.center_freq_or(DEFAULT_CENTER_FREQ);
     let raw_sample_rate = effective_src.sample_rate();
     let channels = effective_src.channels_with(auto_channels);
-
-    // Resample to nearest valid ACARS-131 demod rate (integer multiple of 12 500 Hz)
-    let (sample_rate, resample_rs) = maybe_resample(raw_sample_rate, 12_500);
-    let mut adapter = ResampleAdapter::new(resample_rs);
-    if sample_rate != raw_sample_rate {
-        eprintln!(
-            "datalink vhf: resampling {:.3} MHz \u{2192} {:.3} MHz for ACARS demod",
-            raw_sample_rate as f64 / 1e6,
-            sample_rate as f64 / 1e6
-        );
-    }
+    let demod_sample_rate = 125_000;
+    let mut channelizer = Channelizer::from_absolute_frequencies(
+        center_freq,
+        raw_sample_rate,
+        demod_sample_rate,
+        &channels,
+    )
+    .map_err(|err| anyhow::anyhow!(err))?;
 
     let mut demods: Vec<VhfChannel> = channels
         .iter()
-        .map(|&ch_freq| VhfChannel::new(sample_rate as f32, ch_freq as f32 - center_freq as f32))
+        .map(|_| VhfChannel::new(demod_sample_rate as f32, 0.0))
         .collect();
 
     let mut stream = open_source(&effective_src).await?;
     let run_start = SystemTime::now();
-    let mut sample_index: u64 = 0;
+    let mut sample_indices = vec![0_u64; channels.len()];
     let mut stats = DecodeStats::default();
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
-        for raw_sample in &chunk {
-            let mut pipeline = IqPipeline::new(
-                &mut adapter,
-                &mut demods,
-                &mut sample_index,
-                sample_rate,
-                run_start,
-            );
-            let frames =
-                collect_iq_frames(&mut pipeline, raw_sample.re, raw_sample.im, |d, re, im| {
-                    Ok(d.process_sample(re, im))
-                })?;
-            for (ctx, demod_frame) in frames {
-                handle_acars_frame(
-                    &channels,
-                    FrameSinks {
-                        output: output.as_deref_mut(),
-                        redis: redis.as_deref_mut(),
-                        collect: collect.as_deref_mut(),
-                    },
-                    &mut stats,
-                    ctx,
-                    demod_frame,
-                    source_meta,
-                    receiver_bearer,
-                )
-                .await?;
+        for channel_chunk in channelizer.process(&chunk) {
+            let idx = channel_chunk.channel_index;
+            for sample in channel_chunk.samples {
+                let one = std::slice::from_mut(&mut demods[idx]);
+                let mut passthrough = ResampleAdapter::new(None);
+                let mut pipeline = IqPipeline::new(
+                    &mut passthrough,
+                    one,
+                    &mut sample_indices[idx],
+                    demod_sample_rate,
+                    run_start,
+                );
+                let frames =
+                    collect_iq_frames(&mut pipeline, sample.re, sample.im, |d, re, im| {
+                        Ok(d.process_sample(re, im))
+                    })?;
+                for (mut ctx, demod_frame) in frames {
+                    ctx.channel_index = idx;
+                    handle_acars_frame(
+                        &channels,
+                        FrameSinks {
+                            output: output.as_deref_mut(),
+                            redis: redis.as_deref_mut(),
+                            collect: collect.as_deref_mut(),
+                        },
+                        &mut stats,
+                        ctx,
+                        demod_frame,
+                        source_meta,
+                        receiver_bearer,
+                    )
+                    .await?;
+                }
             }
         }
     }
@@ -333,6 +350,7 @@ struct FrameSinks<'a> {
     collect: Option<&'a mut Vec<crate::merged::DecodedEvent>>,
 }
 
+/// Parse one demodulated ACARS frame and emit it to configured sinks.
 async fn handle_acars_frame(
     channels: &[u32],
     mut sinks: FrameSinks<'_>,
@@ -491,6 +509,7 @@ fn file_source_path(src: &Source) -> Option<&str> {
     }
 }
 
+/// Open a VHF-compatible file, stdin, or SDR source as an async I/Q stream.
 async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
     use desperado::{DeviceConfig, IqAsyncSource};
 
@@ -504,7 +523,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
             src.iq_format(),
         )),
         Address::File { file } => Ok(IqAsyncSource::from_file(
-            file,
+            expanduser(file),
             center_freq,
             sample_rate,
             DEFAULT_CHUNK_SIZE,
@@ -526,7 +545,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 device: selector,
                 center_freq,
                 sample_rate,
-                gain: src.gain(49.6),
+                gain: src.gain_or(desperado::Gain::Manual(49.6)),
                 bias_tee: src.bias_tee.unwrap_or(false),
                 freq_correction_ppm: 0,
             };
@@ -543,12 +562,12 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 device: selector,
                 center_freq,
                 sample_rate,
-                gain: src.gain(50.0),
+                gain: src.gain_or(desperado::Gain::Manual(50.0)),
                 bias_tee: src.bias_tee.unwrap_or(false),
                 packing: false,
-                lna_gain: None,
-                mixer_gain: None,
-                vga_gain: None,
+                lna_gain: src.lna_gain.map(|v| v as u8),
+                mixer_gain: src.mixer_gain.map(|v| v as u8),
+                vga_gain: src.vga_gain.map(|v| v as u8),
                 gain_mode: desperado::airspy::AirspyGainMode::Sensitivity,
             };
             Ok(IqAsyncSource::from_device_config(&DeviceConfig::Airspy(cfg)).await?)
@@ -560,7 +579,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 center_freq: center_freq as u64,
                 sample_rate,
                 gain: crate::util::hackrf_gain(src),
-                amp_enable: src.amp_enable.unwrap_or(false),
+                amp_enable: src.hackrf_amp_enable(),
                 bias_tee: src.bias_tee.unwrap_or(false),
             };
             Ok(IqAsyncSource::from_device_config(&DeviceConfig::HackRf(cfg)).await?)
@@ -572,7 +591,7 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
                 center_freq: center_freq as f64,
                 sample_rate: sample_rate as f64,
                 channel: 0,
-                gain: src.gain(49.6),
+                gain: src.gain_or(desperado::Gain::Manual(49.6)),
                 bias_tee: src.bias_tee.unwrap_or(false),
             };
             Ok(IqAsyncSource::from_device_config(&DeviceConfig::Soapy(cfg)).await?)
@@ -598,7 +617,9 @@ mod tests {
             gain: None,
             bias_tee: None,
             amp_enable: None,
+            rf_gain: None,
             lna_gain: None,
+            mixer_gain: None,
             vga_gain: None,
             format: None,
         }

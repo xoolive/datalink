@@ -1,9 +1,30 @@
-use crate::util::{expanduser, RedisPublisher};
+//! Merged receiver configuration and output pipeline.
+//!
+//! Merged mode runs when `datalink` is started without a bearer subcommand. A
+//! TOML configuration describes sources, receiver pipelines attached to I/Q
+//! sources, event sources such as Airframes.io, and output sinks. This module
+//! validates the configuration, fans samples into bearer decoders, wraps decoded
+//! protocol bodies in a common [`DecodedEvent`] envelope, and writes JSONL or
+//! Redis pub/sub output.
+
+use crate::iq_pipeline::{collect_iq_frames, IqPipeline};
+use crate::source::Source;
+use crate::util::{bytes_to_hex, expanduser, RedisPublisher};
+use acars::decode::acars::{parse_acars_frame, MessageDirection};
+use acars::decode::avlc::parse_avlc_frame;
+use acars::demod::resample::ResampleAdapter;
+use acars::demod::vdl2::{Vdl2Channel, SYMBOL_RATE};
+use acars::demod::vhf::VhfChannel;
+use desperado::dsp::channelizer::Channelizer;
+use desperado::Gain;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::time::SystemTime;
 
+/// Top-level TOML configuration for merged receiver mode.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
@@ -13,6 +34,7 @@ pub(crate) struct Config {
     pub sources: Vec<SourceConfig>,
 }
 
+/// Output sink configuration shared by standalone and merged frontends.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OutputConfig {
@@ -38,6 +60,7 @@ impl Default for OutputConfig {
     }
 }
 
+/// One configured input source in merged receiver mode.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SourceConfig {
@@ -66,10 +89,14 @@ pub(crate) struct SourceConfig {
     #[serde(default, alias = "iq_format")]
     pub format: Option<String>,
     #[serde(default)]
-    pub gain: Option<f64>,
+    pub gain: Option<Gain>,
+    #[serde(default, alias = "rf_amp")]
+    pub amp_enable: Option<bool>,
     #[serde(default)]
+    pub rf_gain: Option<f64>,
+    #[serde(default, alias = "if_gain")]
     pub lna_gain: Option<f64>,
-    #[serde(default)]
+    #[serde(default, alias = "bb_gain")]
     pub vga_gain: Option<f64>,
     #[serde(default)]
     pub mixer_gain: Option<f64>,
@@ -83,14 +110,19 @@ pub(crate) struct SourceConfig {
     pub receivers: Vec<ReceiverConfig>,
 }
 
+/// Broad category of input source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum SourceClass {
+    /// Raw I/Q samples from a file, stdin, or SDR.
     Iq,
+    /// Upstream decoded events such as Airframes.io websocket messages.
     Events,
+    /// Standalone frames or payloads that do not require demodulation.
     Frames,
 }
 
+/// Receiver pipeline attached to an I/Q source.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReceiverConfig {
@@ -103,13 +135,18 @@ pub(crate) struct ReceiverConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Bearer {
+    /// Classic VHF ACARS / Plain Old ACARS bearer.
     #[serde(alias = "acars", alias = "vhf")]
     Vhf,
+    /// VDL Mode 2 bearer, normally AVLC frames on 136 MHz channels.
     #[serde(alias = "vdl", alias = "vdl2")]
     Vdl2,
+    /// HF Data Link bearer.
     #[serde(alias = "hf", alias = "hfdl")]
     Hfdl,
+    /// Standalone decoded application payload with no live RF bearer.
     Decoded,
+    /// Unknown or upstream-provided bearer value that does not match a known variant.
     #[serde(other)]
     #[default]
     Unknown,
@@ -218,10 +255,13 @@ impl SourceConfig {
 
     fn validate_gain_fields(&self) -> anyhow::Result<()> {
         if self.gain.is_some()
-            && (self.lna_gain.is_some() || self.vga_gain.is_some() || self.mixer_gain.is_some())
+            && (self.rf_gain.is_some()
+                || self.lna_gain.is_some()
+                || self.vga_gain.is_some()
+                || self.mixer_gain.is_some())
         {
             anyhow::bail!(
-                "source {} must not mix generic gain with element gains (lna_gain/mixer_gain/vga_gain)",
+                "source {} must not mix generic gain with element gains (rf_gain/lna_gain/mixer_gain/vga_gain)",
                 self.id
             );
         }
@@ -265,19 +305,28 @@ fn validate_channel_bandwidth(
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct DecodedEvent {
+    /// Event class emitted by the receiver; currently `"message"` for decoded rows.
     pub event: &'static str,
+    /// Receive or upstream event timestamp as Unix epoch seconds when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<f64>,
+    /// Physical or feed bearer that produced the message.
     pub bearer: Bearer,
+    /// Metadata describing the file, SDR, websocket, or frame source.
     pub source: SourceMetadata,
+    /// Receiver metadata for channelized I/Q sources.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receiver: Option<ReceiverMetadata>,
+    /// Best-effort aircraft identity extracted from frame addresses or payload metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aircraft: Option<Aircraft>,
+    /// Best-effort normalized position/altitude/speed summary extracted from the payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kinematics: Option<acars::decode::compact::Kinematics>,
+    /// Raw decoded frame bytes as uppercase hexadecimal when the source exposes them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_frame_hex: Option<String>,
+    /// Protocol-specific decoded message body.
     pub message: ProtocolMessage,
 }
 
@@ -285,10 +334,15 @@ pub(crate) struct DecodedEvent {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub(crate) enum ProtocolMessage {
+    /// Message received from the Airframes.io websocket and normalized by this CLI.
     Airframes(Box<crate::airframes::AirframesMessage>),
+    /// VDL2 AVLC frame, including link-layer addresses and dispatched payload.
     Avlc(Box<acars::decode::avlc::AvlcFrame>),
+    /// Classic ACARS frame decoded directly from VHF ACARS or standalone input.
     Acars(Box<acars::decode::acars::AcarsMessage>),
+    /// HFDL frame decoded into SPDU or MPDU structures.
     Hfdl(Box<acars::decode::hfdl::HfdlMessage>),
+    /// Standalone ACARS application payload decoded without a surrounding bearer frame.
     App(Box<acars::decode::payload::AcarsAppPayload>),
 }
 
@@ -313,26 +367,35 @@ impl ProtocolMessage {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Aircraft {
+    /// ICAO 24-bit aircraft address as six lowercase hexadecimal characters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icao24: Option<String>,
+    /// Upstream aircraft identifier when available, currently from Airframes.io rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aircraft_id: Option<u64>,
+    /// Aircraft registration or tail number when present in the payload or upstream row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registration: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SourceMetadata {
+    /// Stable source identifier from configuration or the frontend default.
     pub id: String,
+    /// Human-readable source label.
     pub name: String,
+    /// Source class: I/Q samples, already-decoded events, or standalone frames.
     pub class: SourceClass,
+    /// Source format hint such as `cf32`, `cu8`, `wav`, or `airframes.io`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ReceiverMetadata {
+    /// Bearer decoded by this receiver pipeline.
     pub bearer: Bearer,
+    /// Channel center frequency in Hz for channelized I/Q receivers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_hz: Option<u32>,
 }
@@ -348,6 +411,7 @@ impl SourceMetadata {
     }
 }
 
+/// Runtime output sink for JSONL and optional Redis publishing.
 pub(crate) struct OutputSink {
     writer: Option<BufWriter<File>>,
     redis: Option<RedisPublisher>,
@@ -390,6 +454,7 @@ impl OutputSink {
     }
 }
 
+/// Run merged receiver mode from a TOML configuration path.
 pub(crate) async fn run(config_path: Option<String>) -> anyhow::Result<()> {
     let path = config_path.ok_or_else(|| {
         anyhow::anyhow!(
@@ -413,7 +478,7 @@ pub(crate) async fn run(config_path: Option<String>) -> anyhow::Result<()> {
 
 fn source_url(source: &SourceConfig) -> anyhow::Result<String> {
     if let Some(file) = source.file.as_deref() {
-        return Ok(file.to_string());
+        return Ok(expanduser(file).to_string_lossy().into_owned());
     }
     if let Some(value) = source.rtlsdr.as_ref() {
         return Ok(device_url("rtlsdr", value));
@@ -456,6 +521,16 @@ fn device_url(scheme: &str, value: &toml::Value) -> String {
 async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow::Result<()> {
     let source_url = source_url(source)?;
     let source_meta = SourceMetadata::from_config(source)?;
+
+    let has_hfdl = source.receivers.iter().any(|r| r.bearer == Bearer::Hfdl);
+    let is_wav = source
+        .file
+        .as_deref()
+        .is_some_and(|file| file.to_ascii_lowercase().ends_with(".wav"));
+    if !has_hfdl && !is_wav {
+        return run_live_iq_source(source, &source_url, &source_meta, output).await;
+    }
+
     for receiver in &source.receivers {
         let values: Vec<DecodedEvent> = match receiver.bearer {
             Bearer::Hfdl => {
@@ -511,6 +586,283 @@ async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow
     Ok(())
 }
 
+async fn run_live_iq_source(
+    source: &SourceConfig,
+    source_url: &str,
+    source_meta: &SourceMetadata,
+    output: &mut OutputSink,
+) -> anyhow::Result<()> {
+    let runtime_source = runtime_source(source, source_url)?;
+    let center_freq = runtime_source
+        .center_freq
+        .ok_or_else(|| anyhow::anyhow!("live I/Q source {} must set center_freq", source.id))?;
+    let raw_sample_rate = runtime_source.sample_rate();
+    let mut receivers = Vec::new();
+
+    for receiver in &source.receivers {
+        match receiver.bearer {
+            Bearer::Vhf => receivers.push(LiveReceiver::vhf(
+                receiver.bearer,
+                receiver.channels.clone().unwrap_or_else(default_vhf_channels),
+                center_freq,
+                raw_sample_rate,
+            )),
+            Bearer::Vdl2 => receivers.push(LiveReceiver::vdl2(
+                receiver.bearer,
+                receiver.channels.clone().unwrap_or_else(default_vdl2_channels),
+                center_freq,
+                raw_sample_rate,
+            )),
+            Bearer::Hfdl => anyhow::bail!(
+                "live merged HFDL is not supported by this path yet; use the hfdl command or a file source"
+            ),
+            Bearer::Decoded | Bearer::Unknown => {}
+        }
+    }
+
+    anyhow::ensure!(
+        !receivers.is_empty(),
+        "I/Q source {} has no live VHF/VDL2 receivers",
+        source.id
+    );
+
+    let mut stream = crate::vdl2::open_source(&runtime_source).await?;
+    let run_start = SystemTime::now();
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result?;
+        for receiver in &mut receivers {
+            for event in receiver.process_chunk(&chunk, run_start, source_meta)? {
+                output.emit(event).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+enum LiveReceiver {
+    Vhf {
+        bearer: Bearer,
+        channels: Vec<u32>,
+        channelizer: Channelizer,
+        demods: Vec<VhfChannel>,
+        sample_indices: Vec<u64>,
+        sample_rate: u32,
+    },
+    Vdl2 {
+        bearer: Bearer,
+        channels: Vec<u32>,
+        channelizer: Channelizer,
+        demods: Vec<Vdl2Channel>,
+        sample_indices: Vec<u64>,
+        sample_rate: u32,
+    },
+}
+
+impl LiveReceiver {
+    fn vhf(bearer: Bearer, channels: Vec<u32>, center_freq: u32, raw_sample_rate: u32) -> Self {
+        let sample_rate = 125_000;
+        let channelizer = Channelizer::from_absolute_frequencies(
+            center_freq,
+            raw_sample_rate,
+            sample_rate,
+            &channels,
+        )
+        .expect("valid VHF channelizer rates");
+        let demods = channels
+            .iter()
+            .map(|_| VhfChannel::new(sample_rate as f32, 0.0))
+            .collect();
+        let sample_indices = vec![0; channels.len()];
+        Self::Vhf {
+            bearer,
+            channels,
+            channelizer,
+            demods,
+            sample_indices,
+            sample_rate,
+        }
+    }
+
+    fn vdl2(bearer: Bearer, channels: Vec<u32>, center_freq: u32, raw_sample_rate: u32) -> Self {
+        let sample_rate = SYMBOL_RATE * 100;
+        let channelizer = Channelizer::from_absolute_frequencies(
+            center_freq,
+            raw_sample_rate,
+            sample_rate,
+            &channels,
+        )
+        .expect("valid VDL2 channelizer rates");
+        let demods = channels
+            .iter()
+            .map(|&ch| {
+                let mut d = Vdl2Channel::new(sample_rate as f32, 0.0, ch as f32);
+                d.set_sync_threshold(3.2);
+                d
+            })
+            .collect();
+        let sample_indices = vec![0; channels.len()];
+        Self::Vdl2 {
+            bearer,
+            channels,
+            channelizer,
+            demods,
+            sample_indices,
+            sample_rate,
+        }
+    }
+
+    fn process_chunk(
+        &mut self,
+        chunk: &[rustfft::num_complex::Complex<f32>],
+        run_start: SystemTime,
+        source_meta: &SourceMetadata,
+    ) -> anyhow::Result<Vec<DecodedEvent>> {
+        match self {
+            Self::Vhf {
+                bearer,
+                channels,
+                channelizer,
+                demods,
+                sample_indices,
+                sample_rate,
+            } => {
+                let mut events = Vec::new();
+                for channel_chunk in channelizer.process(chunk) {
+                    let idx = channel_chunk.channel_index;
+                    for sample in channel_chunk.samples {
+                        let one = std::slice::from_mut(&mut demods[idx]);
+                        let mut passthrough = ResampleAdapter::new(None);
+                        let mut pipeline = IqPipeline::new(
+                            &mut passthrough,
+                            one,
+                            &mut sample_indices[idx],
+                            *sample_rate,
+                            run_start,
+                        );
+                        let frames =
+                            collect_iq_frames(&mut pipeline, sample.re, sample.im, |d, re, im| {
+                                Ok(d.process_sample(re, im))
+                            })?;
+                        for (mut ctx, demod_frame) in frames {
+                            ctx.channel_index = idx;
+                            let Ok(message) =
+                                parse_acars_frame(&demod_frame.bytes, MessageDirection::Unknown)
+                            else {
+                                continue;
+                            };
+                            let pmsg = ProtocolMessage::Acars(Box::new(message));
+                            events.push(DecodedEvent {
+                                event: "message",
+                                timestamp: Some(ctx.timestamp_unix),
+                                bearer: *bearer,
+                                source: source_meta.clone(),
+                                receiver: Some(ReceiverMetadata {
+                                    bearer: *bearer,
+                                    channel_hz: Some(channels[idx]),
+                                }),
+                                aircraft: aircraft_summary(&pmsg),
+                                kinematics: pmsg.kinematics(),
+                                raw_frame_hex: Some(bytes_to_hex(&demod_frame.bytes)),
+                                message: pmsg,
+                            });
+                        }
+                    }
+                }
+                Ok(events)
+            }
+            Self::Vdl2 {
+                bearer,
+                channels,
+                channelizer,
+                demods,
+                sample_indices,
+                sample_rate,
+            } => {
+                let mut events = Vec::new();
+                for channel_chunk in channelizer.process(chunk) {
+                    let idx = channel_chunk.channel_index;
+                    for sample in channel_chunk.samples {
+                        let one = std::slice::from_mut(&mut demods[idx]);
+                        let mut passthrough = ResampleAdapter::new(None);
+                        let mut pipeline = IqPipeline::new(
+                            &mut passthrough,
+                            one,
+                            &mut sample_indices[idx],
+                            *sample_rate,
+                            run_start,
+                        );
+                        let frames =
+                            collect_iq_frames(&mut pipeline, sample.re, sample.im, |d, re, im| {
+                                Ok(d.process_sample(re, im))
+                            })?;
+                        for (mut ctx, demod_frame) in frames {
+                            ctx.channel_index = idx;
+                            let Ok(avlc) = parse_avlc_frame(&demod_frame.bytes) else {
+                                continue;
+                            };
+                            if !avlc.fcs_ok {
+                                continue;
+                            }
+                            let pmsg = ProtocolMessage::Avlc(Box::new(avlc));
+                            events.push(DecodedEvent {
+                                event: "message",
+                                timestamp: Some(ctx.timestamp_unix),
+                                bearer: *bearer,
+                                source: source_meta.clone(),
+                                receiver: Some(ReceiverMetadata {
+                                    bearer: *bearer,
+                                    channel_hz: Some(channels[idx]),
+                                }),
+                                aircraft: aircraft_summary(&pmsg),
+                                kinematics: pmsg.kinematics(),
+                                raw_frame_hex: Some(bytes_to_hex(&demod_frame.bytes)),
+                                message: pmsg,
+                            });
+                        }
+                    }
+                }
+                Ok(events)
+            }
+        }
+    }
+}
+
+fn runtime_source(source: &SourceConfig, source_url: &str) -> anyhow::Result<Source> {
+    let mut parsed: Source = source_url.parse()?;
+    parsed.name = source.name.clone();
+    parsed.center_freq = source.center_freq;
+    parsed.sample_rate = source.sample_rate;
+    parsed.format = source.format.clone();
+    parsed.gain = source.gain.clone();
+    parsed.bias_tee = source.bias_tee;
+    parsed.amp_enable = source.amp_enable;
+    parsed.rf_gain = source.rf_gain;
+    parsed.lna_gain = source.lna_gain;
+    parsed.mixer_gain = source.mixer_gain;
+    parsed.vga_gain = source.vga_gain;
+    parsed.channels = None;
+    Ok(parsed)
+}
+
+fn default_vhf_channels() -> Vec<u32> {
+    vec![
+        129_125_000,
+        129_525_000,
+        130_025_000,
+        130_425_000,
+        131_125_000,
+        131_525_000,
+        131_725_000,
+        131_825_000,
+        136_900_000,
+    ]
+}
+
+fn default_vdl2_channels() -> Vec<u32> {
+    (0..17).map(|i| 136_600_000_u32 + i * 25_000).collect()
+}
+
+/// Extract a compact aircraft identity summary from any protocol message.
 pub(crate) fn aircraft_summary(msg: &ProtocolMessage) -> Option<Aircraft> {
     match msg {
         ProtocolMessage::Avlc(frame) => {
@@ -599,8 +951,9 @@ mod tests {
             hackrf = { device = 0 }
             center_freq = 134000000
             sample_rate = 8000000
-            lna_gain = 32
-            vga_gain = 20
+            rf_gain = 14
+            if_gain = 32
+            bb_gain = 20
 
               [[sources.receivers]]
               bearer = "vhf"
@@ -614,6 +967,9 @@ mod tests {
         .unwrap();
         cfg.validate().unwrap();
         assert_eq!(cfg.sources[0].inferred_class().unwrap(), SourceClass::Iq);
+        assert_eq!(cfg.sources[0].rf_gain, Some(14.0));
+        assert_eq!(cfg.sources[0].lna_gain, Some(32.0));
+        assert_eq!(cfg.sources[0].vga_gain, Some(20.0));
         assert_eq!(cfg.sources[0].receivers.len(), 2);
     }
 
