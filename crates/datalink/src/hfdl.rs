@@ -11,7 +11,7 @@
 //! the known channel table to the source bandwidth. The table below groups
 //! frequencies by ground station/center. Underlined frequencies were observed
 //! in captured Airframes.io data.
-//! 
+//!
 //! `†` marks frequencies found only in the older ACARS Online HF ACARS list
 //! rather than the current public HFDL system table.
 //!
