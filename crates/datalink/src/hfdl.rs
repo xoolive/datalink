@@ -4,6 +4,35 @@
 //! demodulator diagnostics, parses candidate PDUs with `acars::decode::hfdl`,
 //! and emits JSON or Redis messages. It shares source parsing with the VDL2 and
 //! VHF frontends but uses HFDL-specific channel defaults and frequency handling.
+//!
+//! ## Known HFDL channels
+//!
+//! HFDL channels are listed in kHz. The automatic channel selector filters
+//! the known channel table to the source bandwidth. The table below groups
+//! frequencies by ground station/center. Underlined frequencies were observed
+//! in captured Airframes.io data.
+//! 
+//! `†` marks frequencies found only in the older ACARS Online HF ACARS list
+//! rather than the current public HFDL system table.
+//!
+//! | | Center | Frequencies (kHz) |
+//! |-|---|---|
+//! | 1 | San Francisco, California | 4672†, 5508, 6559, 8559†, <u>8927</u>, <u>10081</u>, <u>11327</u>, <u>13276</u>, <u>17919</u>, <u>21934</u> |
+//! | 2 | Molokai, Hawaii | 5514, 6565, <u>8912</u>, <u>8936</u>, <u>10027</u>, 10075†, <u>11312</u>, <u>11348</u>, <u>13276</u>, <u>13312</u>, <u>13324</u>, <u>17919</u>, 17936†, <u>21937</u> |
+//! | 3 | Reykjavik, Iceland | 3900, <u>5720</u>, 6712, <u>8977</u>, 11184, <u>15025</u>, 17985 |
+//! | 4 | Riverhead, New York | 5523†, 5652, <u>6661</u>, <u>8912</u>, 11315†, <u>11387</u>, 13275†, <u>13276</u>, <u>17919</u>, <u>21931</u>, <u>21934</u>† |
+//! | 5 | Auckland, New Zealand | 5583, <u>6535</u>, 8921, 10084, <u>13351</u>, 13352†, <u>17916</u> |
+//! | 6 | Hat Yai, Thailand | <u>5655</u>, <u>6535</u>, 8825, 10066, <u>13270</u>, <u>17928</u>, <u>21949</u> |
+//! | 7 | Shannon, Ireland | 2998, 3455, 5547, 6532, 8843, <u>8942</u>, <u>10081</u>, 11384 |
+//! | 8 | Johannesburg, South Africa | 3016, 4681, 5529, 8834, 11321, 13321, 17922, <u>21949</u> |
+//! | 9 | Barrow, Alaska | 2944, 2992, 3007, 3497, 4654, 4687, 5529, 5538, 5544, 6646, <u>8927</u>, <u>8936</u>, <u>10027</u>, <u>10093</u>, 11354, <u>17919</u>, 17934, 21928, <u>21937</u> |
+//! | 10 | Muan, South Korea | 2941, 5502, 6619, 8939, <u>10060</u>, <u>13342</u>, <u>17958</u>, <u>21931</u> |
+//! | 11 | Albrook, Panama | 5589, <u>6589</u>, 8894, 10063, 13264, 17901 |
+//! | 13 | Santa Cruz, Bolivia | 4660, <u>6628</u>, <u>8957</u>, <u>11318</u>, <u>13315</u>, <u>17916</u>, <u>21997</u> |
+//! | 14 | Krasnoyarsk, Russia | 5622, 6596, 8886, 10087, 13321, 17912, 21990 |
+//! | 15 | Al Muharraq, Bahrain | 2986, 5544, 6646, 8885, 10030, 10045†, <u>11312</u>†, <u>13312</u>, 17967, 21982 |
+//! | 16 | Agana, Guam | 5451, 6652, <u>8927</u>, <u>11306</u>, <u>13312</u>, <u>17919</u>, 21928 |
+//! | 17 | Canarias, Spain | 6529, <u>8948</u>, <u>11348</u>, <u>13303</u>, <u>17928</u>, <u>21955</u> |
 
 use crate::source::{Address, Source};
 #[cfg(feature = "hackrf")]
@@ -19,13 +48,122 @@ use rustfft::num_complex::Complex;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 
-const DEFAULT_HFDL_CHANNELS_KHZ: &[f64] = &[
-    6529.0, 6532.0, 6535.0, 6559.0, 6565.0, 6589.0, 6596.0, 6619.0, 6628.0, 6646.0, 6652.0, 6661.0,
-    6712.0, 8825.0, 8834.0, 8843.0, 8885.0, 8886.0, 8894.0, 8912.0, 8921.0, 8927.0, 8936.0, 8939.0,
-    8942.0, 8948.0, 8957.0, 8977.0, 10027.0, 10030.0, 10060.0, 10063.0, 10066.0, 10081.0, 10084.0,
-    10087.0, 10093.0, 11184.0, 11306.0, 11312.0, 11318.0, 11321.0, 11327.0, 11348.0, 11354.0,
-    11384.0, 11387.0, 13264.0, 13270.0, 13276.0, 13303.0, 13312.0, 13315.0, 13321.0, 13324.0,
-    13342.0, 13351.0,
+/// Known HFDL channels in kHz
+const KNOWN_HFDL_CHANNELS_KHZ: &[f64] = &[
+    2941.0,  // Muan, South Korea
+    2944.0,  // Barrow, Alaska
+    2986.0,  // Al Muharraq, Bahrain
+    2992.0,  // Barrow, Alaska
+    2998.0,  // Shannon, Ireland
+    3007.0,  // Barrow, Alaska
+    3016.0,  // Johannesburg, South Africa
+    3455.0,  // Shannon, Ireland
+    3497.0,  // Barrow, Alaska
+    3900.0,  // Reykjavik, Iceland
+    4654.0,  // Barrow, Alaska
+    4660.0,  // Santa Cruz, Bolivia
+    4672.0,  // California (ACARS Online older table)
+    4681.0,  // Johannesburg, South Africa / Johannesburg (ACARS Online older table)
+    4687.0,  // Barrow, Alaska
+    5451.0,  // Agana, Guam
+    5502.0,  // Muan, South Korea
+    5508.0,  // San Francisco, California
+    5514.0,  // Molokai, Hawaii
+    5523.0,  // New York (ACARS Online older table)
+    5529.0,  // Johannesburg, South Africa / Barrow, Alaska
+    5538.0,  // Barrow, Alaska
+    5544.0,  // Barrow, Alaska / Al Muharraq, Bahrain
+    5547.0,  // Shannon, Ireland / Shannon (ACARS Online older table)
+    5583.0,  // Auckland, New Zealand / Auckland (ACARS Online older table)
+    5589.0,  // Albrook, Panama
+    5622.0,  // Krasnoyarsk, Russia
+    5652.0,  // Riverhead, New York
+    5655.0,  // observed in Airframes.io feed; Hat Yai, Thailand
+    5720.0, // observed in Airframes.io feed; Reykjavik, Iceland / Reykjavik (ACARS Online older table)
+    6529.0, // Canarias, Spain
+    6532.0, // Shannon, Ireland / Shannon (ACARS Online older table)
+    6535.0, // observed in Airframes.io feed; Auckland, New Zealand / Hat Yai, Thailand
+    6559.0, // San Francisco, California
+    6565.0, // Molokai, Hawaii
+    6589.0, // observed in Airframes.io feed; Albrook, Panama
+    6596.0, // Krasnoyarsk, Russia
+    6619.0, // Muan, South Korea
+    6628.0, // observed in Airframes.io feed; Santa Cruz, Bolivia
+    6646.0, // Barrow, Alaska / Al Muharraq, Bahrain / Barrow (ACARS Online older table)
+    6652.0, // Agana, Guam
+    6661.0, // observed in Airframes.io feed; Riverhead, New York
+    6712.0, // Reykjavik, Iceland / Reykjavik (ACARS Online older table)
+    8559.0, // California (ACARS Online older table)
+    8825.0, // Hat Yai, Thailand
+    8834.0, // Johannesburg, South Africa / Johannesburg (ACARS Online older table)
+    8843.0, // Shannon, Ireland / Shannon (ACARS Online older table)
+    8885.0, // Al Muharraq, Bahrain / Bahrain (ACARS Online older table)
+    8886.0, // Krasnoyarsk, Russia
+    8894.0, // Albrook, Panama
+    8912.0, // observed in Airframes.io feed; Molokai, Hawaii / Riverhead, New York / Hawaii (ACARS Online older table)
+    8921.0, // Auckland, New Zealand
+    8927.0, // observed in Airframes.io feed; San Francisco, California / Barrow, Alaska / Agana, Guam / Guam (ACARS Online older table)
+    8936.0, // observed in Airframes.io feed; Molokai, Hawaii / Barrow, Alaska / Barrow (ACARS Online older table)
+    8939.0, // Muan, South Korea
+    8942.0, // observed in Airframes.io feed; Shannon, Ireland / Shannon (ACARS Online older table)
+    8948.0, // observed in Airframes.io feed; Canarias, Spain
+    8957.0, // observed in Airframes.io feed; Santa Cruz, Bolivia
+    8977.0, // observed in Airframes.io feed; Reykjavik, Iceland / Reykjavik (ACARS Online older table)
+    10027.0, // observed in Airframes.io feed; Molokai, Hawaii / Barrow, Alaska
+    10030.0, // Al Muharraq, Bahrain
+    10045.0, // Bahrain (ACARS Online older table)
+    10060.0, // observed in Airframes.io feed; Muan, South Korea
+    10063.0, // Albrook, Panama
+    10066.0, // Hat Yai, Thailand
+    10075.0, // Hawaii (ACARS Online older table)
+    10081.0, // observed in Airframes.io feed; San Francisco, California / Shannon, Ireland / California (ACARS Online older table)
+    10084.0, // Auckland, New Zealand / Auckland (ACARS Online older table)
+    10087.0, // Krasnoyarsk, Russia / Krasnoyarsk (ACARS Online older table)
+    10093.0, // observed in Airframes.io feed; Barrow, Alaska
+    11184.0, // Reykjavik, Iceland / Reykjavik (ACARS Online older table)
+    11306.0, // observed in Airframes.io feed; Agana, Guam / Guam (ACARS Online older table)
+    11312.0, // observed in Airframes.io feed; Molokai, Hawaii / Bahrain (ACARS Online older table)
+    11315.0, // New York (ACARS Online older table)
+    11318.0, // observed in Airframes.io feed; Santa Cruz, Bolivia / Bolivia (ACARS Online older table)
+    11321.0, // Johannesburg, South Africa
+    11327.0, // observed in Airframes.io feed; San Francisco, California / California (ACARS Online older table)
+    11348.0, // observed in Airframes.io feed; Molokai, Hawaii / Canarias, Spain / Hawaii (ACARS Online older table)
+    11354.0, // Barrow, Alaska
+    11384.0, // Shannon, Ireland / Shannon (ACARS Online older table)
+    11387.0, // observed in Airframes.io feed; Riverhead, New York
+    13264.0, // Albrook, Panama
+    13270.0, // observed in Airframes.io feed; Hat Yai, Thailand / Hat Yai (ACARS Online older table)
+    13275.0, // New York (ACARS Online older table)
+    13276.0, // observed in Airframes.io feed; San Francisco, California / Molokai, Hawaii / Riverhead, New York / California (ACARS Online older table)
+    13303.0, // observed in Airframes.io feed; Canarias, Spain
+    13312.0, // observed in Airframes.io feed; Molokai, Hawaii / Al Muharraq, Bahrain / Agana, Guam
+    13315.0, // observed in Airframes.io feed; Santa Cruz, Bolivia / Bolivia (ACARS Online older table)
+    13321.0, // Johannesburg, South Africa / Krasnoyarsk, Russia / Krasnoyarsk (ACARS Online older table)
+    13324.0, // observed in Airframes.io feed; Molokai, Hawaii
+    13342.0, // observed in Airframes.io feed; Muan, South Korea
+    13351.0, // observed in Airframes.io feed; Auckland, New Zealand
+    13352.0, // Auckland (ACARS Online older table)
+    15025.0, // observed in Airframes.io feed; Reykjavik, Iceland / Reykjavik (ACARS Online older table)
+    17901.0, // Albrook, Panama
+    17912.0, // Krasnoyarsk, Russia
+    17916.0, // observed in Airframes.io feed; Auckland, New Zealand / Santa Cruz, Bolivia
+    17919.0, // observed in Airframes.io feed; San Francisco, California / Molokai, Hawaii / Riverhead, New York / Barrow, Alaska / Agana, Guam / New York (ACARS Online older table)
+    17922.0, // Johannesburg, South Africa
+    17928.0, // observed in Airframes.io feed; Hat Yai, Thailand / Canarias, Spain / Hat Yai (ACARS Online older table)
+    17934.0, // Barrow, Alaska
+    17936.0, // Hawaii (ACARS Online older table)
+    17958.0, // observed in Airframes.io feed; Muan, South Korea
+    17967.0, // Al Muharraq, Bahrain / Bahrain (ACARS Online older table)
+    17985.0, // Reykjavik, Iceland
+    21928.0, // Barrow, Alaska / Agana, Guam
+    21931.0, // observed in Airframes.io feed; Riverhead, New York / Muan, South Korea
+    21934.0, // observed in Airframes.io feed; San Francisco, California / New York (ACARS Online older table)
+    21937.0, // observed in Airframes.io feed; Molokai, Hawaii / Barrow, Alaska
+    21949.0, // observed in Airframes.io feed; Hat Yai, Thailand / Johannesburg, South Africa / Johannesburg (ACARS Online older table)
+    21955.0, // observed in Airframes.io feed; Canarias, Spain
+    21982.0, // Al Muharraq, Bahrain / Bahrain (ACARS Online older table)
+    21990.0, // Krasnoyarsk, Russia
+    21997.0, // observed in Airframes.io feed; Santa Cruz, Bolivia / Bolivia (ACARS Online older table)
 ];
 
 /// Supported raw I/Q sample formats for HFDL file and stream input.
@@ -545,7 +683,7 @@ fn channels_khz_for(
     let usable_half_bw_khz = sample_rate as f64 * 0.40 / 1000.0;
     let lo = center_khz - usable_half_bw_khz;
     let hi = center_khz + usable_half_bw_khz;
-    DEFAULT_HFDL_CHANNELS_KHZ
+    KNOWN_HFDL_CHANNELS_KHZ
         .iter()
         .copied()
         .filter(|freq| *freq >= lo && *freq <= hi)

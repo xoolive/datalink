@@ -4,6 +4,48 @@
 //! channelize classic ACARS frequencies, demodulate 2,400 bit/s MSK frames,
 //! parse ACARS messages, and emit normalized JSONL or Redis messages.
 //! Configuration can come from CLI options or merged receiver TOML.
+//!
+//! ## Default scan channels
+//!
+//! These channels are used when no explicit channel list is configured and the
+//! source bandwidth metadata is too narrow or unavailable for automatic channel
+//! selection.
+//!
+//! | Frequency | Support |
+//! |---:|---|
+//! | 131.525 MHz | Europe SITA secondary |
+//! | 131.550 MHz | Global SITA primary |
+//! | 131.725 MHz | Europe SITA |
+//! | 131.825 MHz | Strongly observed in the Airframes.io feed |
+//! | 131.850 MHz | New European channel |
+//!
+//! ## Known VHF ACARS channels
+//!
+//! The automatic channel selector chooses from this list when a source center
+//! frequency and sample rate are known. The list is based on documented ACARS
+//! channel tables plus frequencies with substantial counts in captured
+//! Airframes.io data.
+//!
+//! | Frequency | Support |
+//! |---:|---|
+//! | 129.125 MHz | Global ARINC primary |
+//! | 129.350 MHz | Strongly observed in the Airframes.io feed |
+//! | 129.525 MHz | Strongly observed in the Airframes.io feed |
+//! | 130.025 MHz | USA/Canada ARINC secondary |
+//! | 130.425 MHz | USA ARINC additional |
+//! | 130.450 MHz | USA/Canada ARINC additional |
+//! | 130.825 MHz | Strongly observed in the Airframes.io feed |
+//! | 131.075 MHz | Strongly observed in the Airframes.io feed |
+//! | 131.125 MHz | USA ARINC additional |
+//! | 131.200 MHz | Strongly observed in the Airframes.io feed |
+//! | 131.450 MHz | Japan |
+//! | 131.475 MHz | Air Canada company channel |
+//! | 131.525 MHz | Europe SITA secondary |
+//! | 131.550 MHz | Global SITA primary |
+//! | 131.650 MHz | Strongly observed in the Airframes.io feed |
+//! | 131.725 MHz | Europe SITA |
+//! | 131.825 MHz | Strongly observed in the Airframes.io feed |
+//! | 131.850 MHz | New European channel |
 
 use crate::iq_pipeline::{collect_iq_frames, FrameContext, IqPipeline};
 use crate::source::{Address, Source};
@@ -18,18 +60,62 @@ use serde::Deserialize;
 use std::time::SystemTime;
 
 const DEFAULT_CENTER_FREQ: u32 = 131_700_000;
-const DEFAULT_CHANNELS: &[u32] = &[131_525_000, 131_725_000, 131_825_000];
-const KNOWN_ACARS_CHANNELS: &[u32] = &[
-    129_125_000,
-    129_525_000,
-    130_025_000,
-    130_425_000,
-    131_125_000,
+
+/// Strongest channels around the default 131.7 MHz center
+/// With the default 1.05 Msps source rate these all fit in-band.
+const DEFAULT_CHANNELS: &[u32] = &[
+    // Europe SITA secondary
     131_525_000,
+    // Global SITA primary
+    131_550_000,
+    // Europe SITA
     131_725_000,
+    // Strongly observed in airframes.io feed
     131_825_000,
-    136_900_000,
+    // New European channel.
+    131_850_000,
 ];
+
+/// Common VHF ACARS channels
+const KNOWN_ACARS_CHANNELS: &[u32] = &[
+    // Global ARINC primary
+    129_125_000,
+    // Strongly observed in airframes.io feed
+    129_350_000,
+    // Strongly observed in airframes.io feed
+    129_525_000,
+    // USA/Canada ARINC secondary
+    130_025_000,
+    // USA ARINC additional
+    130_425_000,
+    // USA/Canada ARINC additional
+    130_450_000,
+    // Strongly observed in airframes.io feed
+    130_825_000,
+    // Strongly observed in airframes.io feed
+    131_075_000,
+    // USA ARINC additional
+    131_125_000,
+    // Strongly observed in airframes.io feed
+    131_200_000,
+    // Japan
+    131_450_000,
+    // Air Canada company channel
+    131_475_000,
+    // Europe SITA secondary
+    131_525_000,
+    // Global SITA primary
+    131_550_000,
+    // Strongly observed in airframes.io feed
+    131_650_000,
+    // Europe SITA
+    131_725_000,
+    // Strongly observed in airframes.io feed
+    131_825_000,
+    // New European channel
+    131_850_000,
+];
+
 const DEFAULT_CHUNK_SIZE: usize = 65_536;
 
 fn auto_channels(src: &Source) -> Vec<u32> {
@@ -651,7 +737,14 @@ mod tests {
         assert_eq!(effective.sample_rate(), 500_000);
         assert_eq!(
             effective.channels_with(auto_channels),
-            vec![131_525_000, 131_725_000, 131_825_000]
+            vec![
+                131_525_000,
+                131_550_000,
+                131_650_000,
+                131_725_000,
+                131_825_000,
+                131_850_000,
+            ]
         );
     }
 }

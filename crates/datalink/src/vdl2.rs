@@ -4,6 +4,45 @@
 //! source, channelize configured VDL2 frequencies, demodulate D8PSK bursts,
 //! parse AVLC frames, and emit normalized JSONL or Redis messages. Configuration
 //! can come from CLI options or from the merged receiver TOML model.
+//!
+//! ## Default scan channels
+//!
+//! These channels are used when no explicit channel list is configured and the
+//! source bandwidth metadata is too narrow or unavailable for automatic channel
+//! selection.
+//!
+//! | Frequency | Support |
+//! |---:|---|
+//! | 136.650 MHz | USA ARINC |
+//! | 136.675 MHz | Europe ARINC |
+//! | 136.725 MHz | Europe ARINC |
+//! | 136.775 MHz | Europe SITA |
+//! | 136.825 MHz | Europe ARINC |
+//! | 136.875 MHz | Europe SITA |
+//! | 136.975 MHz | Worldwide common signalling channel |
+//!
+//! ## Known VDL Mode 2 channels
+//!
+//! The automatic channel selector chooses from this list when a source center
+//! frequency and sample rate are known. The list is based on the SIGIDWiki
+//! VDL-M2 table, the Airframes technology docs, ACARS Online notes, and
+//! captured Airframes.io message counts.
+//!
+//! | Frequency | Support |
+//! |---:|---|
+//! | 136.100 MHz | USA ARINC |
+//! | 136.650 MHz | USA ARINC |
+//! | 136.675 MHz | Europe ARINC |
+//! | 136.700 MHz | USA ARINC |
+//! | 136.725 MHz | Europe ARINC |
+//! | 136.750 MHz | Additional USA / new European channel |
+//! | 136.775 MHz | Europe SITA |
+//! | 136.800 MHz | USA SITA |
+//! | 136.825 MHz | Europe ARINC |
+//! | 136.850 MHz | SITA North America channel |
+//! | 136.875 MHz | Europe SITA |
+//! | 136.900 MHz | European secondary channel |
+//! | 136.975 MHz | Worldwide common signalling channel |
 
 use crate::iq_pipeline::{collect_iq_frames, FrameContext, IqPipeline};
 use crate::source::{Address, Source};
@@ -20,20 +59,70 @@ use std::io::{BufWriter, Write};
 use std::time::SystemTime;
 
 const DEFAULT_CENTER_FREQ: u32 = 136_850_000;
-const DEFAULT_CHANNELS: &[u32] = &[136_875_000, 136_975_000];
+
+/// Strongest VDL2 channels around the default 136.85 MHz center
+/// With the default 1.05 Msps source rate these all fit in-band.
+const DEFAULT_CHANNELS: &[u32] = &[
+    // USA ARINC
+    136_650_000,
+    // Europe ARINC
+    136_675_000,
+    // Europe ARINC
+    136_725_000,
+    // Europe SITA
+    136_775_000,
+    // Europe ARINC
+    136_825_000,
+    // Europe SITA
+    136_875_000,
+    // Worldwide common signalling channel
+    136_975_000,
+];
+
+/// Common VDL Mode 2 channels
+const KNOWN_VDL2_CHANNELS: &[u32] = &[
+    // USA ARINC
+    136_100_000,
+    // USA ARINC
+    136_650_000,
+    // Europe ARINC
+    136_675_000,
+    // USA ARINC
+    136_700_000,
+    // Europe ARINC
+    136_725_000,
+    // Additional USA / new European channel
+    136_750_000,
+    // Europe SITA
+    136_775_000,
+    // USA SITA
+    136_800_000,
+    // Europe ARINC
+    136_825_000,
+    // SITA North America channel
+    136_850_000,
+    // Europe SITA
+    136_875_000,
+    // European secondary channel
+    136_900_000,
+    // Worldwide common signalling channel
+    136_975_000,
+];
+
 const DEFAULT_CHUNK_SIZE: usize = 65_536;
 
-/// When no channels are explicitly configured, return all standard VDL2 channels
-/// (25 kHz spacing) that fall within the recording's bandwidth.
-/// Falls back to DEFAULT_CHANNELS when the bandwidth is too narrow.
+/// When no channels are explicitly configured, return known VDL2 channels that
+/// fall within the recording's bandwidth. Falls back to DEFAULT_CHANNELS when
+/// the bandwidth is too narrow or metadata is missing.
 fn auto_channels(src: &Source) -> Vec<u32> {
     let center = src.center_freq_or(DEFAULT_CENTER_FREQ);
     let sr = src.sample_rate();
     let half_bw = (sr as f64 * 0.45) as u32;
     let lo = center.saturating_sub(half_bw);
     let hi = center.saturating_add(half_bw);
-    let candidates: Vec<u32> = (0..17)
-        .map(|i| 136_600_000_u32 + i * 25_000)
+    let candidates: Vec<u32> = KNOWN_VDL2_CHANNELS
+        .iter()
+        .copied()
         .filter(|&ch| ch >= lo && ch <= hi)
         .collect();
 
@@ -702,11 +791,11 @@ mod tests {
         assert_eq!(effective.format.as_deref(), Some("cf32"));
         assert_eq!(
             effective.channels_with(auto_channels).first(),
-            Some(&136_600_000)
+            Some(&136_100_000)
         );
         assert_eq!(
             effective.channels_with(auto_channels).last(),
-            Some(&137_000_000)
+            Some(&136_975_000)
         );
     }
 
@@ -719,8 +808,6 @@ mod tests {
         assert_eq!(
             effective.channels_with(auto_channels),
             vec![
-                136_600_000,
-                136_625_000,
                 136_650_000,
                 136_675_000,
                 136_700_000,
