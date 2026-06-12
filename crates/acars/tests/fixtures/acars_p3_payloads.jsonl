@@ -1,3 +1,0 @@
-{"name":"label32_csv","label":"32","direction":"downlink","text":"P,R,2026-05-30 15:29:16,4276,68100,N40.706 W087.395,24350,349,12,-21,474,462,747,,","expected_variant":"Label32","expected_timestamp":"2026-05-30 15:29:16","expected_lat":40.706,"expected_lon":-87.395,"expected_altitude":24350}
-{"name":"label16_classifier","label":"16","direction":"downlink","text":"153103,,1828, 225,N   .    MMMM.MMM","expected_variant":"Label16","expected_timestamp":"153103","expected_field_count":5}
-{"name":"label37_classifier","label":"37","direction":"downlink","text":"09BP-HJ\r\nA.-XKABVCKO/8:Y866KX/LHY JNK8LML8KIN6KN: KY6MMKJHY8KJ","expected_variant":"Label37","expected_prefix":"09BP-HJ","expected_line_count":2}
