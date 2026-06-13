@@ -17,82 +17,120 @@ The output includes:
 - `raw_frame_hex`: raw frame bytes when available;
 - `message`: the protocol-specific decoded body.
 
-A simplified ADS-C-like event might look like this:
+An ADS-C event captured from the airframes.io websocket feed looks like this:
 
 ```json
 {
   "event": "message",
-  "timestamp": 1781356283.362,
-  "bearer": "vhf",
+  "timestamp": 1781378212.80346,
+  "bearer": "unknown",
   "source": {
     "id": "airframes",
     "name": "airframes.io",
     "class": "events",
-    "format": "airframes.io",
-    "source_type": "vhf",
-    "frequency": 131.725
+    "format": "airframes.io"
   },
   "aircraft": {
-    "icao24": "caa172",
-    "aircraft_id": 13237,
-    "registration": "A7-BAH"
+    "icao24": "3c4582",
+    "aircraft_id": 2727,
+    "registration": "D-AALB"
   },
   "kinematics": {
     "position": {
-      "latitude": 51.313533782958984,
-      "longitude": 2.698688507080078
+      "latitude": 45.166098,
+      "longitude": 24.740809
     },
-    "altitude_ft": 34000,
-    "derived_from": "adsc_basic"
+    "altitude_ft": 37000,
+    "track": 116.67,
+    "derived_from": "airframes_flight"
   },
-  "label": "B6",
-  "text": "/JEDAAYA.ADS.A7-BAH07247D580F5A484D0A8D9A0D24AB6808FE45EE418E24C4680566C3E8400E6740CEC004BB4F",
-  "app": {
-    "Arinc622": {
-      "atsu_address": "JEDAAYA",
-      "imi": "ADS",
-      "registration": "A7-BAH",
+  "message": {
+    "kind": "airframes",
+    "data": {
       "payload": {
-        "type": "Adsc",
-        "data": {
-          "tags": [
-            {
-              "BasicReport": {
-                "latitude": 51.313533782958984,
-                "longitude": 2.698688507080078,
-                "altitude_ft": 34000,
-                "timestamp_seconds_past_hour": 675.375,
-                "nav_redundancy_ok": false,
-                "position_accuracy_code": 5,
-                "tcas_ok": true
-              }
-            },
-            {
-              "PredictedRoute": {
-                "next_latitude": 51.56656265258789,
-                "next_longitude": 1.5808296203613281,
-                "next_altitude_ft": 24292,
-                "next_eta_seconds": 398,
-                "next_next_latitude": 51.70389175415039,
-                "next_next_longitude": 0.9494590759277344,
-                "next_next_altitude_ft": 16004
-              }
-            },
-            {
-              "EarthReferenceData": {
-                "heading_or_track_degrees": 290.390625,
-                "heading_invalid": false,
-                "speed": 413.5,
-                "vertical_speed_ft_per_min": 16
-              }
+        "label": "A6",
+        "text": "/PIKCPYA.ADS.D-AALB08060A1812B113227921E314E5DD",
+        "from_hex": "90",
+        "to_hex": "3C4582",
+        "latitude": 0.0,
+        "longitude": 0.0,
+        "altitude": 0.0,
+        "track": null,
+        "source_type": "unknown",
+        "timestamp": 1781378212.80346,
+        "created_at": 1781378212.802201,
+        "frequency": 0.0,
+        "id": "6885605082",
+        "airframe_id": 2727,
+        "flight_id": 5544633336,
+        "tail": "D-AALB",
+        "link_direction": "uplink",
+        "airframe": {
+          "icao": "3C4582",
+          "tail": "D-AALB"
+        },
+        "flight": {
+          "latitude": 45.166098,
+          "longitude": 24.740809,
+          "altitude": 37000.0,
+          "track": 116.67
+        }
+      },
+      "dst": {
+        "icao24": "3c4582",
+        "addr_type": "aircraft"
+      },
+      "app": {
+        "Arinc622": {
+          "atsu_address": "PIKCPYA",
+          "imi": "ADS",
+          "registration": "D-AALB",
+          "payload": {
+            "kind": "Adsc",
+            "data": {
+              "atsu_address": "PIKCPYA",
+              "registration": "D-AALB",
+              "tags": [
+                {
+                  "EventContractRequest": {
+                    "contract_number": 6,
+                    "groups": [
+                      {
+                        "kind": "lateral_deviation_change",
+                        "value": {
+                          "threshold_nm": 3.0
+                        }
+                      },
+                      {
+                        "kind": "vertical_speed_change",
+                        "value": {
+                          "threshold_ft_per_min": -5056
+                        }
+                      },
+                      {
+                        "kind": "altitude_range",
+                        "value": {
+                          "ceiling_ft": 220425,
+                          "floor_ft": 216675
+                        }
+                      },
+                      {
+                        "kind": "report_waypoint_changes"
+                      }
+                    ]
+                  }
+                }
+              ]
             }
-          ]
+          }
         }
       }
     }
   }
 }
 ```
+
+For an ACARS frame decoded directly by the VHF path, the top-level envelope is the same, but `message.kind` is `"acars"` and `message.data` contains the ACARS fields such as `label`, `text`, and `app`.
 
 The exact nested body depends on the decoded protocol, but the top-level envelope is designed to make mixed sources easier to consume.
 
@@ -115,8 +153,12 @@ redis_url = "redis://localhost:6379"
 
 Redis topics are selected from decoded application type where possible, including:
 
-- `datalink-sq`
 - `datalink-acars`
+- `datalink-adsc`
 - `datalink-cpdlc`
 - `datalink-hfdl`
-- `datalink-other`
+- `datalink-sq`
+- `datalink-vdl2`
+- `datalink-x25`
+- `datalink-xid`
+- `datalink-unknown`

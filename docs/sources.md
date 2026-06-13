@@ -50,16 +50,16 @@ datalink vdl2 hackrf://  # comes with a reasonable set of default values
 
 SoapySDR is also covered if compiled with the `soapy` feature.
 
-You may specify more options
+You may specify more options:
 
 ```sh
 datalink vhf rtlsdr://0?center_freq=131.7M&sample_rate=1.05M&channel=131.725M
-rtlsdr://0?center_freq=136.85M&sample_rate=1.05M&channel=136.875M,136.975M&gain=auto
+datalink vdl2 rtlsdr://0?center_freq=136.85M&sample_rate=1.05M&channel=136.875M,136.975M&gain=auto
 datalink vdl2 airspy://0?center_freq=136.85M&sample_rate=6M
 datalink hfdl hackrf://0?center_freq=10M&sample_rate=8M
 ```
 
-Common parameters are `name`, `center_freq`/`freq`, `sample_rate`/`rate`, `channel`/`channels`, `format`/`iq_format`, `gain`, `bias_tee`, `rf_gain`, `lna_gain`/`if_gain`, `mixer_gain`, and `vga_gain`/`bb_gain`.
+Common parameters are `name`, `center_freq`/`freq`, `sample_rate`/`rate`, `channel`/`channels`, `format`/`iq_format`, `gain`, `bias_tee`, `amp_enable`/`rf_amp`, `rf_gain`, `lna_gain`/`if_gain`, `mixer_gain`, and `vga_gain`/`bb_gain`.
 
 !!! tip
 

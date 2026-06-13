@@ -1,20 +1,24 @@
 # Installation
 
-`datalink` is currently easiest to install from source with Cargo.
-
-Packaged builds for common platforms will be added later.
+`datalink` is currently easiest to install with Cargo. Packaged builds for common platforms will be added later.
 
 <!-- Packaging note: when adding release binaries, mirror the structure/style used by ../jet1090/docs/install.md. -->
 
 ## Install with Cargo
+
+From a checkout of this repository:
+
+```sh
+cargo install --path crates/datalink
+```
+
+Or from the registry:
 
 ```sh
 cargo install datalink
 ```
 
 ## Usage
-
-Find about available subcommands:
 
 ```sh
 datalink --help
@@ -37,7 +41,7 @@ datalink --help
     datalink vdl2 --help
     ```
 
-    Then check [Sources](sources.md) for more details
+    Then check [Sources](sources.md) for source URL syntax, or [Configuration](config.md) for `datalink --config datalink.toml`.
 
 ## Features
 

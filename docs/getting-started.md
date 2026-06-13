@@ -52,11 +52,11 @@ For reference, here are frequencies for other surveillance systems:
 | ADS-B / Mode&nbsp;S | 1090 MHz            | Line of sight | [`jet1090`](https://mode-s.org/jet1090/), [`dump1090`](https://github.com/flightaware/dump1090), [`readsb`](https://github.com/wiedehopf/readsb) |
 | AIS (ships)         | ±162 MHz            | Line of sight | [`ship162`](https://github.com/xoolive/ship162), [`AIS-catcher`](https://github.com/jvde-github/AIS-catcher)                                     |
 
-### Known VHF ACARS channels
+### Selected VHF ACARS channels
 
 VHF ACARS channels are region-dependent.
 
-When no explicit channel list is configured, `datalink` first tries to choose known channels that fit inside the source bandwidth. If bandwidth metadata is missing or too narrow, it falls back to a compact default scan list.
+When no explicit channel list is configured, `datalink` first tries to choose known channels that fit inside the source bandwidth. If bandwidth metadata is missing or no known channel fits, it falls back to a compact default scan list.
 
 |   Frequency | Support                    |   Frequency | Support                     |
 | ----------: | -------------------------- | ----------: | --------------------------- |
@@ -87,7 +87,7 @@ VDL2 channels cluster around 136–137 MHz.
 
 HFDL is different: frequencies change with station, propagation, time of day, and operational use. A receiver often monitors one or more known HF channels rather than a compact VHF band.
 
-The docs.rs page contains a list of known HDFL frequencies.  
+The docs.rs page contains a list of known HFDL frequencies.
 <https://docs.rs/crate/datalink/latest>
 
 ## Bearers
@@ -108,7 +108,7 @@ It is simple compared to other bearers: the ACARS frame is the main container.
 
 ### VDL Mode 2
 
-VDL2 is a higher-throughput VHF (DMSK modulation) digital link. It carries bursts that decode into **AVLC** frames.
+VDL2 is a higher-throughput VHF (D8PSK modulation) digital link. It carries bursts that decode into **AVLC** frames.
 
 ```text
 VDL2 burst → demodulator → AVLC frame → payload

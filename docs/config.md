@@ -90,5 +90,5 @@ If channels are omitted, `datalink` selects known channels that fit inside the c
 - Source ids must be unique and non-empty.
 - I/Q sources must have at least one receiver.
 - Event sources must not have receiver blocks.
-- Channels must fit within the source bandwidth.
+- Explicit channels are checked against source bandwidth when `center_freq`, `sample_rate`, and `channels` are all provided.
 - Use explicit `format`, `center_freq`, and `sample_rate` for raw captures when filename inference is not reliable.

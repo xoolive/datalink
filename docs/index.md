@@ -20,12 +20,12 @@ You may be familiar with ADS-B/Mode S tooling such as [`jet1090`](https://mode-s
 - **Demodulate** VHF ACARS, VDL Mode 2, and HFDL from files and supported SDR sources.
 - **Decode** ACARS frames, AVLC/VDL2 frames, HFDL messages, ADS-C payloads, CPDLC paths, and selected airline operational payloads.
 - **Ingest and structure** [airframes.io](https://app.airframes.io/) websocket rows when you want worldwide live data.
-- **Normalizes** decoded traffic into a common JSONL event envelope with source, receiver, aircraft, kinematic, raw-frame, and protocol-body fields.
+- **Normalize** decoded traffic into a common JSONL event envelope with source, receiver, aircraft, kinematics, raw-frame, and protocol-body fields.
 - **Publishes** to stdout/files and optional Redis topics for integration with research tools, dashboards, or [tangram](https://mode-s.org/tangram).
 
 !!! tip "airframes.io"
 
-    [airframes.io](https://app.airframes.io/) provide a good infrastructure. Consider contributing to their feed.
+    [airframes.io](https://app.airframes.io/) has a good infrastructure. Consider contributing to their feed.
 
 ## Where to go next
 

@@ -1,4 +1,4 @@
-### Decode standalone frames
+# Decode standalone frames
 
 ```sh
 # Hex-encoded ACARS frame bytes
