@@ -1,30 +1,37 @@
-# datalink documentation
+# datalink
 
-Start here: `docs/00-overview/README.md`.
+`datalink` is an open-source **receiver and decoder for aviation datalink traffic**: the messages aircraft exchange with airline systems, air traffic service units, and ground-station networks.
 
-## Docs map
+!!! tip "Start here"
 
-- `docs/00-overview/README.md` — project intro, scope, and documentation map.
-- `docs/00-overview/getting-started.md` — repository-local quick start.
-- `docs/00-overview/background.md` — protocol and operational context.
-- `docs/00-overview/architecture.md` — architecture, layer map, and coverage matrix.
-- `docs/00-overview/glossary.md` — quick protocol terminology.
-- `docs/00-overview/doc-status.md` — freshness and source quality policy.
-- `docs/10-modes/` — bearer/mode background (VDL2, VHF ACARS, HFDL, SATCOM, Iridium).
-- `docs/20-decoders/` — reference decoder notes (dumpvdl2, vdlm2dec, acarsdec, dumphfdl, JAERO).
-- `docs/40-pipelines/` — ingest/normalization/output integration guidance.
-- `docs/40-pipelines/decoding-pipeline.md` — end-to-end runtime dataflow.
-- `docs/50-operations/` — station operations and monitoring guidance.
-- `docs/60-troubleshooting/` — practical triage and failure patterns.
-- `docs/90-case-studies/` — analysis templates and narrative examples.
+    If you are new to ACARS, VDL2, HFDL, ADS-C, or CPDLC, read [Getting Started](getting-started.md) first.
 
-## External references
+You may be familiar with ADS-B/Mode S tooling such as [`jet1090`](https://mode-s.org/jet1090):
 
-Use external docs for depth, but keep this documentation self-contained for core architecture and workflows.
+- ADS-B tells you where an aircraft is (**surveillance**);
+- Datalink helps explain what the aircraft and ground systems are communicating (**communication** with some surveillance): clearances, acknowledgements, surveillance contracts, route intent, ATIS/weather requests, OOOI events, and airline operational messages.
 
-- `../../github/airframesio-docs`
-- `../../github/thebaldgeek.github.io`
+!!! warning "Datalink or `datalink`"
 
-## Planning
+    We refer here to datalink in plain characters for the concept, and to `datalink` for the software.
 
-- `plan.md` — implementation roadmap and parity gaps.
+## What `datalink` does
+
+- **Demodulate** VHF ACARS, VDL Mode 2, and HFDL from files and supported SDR sources.
+- **Decode** ACARS frames, AVLC/VDL2 frames, HFDL messages, ADS-C payloads, CPDLC paths, and selected airline operational payloads.
+- **Ingest and structure** [airframes.io](https://app.airframes.io/) websocket rows when you want worldwide live data.
+- **Normalizes** decoded traffic into a common JSONL event envelope with source, receiver, aircraft, kinematic, raw-frame, and protocol-body fields.
+- **Publishes** to stdout/files and optional Redis topics for integration with research tools, dashboards, or [tangram](https://mode-s.org/tangram).
+
+!!! tip "airframes.io"
+
+    [airframes.io](https://app.airframes.io/) provide a good infrastructure. Consider contributing to their feed.
+
+## Where to go next
+
+1. [Getting Started](getting-started.md) — the datalink concepts and how `datalink` maps to them.
+2. [Installation](install.md) — current build/install notes.
+3. [Sources](sources.md) — files, stdin, SDRs, and Airframes.io event sources.
+4. [Output & Schema](output.md) — the normalized JSON event shape.
+5. [Configuration](config.md) — merged receiver TOML examples.
+6. [Message Types](messages.md) — a more complete map of bearers, envelopes, and application payloads.
