@@ -113,44 +113,13 @@ pub(crate) fn parse_airspy_serial(value: &str) -> anyhow::Result<u64> {
 /// Select the Redis pub/sub topic for a decoded protocol message.
 pub(crate) fn redis_topic_for_record(record: &ProtocolMessage) -> &'static str {
     match record {
-        ProtocolMessage::Avlc(frame) => {
-            if let Some(payload) = &frame.payload {
-                match payload {
-                    acars::decode::avlc::AvlcPayload::Acars(acars) => acars_redis_topic(&acars.app),
-                    acars::decode::avlc::AvlcPayload::X25(x25) => {
-                        // Publish on datalink-cpdlc if the X.25/COTP payload
-                        // contains an ATN B1 CPDLC message; otherwise datalink-x25.
-                        let has_atn_cpdlc = x25
-                            .inner
-                            .as_ref()
-                            .and_then(|inner| {
-                                if let acars::decode::x25::X25Inner::ClnpCompressed(clnp) = inner {
-                                    clnp.inner.as_ref()
-                                } else {
-                                    None
-                                }
-                            })
-                            .map(|clnp_inner| {
-                                if let acars::decode::x25::ClnpInner::Cotp(pdus) = clnp_inner {
-                                    pdus.iter().any(|p| p.atn_cpdlc.is_some())
-                                } else {
-                                    false
-                                }
-                            })
-                            .unwrap_or(false);
-                        if has_atn_cpdlc {
-                            "datalink-cpdlc"
-                        } else {
-                            "datalink-x25"
-                        }
-                    }
-                    acars::decode::avlc::AvlcPayload::Xid(_) => "datalink-xid",
-                    acars::decode::avlc::AvlcPayload::Unknown(_) => "datalink-unknown",
-                }
-            } else {
-                "datalink-vdl2"
-            }
-        }
+        ProtocolMessage::Avlc(frame) => match &frame.payload {
+            Some(acars::decode::avlc::AvlcPayload::Acars(acars)) => acars_redis_topic(&acars.app),
+            Some(acars::decode::avlc::AvlcPayload::X25(x25)) => x25_redis_topic(x25),
+            Some(acars::decode::avlc::AvlcPayload::Xid(_)) => "datalink-xid",
+            Some(acars::decode::avlc::AvlcPayload::Unknown(_)) => "datalink-unknown",
+            None => "datalink-vdl2",
+        },
         ProtocolMessage::Acars(msg) => acars_redis_topic(&msg.app),
         ProtocolMessage::Hfdl(_) => "datalink-hfdl",
         ProtocolMessage::Airframes(af) => {
@@ -166,7 +135,22 @@ pub(crate) fn redis_topic_for_record(record: &ProtocolMessage) -> &'static str {
     }
 }
 
-// TODO maybe use a trait instead?
+fn x25_redis_topic(x25: &acars::decode::x25::X25Packet) -> &'static str {
+    use acars::decode::x25::{ClnpInner, X25Inner};
+
+    let has_atn_cpdlc = matches!(
+        x25.inner.as_ref(),
+        Some(X25Inner::ClnpCompressed(clnp))
+            if matches!(clnp.inner.as_ref(), Some(ClnpInner::Cotp(pdus)) if pdus.iter().any(|p| p.atn_cpdlc.is_some()))
+    );
+
+    if has_atn_cpdlc {
+        "datalink-cpdlc"
+    } else {
+        "datalink-x25"
+    }
+}
+
 fn acars_redis_topic(app: &acars::decode::payload::AcarsAppPayload) -> &'static str {
     match app {
         acars::decode::payload::AcarsAppPayload::Arinc622(arinc) => match arinc.imi {

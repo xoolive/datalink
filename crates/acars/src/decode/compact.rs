@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::decode::acars::AcarsMessage;
 use crate::decode::avlc::{AvlcFrame, AvlcPayload};
-use crate::decode::hfdl::{HfdlMessage, HfdlPdu, LpduData, Mpdu};
+use crate::decode::hfdl::{HfdlMessage, HfdlPdu, Hfnpdu, LpduData, Mpdu};
 use crate::decode::payload::aoc::label32::Label32Message;
 use crate::decode::payload::aoc::oooi::{OooiOffDestination, OooiOffReport};
 use crate::decode::payload::aoc::position::AocPositionMessage;
@@ -332,40 +332,41 @@ impl ExtractKinematics for AvlcFrame {
 
 impl ExtractKinematics for HfdlMessage {
     fn kinematics(&self) -> Option<Kinematics> {
-        if let HfdlPdu::Mpdu(Mpdu::Downlink(dl)) = &self.pdu {
-            for lpdu in &dl.lpdus {
-                if let LpduData::Hfnpdu { hfnpdu } = &lpdu.data {
-                    match &hfnpdu.data {
-                        crate::decode::hfdl::Hfnpdu::Performance { performance } => {
-                            return Some(Kinematics {
-                                position: Some(Position {
-                                    latitude: performance.position.lat,
-                                    longitude: performance.position.lon,
-                                }),
-                                derived_from: Some("hfdl_performance".into()),
-                                ..Default::default()
-                            });
-                        }
-                        crate::decode::hfdl::Hfnpdu::Frequency { frequency_data } => {
-                            return Some(Kinematics {
-                                position: Some(Position {
-                                    latitude: frequency_data.position.lat,
-                                    longitude: frequency_data.position.lon,
-                                }),
-                                derived_from: Some("hfdl_frequency".into()),
-                                ..Default::default()
-                            });
-                        }
-                        crate::decode::hfdl::Hfnpdu::Acars { acars } => {
-                            if let Some(kin) = acars.kinematics() {
-                                return Some(kin);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        None
+        let HfdlPdu::Mpdu(Mpdu::Downlink(dl)) = &self.pdu else {
+            return None;
+        };
+
+        dl.lpdus.iter().find_map(|lpdu| match &lpdu.data {
+            LpduData::Hfnpdu { hfnpdu } => hfdl_hfnpdu_kinematics(&hfnpdu.data),
+            _ => None,
+        })
+    }
+}
+
+fn hfdl_hfnpdu_kinematics(hfnpdu: &Hfnpdu) -> Option<Kinematics> {
+    match hfnpdu {
+        Hfnpdu::Performance { performance } => Some(hfdl_position_kinematics(
+            performance.position.lat,
+            performance.position.lon,
+            "hfdl_performance",
+        )),
+        Hfnpdu::Frequency { frequency_data } => Some(hfdl_position_kinematics(
+            frequency_data.position.lat,
+            frequency_data.position.lon,
+            "hfdl_frequency",
+        )),
+        Hfnpdu::Acars { acars } => acars.kinematics(),
+        _ => None,
+    }
+}
+
+fn hfdl_position_kinematics(latitude: f64, longitude: f64, derived_from: &str) -> Kinematics {
+    Kinematics {
+        position: Some(Position {
+            latitude,
+            longitude,
+        }),
+        derived_from: Some(derived_from.into()),
+        ..Default::default()
     }
 }

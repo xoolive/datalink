@@ -376,22 +376,19 @@ fn normalize_hex_addr(value: &str) -> Option<String> {
 
 /// Extract the best available aircraft ICAO24 address from an Airframes message.
 pub(crate) fn extract_airframes_aircraft(msg: &AirframesMessage) -> Option<String> {
-    if let Some(icao) = msg
-        .payload
+    msg.payload
         .airframe
         .as_ref()
         .and_then(|a| a.icao.as_deref())
         .and_then(normalize_hex_addr)
-    {
-        return Some(icao);
-    }
-
-    msg.src
-        .as_ref()
-        .into_iter()
-        .chain(msg.dst.as_ref())
-        .find(|addr| addr.addr_type == AirframesAddrType::Aircraft)
-        .map(|addr| addr.icao24.clone())
+        .or_else(|| {
+            msg.src
+                .as_ref()
+                .into_iter()
+                .chain(msg.dst.as_ref())
+                .find(|addr| addr.addr_type == AirframesAddrType::Aircraft)
+                .map(|addr| addr.icao24.clone())
+        })
 }
 
 /// Extract the best available aircraft registration from an Airframes row.
