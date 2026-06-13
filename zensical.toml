@@ -1,0 +1,57 @@
+[project]
+site_name = "datalink"
+site_description = "Aviation datalink decoding for ACARS, VDL Mode 2, HFDL, and Airframes.io feeds"
+site_url = "https://mode-s.org/datalink/"
+repo_name = "xoolive/datalink"
+repo_url = "https://github.com/xoolive/datalink/"
+extra_css = ["stylesheets/extra.css"]
+nav = [
+  { "Home" = "index.md" },
+  { "Getting Started" = "getting-started.md" },
+  { "Installation" = "install.md" },
+  { "Sources" = "sources.md" },
+  { "Output format" = "output.md" },
+  { "Configuration" = "config.md" },
+]
+
+[project.theme]
+logo = "images/favicon.png"
+favicon = "images/favicon.png"
+features = [
+  "content.code.annotate",
+  "content.code.copy",
+  "navigation.expand",
+  "navigation.footer",
+  "navigation.indexes",
+  "search.highlight",
+  "search.suggest",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+primary = "datalink"
+accent = "datalink"
+
+[project.theme.palette.toggle]
+icon = "material/link"
+name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "datalink"
+accent = "datalink"
+
+[project.theme.palette.toggle]
+icon = "material/toggle-switch"
+name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "datalink"
+accent = "datalink"
+
+[project.theme.palette.toggle]
+icon = "material/toggle-switch-off"
+name = "Switch to system preference"

@@ -9,7 +9,7 @@ on:
     paths:
       - "docs/**"
       - ".github/workflows/docs.yml"
-      - "mkdocs.yml"
+      - "zensical.toml"
 
 permissions:
   contents: write
@@ -32,7 +32,7 @@ jobs:
 
       - name: Build the site
         run: |
-          uvx --with "mkdocs-material[imaging]" mkdocs build -d site
+          uvx zensical build --clean --strict
 
       - name: Deploy pages to www.mode-s.org/datalink
         uses: peaceiris/actions-gh-pages@v4
