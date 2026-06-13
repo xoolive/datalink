@@ -34,4 +34,3 @@ You may be familiar with ADS-B/Mode S tooling such as [`jet1090`](https://mode-s
 3. [Sources](sources.md) — files, stdin, SDRs, and Airframes.io event sources.
 4. [Output & Schema](output.md) — the normalized JSON event shape.
 5. [Configuration](config.md) — merged receiver TOML examples.
-6. [Message Types](messages.md) — a more complete map of bearers, envelopes, and application payloads.
