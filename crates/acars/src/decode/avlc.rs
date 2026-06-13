@@ -336,8 +336,6 @@ impl Serialize for AvlcLcf {
     }
 }
 
-// ─── DekuReader + DekuContainerRead + TryFrom for AvlcFrame ────────────────
-
 /// `AvlcFrame` implements `DekuReader`, `DekuContainerRead`, and `TryFrom<&[u8]>`
 /// manually because the frame layout requires FCS verification over the entire
 /// buffer and variable-length payload dispatch based on the LCF byte.

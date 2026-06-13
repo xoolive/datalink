@@ -97,8 +97,6 @@ impl Imi {
     }
 }
 
-// ─── Standards-defined ARINC 622 structure ─────────────────────────────────
-
 /// ARINC 622 message: standards-defined address/header plus IMI-dispatched
 /// application payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

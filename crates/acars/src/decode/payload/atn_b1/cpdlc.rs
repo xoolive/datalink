@@ -174,8 +174,6 @@ fn convert_downlink_element(e: &AtcDownlinkMsgElementId) -> CpdlcElement {
     make_element(id, PduKind::Downlink, body)
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
 fn ia5_str(s: &rasn::types::Ia5String) -> String {
     s.to_string().trim().to_string()
 }

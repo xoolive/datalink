@@ -227,8 +227,6 @@ pub struct AcarsMessage {
     pub app: crate::decode::payload::AcarsAppPayload,
 }
 
-// ─── DekuReader + DekuContainerRead + TryFrom ─────────────────────────────────
-
 /// `AcarsMessage` implements `DekuReader<'_, MessageDirection>` manually.
 /// The direction context is used to resolve ambiguous block_id cases and to
 /// correctly parse the H1 sublabel/MFI fields.

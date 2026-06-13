@@ -91,8 +91,6 @@ fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-// ─── AVLC 24-bit address hex serialisation ───────────────────────────────────
-
 /// Serialise a 24-bit AVLC address as a 6-digit lowercase hex string (e.g. `"2a3261"`).
 pub fn serialize_addr_hex<S: Serializer>(v: &u32, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(&format!("{:06x}", v))

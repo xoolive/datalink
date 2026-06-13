@@ -404,7 +404,6 @@ pub(crate) fn extract_airframes_registration(row: &AirframesPayload) -> Option<S
         .map(str::to_string)
 }
 
-/// Build normalized kinematics from Airframes top-level and nested flight fields.
 fn normalize_arinc622_text(text: &str) -> Option<String> {
     if text.starts_with('/') {
         return has_arinc622_imi(text).then(|| text.to_string());

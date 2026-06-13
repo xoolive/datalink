@@ -27,7 +27,7 @@ pub struct AdscMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AdscTag {
-    // ---- downlink (aircraft → ground) tags ----
+    // Downlink tags.
     Acknowledgement { contract_number: u8 },
     NegativeAcknowledgement(AdscNegativeAcknowledgement),
     NoncomplianceNotification(AdscNoncomplianceNotification),
@@ -46,7 +46,7 @@ pub enum AdscTag {
     WaypointChangeEvent(AdscBasicReport),
     IntermediateProjection(AdscIntermediateProjection),
     FixedProjection(AdscFixedProjection),
-    // ---- uplink (ground → aircraft) tags ----
+    // Uplink tags.
     CancelAllContracts,
     CancelContract { contract_number: u8 },
     PeriodicContractRequest(AdscContractRequest),

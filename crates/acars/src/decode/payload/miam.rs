@@ -324,8 +324,6 @@ fn parse_miam_core_v1_ack_header(hdr: &[u8]) -> DecodeResult<MiamCoreV1AckHeader
     })
 }
 
-// ─── Parse MIAM CORE PDU from header + body bytes ───────────────────────────
-
 fn parse_miam_core_pdu(header: Vec<u8>, body: Option<Vec<u8>>) -> DecodeResult<MiamCorePdu> {
     if header.is_empty() {
         return Err(DecodeError::InvalidPayload(PayloadError::Miam(

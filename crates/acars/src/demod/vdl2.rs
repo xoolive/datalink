@@ -54,7 +54,7 @@ const RS_K: usize = 249;
 const INP_LPF_CUTOFF_HZ: f32 = 8_000.0;
 const INP_LPF_RIPPLE: f32 = 0.5; // percent
 
-// ─── D8PSK preamble phases (cumulative, radians) ───────────────────────────
+// D8PSK preamble phases in cumulative radians.
 
 const PR_PHASE: [f32; PREAMBLE_SYMS] = [
     0.0 * PI / 4.0,
@@ -78,7 +78,7 @@ const PR_PHASE: [f32; PREAMBLE_SYMS] = [
 /// Gray-code mapping for D8PSK symbol index → 3-bit value.
 const GRAYCODE: [u8; ARITY] = [0, 1, 3, 2, 6, 7, 5, 4];
 
-// ─── Header FEC (parity-check matrix and syndrome correction table)
+// Header FEC parity-check matrix and syndrome correction table.
 
 #[allow(clippy::unusual_byte_groupings)]
 const H: [u32; HDRFECLEN as usize] = [
@@ -96,7 +96,7 @@ const SYNDTABLE: [u32; 32] = [
     0x00001000, 0x00000800, 0x00000400, 0x00000200, 0x00000100, 0x00000080, 0x00000040, 0x00000020,
 ];
 
-// ─── Reed-Solomon RS(255,249) decoder
+// Reed-Solomon RS(255,249) decoder.
 // Ported from Phil Karn's libfec (LGPL), parameters: GF(2^8) poly=0x187,
 // fcr=120, prim=1, nroots=6, pad=0.
 
