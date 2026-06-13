@@ -47,6 +47,9 @@
 //! | 131.825 MHz | Strongly observed in the Airframes.io feed |
 //! | 131.850 MHz | New European channel |
 
+use crate::event::{
+    Bearer, DecodedEvent, ProtocolMessage, ReceiverMetadata, SourceClass, SourceMetadata,
+};
 use crate::iq_pipeline::{collect_iq_frames, FrameContext, IqPipeline};
 use crate::source::{Address, Source};
 use crate::util::{bytes_to_hex, expanduser, infer_capture_params, RedisPublisher};
@@ -249,10 +252,10 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
 
     let mut total = DecodeStats::default();
     let src = options.source.as_ref().expect("source checked before run");
-    let source_meta = crate::merged::SourceMetadata {
+    let source_meta = SourceMetadata {
         id: "vhf_cli".into(),
         name: src.label(),
-        class: crate::merged::SourceClass::Iq,
+        class: SourceClass::Iq,
         format: None,
     };
     let stats = decode_source(
@@ -261,7 +264,7 @@ pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
         redis.as_mut(),
         None,
         &source_meta,
-        crate::merged::Bearer::Vhf,
+        Bearer::Vhf,
     )
     .await?;
     total.demod_frames += stats.demod_frames;
@@ -308,9 +311,9 @@ pub(crate) async fn decode_file_values(
     center_freq: Option<u32>,
     sample_rate: Option<u32>,
     channels: Option<Vec<u32>>,
-    source_meta: &crate::merged::SourceMetadata,
-    receiver_bearer: crate::merged::Bearer,
-) -> anyhow::Result<Vec<crate::merged::DecodedEvent>> {
+    source_meta: &SourceMetadata,
+    receiver_bearer: Bearer,
+) -> anyhow::Result<Vec<DecodedEvent>> {
     let src = Source {
         address: Address::File {
             file: file.to_string(),
@@ -346,9 +349,9 @@ async fn decode_source(
     src: &Source,
     mut output: Option<&mut std::io::BufWriter<std::fs::File>>,
     mut redis: Option<&mut RedisPublisher>,
-    mut collect: Option<&mut Vec<crate::merged::DecodedEvent>>,
-    source_meta: &crate::merged::SourceMetadata,
-    receiver_bearer: crate::merged::Bearer,
+    mut collect: Option<&mut Vec<DecodedEvent>>,
+    source_meta: &SourceMetadata,
+    receiver_bearer: Bearer,
 ) -> anyhow::Result<DecodeStats> {
     if let Address::File { file } = &src.address {
         if file.to_ascii_lowercase().ends_with(".wav") {
@@ -433,7 +436,7 @@ async fn decode_source(
 struct FrameSinks<'a> {
     output: Option<&'a mut std::io::BufWriter<std::fs::File>>,
     redis: Option<&'a mut RedisPublisher>,
-    collect: Option<&'a mut Vec<crate::merged::DecodedEvent>>,
+    collect: Option<&'a mut Vec<DecodedEvent>>,
 }
 
 /// Parse one demodulated ACARS frame and emit it to configured sinks.
@@ -443,22 +446,22 @@ async fn handle_acars_frame(
     stats: &mut DecodeStats,
     ctx: FrameContext,
     demod_frame: acars::demod::vhf::DemodFrame,
-    source_meta: &crate::merged::SourceMetadata,
-    receiver_bearer: crate::merged::Bearer,
+    source_meta: &SourceMetadata,
+    receiver_bearer: Bearer,
 ) -> anyhow::Result<()> {
     stats.demod_frames += 1;
     match parse_acars_frame(&demod_frame.bytes, MessageDirection::Unknown) {
         Ok(message) => {
             stats.parsed_ok += 1;
 
-            let pmsg = crate::merged::ProtocolMessage::Acars(Box::new(message.clone()));
+            let pmsg = ProtocolMessage::Acars(Box::new(message.clone()));
 
-            let event = crate::merged::DecodedEvent {
-                event: "message",
+            let event = DecodedEvent {
+                event: "message".to_string(),
                 timestamp: Some(ctx.timestamp_unix),
                 bearer: receiver_bearer,
                 source: source_meta.clone(),
-                receiver: Some(crate::merged::ReceiverMetadata {
+                receiver: Some(ReceiverMetadata {
                     bearer: receiver_bearer,
                     channel_hz: Some(channels[ctx.channel_index]),
                 }),
@@ -495,9 +498,9 @@ async fn decode_wav_source(
     file: &str,
     mut output: Option<&mut std::io::BufWriter<std::fs::File>>,
     mut redis: Option<&mut RedisPublisher>,
-    mut collect: Option<&mut Vec<crate::merged::DecodedEvent>>,
-    source_meta: &crate::merged::SourceMetadata,
-    receiver_bearer: crate::merged::Bearer,
+    mut collect: Option<&mut Vec<DecodedEvent>>,
+    source_meta: &SourceMetadata,
+    receiver_bearer: Bearer,
 ) -> anyhow::Result<DecodeStats> {
     let mut reader = hound::WavReader::open(expanduser(file))?;
     let spec = reader.spec();

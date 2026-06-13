@@ -8,6 +8,9 @@ mod util;
 mod vdl2;
 mod vhf;
 
+use datalink::event;
+
+use crate::event::{Bearer, DecodedEvent, ProtocolMessage, SourceClass, SourceMetadata};
 use acars::decode::acars::{parse_acars_frame, MessageDirection};
 use acars::decode::avlc::parse_avlc_frame;
 use acars::decode::payload::arinc622::adsc::parse_adsc_app_text;
@@ -96,16 +99,16 @@ fn run_decode(command: DecodeCommand) -> anyhow::Result<()> {
                 Direction::Downlink => MessageDirection::AirToGround,
             };
             let message = parse_acars_frame(&bytes, dir)?;
-            let pmsg = crate::merged::ProtocolMessage::Acars(Box::new(message));
+            let pmsg = ProtocolMessage::Acars(Box::new(message));
 
-            let event = crate::merged::DecodedEvent {
-                event: "message",
+            let event = DecodedEvent {
+                event: "message".to_string(),
                 timestamp: None,
-                bearer: crate::merged::Bearer::Vhf,
-                source: crate::merged::SourceMetadata {
+                bearer: Bearer::Vhf,
+                source: SourceMetadata {
                     id: "decode_cli".into(),
                     name: "decode_cli".into(),
-                    class: crate::merged::SourceClass::Frames,
+                    class: SourceClass::Frames,
                     format: None,
                 },
                 receiver: None,
@@ -120,16 +123,16 @@ fn run_decode(command: DecodeCommand) -> anyhow::Result<()> {
             let bytes = hex::decode(hex.trim())?;
             let frame = parse_avlc_frame(&bytes)?;
 
-            let pmsg = crate::merged::ProtocolMessage::Avlc(Box::new(frame));
+            let pmsg = ProtocolMessage::Avlc(Box::new(frame));
 
-            let event = crate::merged::DecodedEvent {
-                event: "message",
+            let event = DecodedEvent {
+                event: "message".to_string(),
                 timestamp: None,
-                bearer: crate::merged::Bearer::Vdl2,
-                source: crate::merged::SourceMetadata {
+                bearer: Bearer::Vdl2,
+                source: SourceMetadata {
                     id: "decode_cli".into(),
                     name: "decode_cli".into(),
-                    class: crate::merged::SourceClass::Frames,
+                    class: SourceClass::Frames,
                     format: None,
                 },
                 receiver: None,
@@ -152,16 +155,16 @@ fn run_decode(command: DecodeCommand) -> anyhow::Result<()> {
                 },
             );
 
-            let pmsg = crate::merged::ProtocolMessage::App(Box::new(acars_app));
+            let pmsg = ProtocolMessage::App(Box::new(acars_app));
 
-            let event = crate::merged::DecodedEvent {
-                event: "message",
+            let event = DecodedEvent {
+                event: "message".to_string(),
                 timestamp: None,
-                bearer: crate::merged::Bearer::Decoded,
-                source: crate::merged::SourceMetadata {
+                bearer: Bearer::Decoded,
+                source: SourceMetadata {
                     id: "decode_cli".into(),
                     name: "decode_cli".into(),
-                    class: crate::merged::SourceClass::Frames,
+                    class: SourceClass::Frames,
                     format: None,
                 },
                 receiver: None,

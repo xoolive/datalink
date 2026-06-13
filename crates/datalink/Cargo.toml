@@ -9,36 +9,64 @@ license.workspace = true
 edition.workspace = true
 
 [features]
-default = ["rtlsdr", "airspy", "hackrf", "websocket"]
-sdr = []
+# NOTE(abraham): this is ugly but necessary so tangram can decode airframes payload
+# another cleaner approach would be to have a crates/datalink-event but deferring it for now.
+default = ["cli", "rtlsdr", "airspy", "hackrf", "websocket"]
+cli = [
+    "acars/demod",
+    "dep:anyhow",
+    "dep:clap",
+    "dep:hex",
+    "dep:serde_json",
+    "dep:desperado",
+    "dep:thiserror",
+    "dep:rustfft",
+    "dep:dirs",
+    "dep:tokio",
+    "dep:url",
+    "dep:futures-util",
+    "dep:http",
+    "dep:tokio-rustls",
+    "dep:rustls",
+    "dep:webpki-roots",
+    "dep:hound",
+    "dep:redis",
+    "dep:toml",
+]
+sdr = ["cli"]
 rtlsdr = ["sdr", "desperado/rtlsdr"]
 airspy = ["sdr", "desperado/airspy"]
 hackrf = ["sdr", "desperado/hackrf"]
 soapy = ["sdr", "desperado/soapy"]
-websocket = []
+websocket = ["cli", "dep:tokio-tungstenite"]
+
+[[bin]]
+name = "datalink"
+path = "src/main.rs"
+required-features = ["cli"]
 
 [dependencies]
-anyhow.workspace = true
 chrono.workspace = true
-clap.workspace = true
-hex.workspace = true
-acars = { version = "0.1.0", path = "../acars", features = ["demod"] }
+acars = { version = "0.1.0", path = "../acars", default-features = false }
 serde.workspace = true
-serde_json.workspace = true
-desperado.workspace = true
-thiserror.workspace = true
-rustfft = "6"
-dirs = "6"
-tokio.workspace = true
-url = "2.5"
-futures-util = "0.3"
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
-http = "1"
-tokio-rustls = { version = "0.26", features = ["ring"] }
-rustls = { version = "0.23", features = ["ring"] }
-webpki-roots = "1.0"
-hound = "3.5"
-redis = { version = "1.2", features = ["tokio-comp"] }
-toml = "1.0"
+anyhow = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+desperado = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+rustfft = { version = "6", optional = true }
+dirs = { version = "6", optional = true }
+tokio = { workspace = true, optional = true }
+url = { version = "2.5", optional = true }
+futures-util = { version = "0.3", optional = true }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"], optional = true }
+http = { version = "1", optional = true }
+tokio-rustls = { version = "0.26", features = ["ring"], optional = true }
+rustls = { version = "0.23", features = ["ring"], optional = true }
+webpki-roots = { version = "1.0", optional = true }
+hound = { version = "3.5", optional = true }
+redis = { version = "1.2", features = ["tokio-comp"], optional = true }
+toml = { version = "1.0", optional = true }
 
 [dev-dependencies]

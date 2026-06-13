@@ -1,10 +1,10 @@
 //! Miscellaneous helpers shared by frontends and merged receiver mode.
 //!
-//! This module contains path expansion, timestamp deserialization, hexadecimal
-//! formatting, capture-parameter inference from common SDR filenames, hardware
-//! gain helpers, and Redis pub/sub publishing for decoded application messages.
+//! This module contains path expansion, hexadecimal formatting, capture-parameter
+//! inference from common SDR filenames, hardware gain helpers, and Redis pub/sub
+//! publishing for decoded application messages.
 
-use crate::merged::ProtocolMessage;
+use crate::event::ProtocolMessage;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -16,53 +16,6 @@ pub(crate) fn expanduser(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
-}
-
-/// Deserialize either numeric epoch seconds or an RFC 3339 timestamp into epoch seconds.
-pub fn deserialize_timestamp<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct TsVisitor;
-
-    impl<'de> serde::de::Visitor<'de> for TsVisitor {
-        type Value = Option<f64>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("a float or a timestamp string")
-        }
-
-        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
-            Ok(Some(value))
-        }
-
-        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
-            Ok(Some(value as f64))
-        }
-
-        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-            if let Ok(n) = value.parse::<f64>() {
-                Ok(Some(n))
-            } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
-                Ok(Some(dt.timestamp_micros() as f64 / 1_000_000.0))
-            } else {
-                Ok(None)
-            }
-        }
-
-        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-
-        fn visit_some<D2: serde::Deserializer<'de>>(
-            self,
-            deserializer: D2,
-        ) -> Result<Self::Value, D2::Error> {
-            deserializer.deserialize_any(self)
-        }
-    }
-
-    deserializer.deserialize_any(TsVisitor)
 }
 
 /// Format bytes as uppercase hexadecimal for JSON output.
@@ -287,19 +240,6 @@ impl RedisPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_airframes_timestamp() {
-        use serde::Deserialize;
-        #[derive(Deserialize)]
-        struct Wrapper {
-            #[serde(deserialize_with = "deserialize_timestamp")]
-            ts: Option<f64>,
-        }
-        let json = r#"{"ts": "2026-05-22T08:37:19.050Z"}"#;
-        let w: Wrapper = serde_json::from_str(json).unwrap();
-        assert_eq!(w.ts, Some(1779439039.05));
-    }
 
     #[test]
     fn infers_gqrx_capture_params() {

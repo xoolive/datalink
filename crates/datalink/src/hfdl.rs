@@ -34,6 +34,9 @@
 //! | 16 | Agana, Guam | 5451, 6652, <u>8927</u>, <u>11306</u>, <u>13312</u>, <u>17919</u>, 21928 |
 //! | 17 | Canarias, Spain | 6529, <u>8948</u>, <u>11348</u>, <u>13303</u>, <u>17928</u>, <u>21955</u> |
 
+use crate::event::{
+    Bearer, DecodedEvent, ProtocolMessage, ReceiverMetadata, SourceClass, SourceMetadata,
+};
 use crate::source::{Address, Source};
 #[cfg(feature = "hackrf")]
 use crate::util::hackrf_gain;
@@ -249,9 +252,9 @@ pub(crate) async fn decode_file_values(
     channels: Option<Vec<u32>>,
     start_second: f64,
     max_seconds: f64,
-    source_meta: &crate::merged::SourceMetadata,
-    receiver_bearer: crate::merged::Bearer,
-) -> anyhow::Result<Vec<crate::merged::DecodedEvent>> {
+    source_meta: &SourceMetadata,
+    receiver_bearer: Bearer,
+) -> anyhow::Result<Vec<DecodedEvent>> {
     let options = Options {
         source: Some(source.parse()?),
         format: format
@@ -298,18 +301,18 @@ async fn decode_mode(options: &Options) -> anyhow::Result<()> {
         None
     };
 
-    let source_meta = crate::merged::SourceMetadata {
+    let source_meta = SourceMetadata {
         id: "hfdl_cli".into(),
         name: options
             .source
             .as_ref()
             .map(|s| s.label())
             .unwrap_or_else(|| "hfdl".into()),
-        class: crate::merged::SourceClass::Iq,
+        class: SourceClass::Iq,
         format: None,
     };
 
-    for parsed in collect_decoded_pdus(options, &source_meta, crate::merged::Bearer::Hfdl).await? {
+    for parsed in collect_decoded_pdus(options, &source_meta, Bearer::Hfdl).await? {
         let line = serde_json::to_string(&parsed)?;
         println!("{line}");
         if let Some(redis) = redis.as_mut() {
@@ -324,9 +327,9 @@ async fn decode_mode(options: &Options) -> anyhow::Result<()> {
 /// Run HFDL diagnostics over the configured source and collect CRC-valid parsed PDUs.
 async fn collect_decoded_pdus(
     options: &Options,
-    source_meta: &crate::merged::SourceMetadata,
-    receiver_bearer: crate::merged::Bearer,
-) -> anyhow::Result<Vec<crate::merged::DecodedEvent>> {
+    source_meta: &SourceMetadata,
+    receiver_bearer: Bearer,
+) -> anyhow::Result<Vec<DecodedEvent>> {
     let source = options
         .source
         .as_ref()
@@ -360,14 +363,14 @@ async fn collect_decoded_pdus(
                 continue;
             }
             pdu_ok += 1;
-            let pmsg = crate::merged::ProtocolMessage::Hfdl(Box::new(parsed));
+            let pmsg = ProtocolMessage::Hfdl(Box::new(parsed));
 
-            let event = crate::merged::DecodedEvent {
-                event: "message",
+            let event = DecodedEvent {
+                event: "message".to_string(),
                 timestamp: None,
                 bearer: receiver_bearer,
                 source: source_meta.clone(),
-                receiver: Some(crate::merged::ReceiverMetadata {
+                receiver: Some(ReceiverMetadata {
                     bearer: receiver_bearer,
                     channel_hz: Some((channel_khz * 1000.0).round() as u32),
                 }),

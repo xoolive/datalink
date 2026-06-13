@@ -1,7 +1,7 @@
 //! Airframes.io websocket ingestion and normalization.
 //!
 //! This module connects to the Airframes Socket.IO websocket, subscribes to the
-//! selected events, maps upstream rows into the common [`crate::merged::DecodedEvent`]
+//! selected events, maps upstream rows into the common [`crate::event::DecodedEvent`]
 //! envelope, and reuses the ACARS payload dispatcher when an event contains
 //! label/text application data.
 
@@ -10,14 +10,15 @@ use acars::decode::payload::AcarsAppPayload;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use http::Uri;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::str::FromStr;
 use thiserror::Error;
 
-use crate::merged::{
-    Bearer, DecodedEvent, OutputConfig, OutputSink, ProtocolMessage, ReceiverMetadata, SourceClass,
-    SourceConfig, SourceMetadata,
+use crate::event::{
+    AirframesAddr, AirframesAddrType, AirframesMessage, AirframesPayload, DecodedEvent,
+    ProtocolMessage, ReceiverMetadata, SourceClass, SourceMetadata,
 };
+use crate::merged::{OutputConfig, OutputSink, SourceConfig};
 
 const DEFAULT_AIRFRAMES_WS: &str = "wss://ws.airframes.io/socket.io/?EIO=4&transport=websocket";
 
@@ -37,79 +38,6 @@ pub(crate) struct Source {
 #[derive(Serialize)]
 struct AirframesAuth<'a> {
     token: &'a str,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug)]
-/// Upstream Airframes.io message payload.
-///
-/// Fields are optional because the global stream contains a mix of fully decoded
-/// ACARS rows, metadata-only VDL rows, station events, and partial records.
-pub struct AirframesPayload {
-    pub label: Option<String>,
-    pub text: Option<String>,
-    pub from_hex: Option<String>,
-    pub to_hex: Option<String>,
-    pub latitude: Option<f64>,
-    pub longitude: Option<f64>,
-    pub altitude: Option<f64>,
-    pub track: Option<f64>,
-    #[serde(default)]
-    pub source_type: Bearer,
-    #[serde(deserialize_with = "crate::util::deserialize_timestamp", default)]
-    pub timestamp: Option<f64>,
-    #[serde(deserialize_with = "crate::util::deserialize_timestamp", default)]
-    pub created_at: Option<f64>,
-    pub frequency: Option<f64>,
-    pub id: Option<String>,
-    pub airframe_id: Option<u64>,
-    pub flight_id: Option<u64>,
-    pub tail: Option<String>,
-    pub link_direction: Option<String>,
-    pub airframe: Option<AirframesAirframe>,
-    pub flight: Option<AirframesFlight>,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct AirframesAirframe {
-    pub icao: Option<String>,
-    pub tail: Option<String>,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct AirframesFlight {
-    pub latitude: Option<f64>,
-    pub longitude: Option<f64>,
-    pub altitude: Option<f64>,
-    pub track: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-/// Airframes row plus best-effort normalized addresses and decoded app payload.
-pub struct AirframesMessage {
-    pub payload: AirframesPayload,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub src: Option<AirframesAddr>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dst: Option<AirframesAddr>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub app: Option<AcarsAppPayload>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AirframesAddr {
-    pub icao24: String,
-    pub addr_type: AirframesAddrType,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AirframesAddrType {
-    /// Address is believed to identify an aircraft.
-    Aircraft,
-    /// Address is believed to identify a ground station.
-    GroundStation,
-    /// Address role could not be inferred from the row.
-    Unknown,
 }
 
 impl Source {
@@ -234,7 +162,7 @@ pub(crate) async fn run_config_source(
         .unwrap_or("airframes://")
         .parse::<Source>()?;
     airframes.name = Some(source.display_name().to_string());
-    run_source(&airframes, SourceMetadata::from_config(source)?, output).await
+    run_source(&airframes, SourceMetadata::try_from(source)?, output).await
 }
 
 async fn run_source(
@@ -330,7 +258,7 @@ pub(crate) fn normalize_payload(
     };
 
     let timestamp = payload.timestamp.or(payload.created_at);
-    let raw_kinematics = airframes_payload_kinematics(&payload);
+    let raw_kinematics = payload.kinematics();
     let app_kinematics = app.as_ref().and_then(|app| {
         use acars::decode::compact::ExtractKinematics;
         app.kinematics()
@@ -351,7 +279,7 @@ pub(crate) fn normalize_payload(
     let pmsg = ProtocolMessage::Airframes(Box::new(af_msg));
 
     Ok(DecodedEvent {
-        event: "message",
+        event: "message".to_string(),
         timestamp,
         bearer,
         source,
@@ -477,67 +405,6 @@ pub(crate) fn extract_airframes_registration(row: &AirframesPayload) -> Option<S
 }
 
 /// Build normalized kinematics from Airframes top-level and nested flight fields.
-pub(crate) fn airframes_payload_kinematics(
-    payload: &AirframesPayload,
-) -> Option<acars::decode::compact::Kinematics> {
-    let payload_kinematics = kinematics_from_airframes_position(
-        payload.latitude,
-        payload.longitude,
-        payload.altitude,
-        payload.track,
-        "airframes_payload",
-    );
-    let flight_kinematics = payload.flight.as_ref().and_then(|flight| {
-        kinematics_from_airframes_position(
-            flight.latitude,
-            flight.longitude,
-            flight.altitude,
-            flight.track,
-            "airframes_flight",
-        )
-    });
-    match (payload_kinematics, flight_kinematics) {
-        (Some(payload), Some(flight)) => Some(payload.merge(flight)),
-        (Some(payload), None) => Some(payload),
-        (None, Some(flight)) => Some(flight),
-        (None, None) => None,
-    }
-}
-
-fn kinematics_from_airframes_position(
-    latitude: Option<f64>,
-    longitude: Option<f64>,
-    altitude: Option<f64>,
-    track: Option<f64>,
-    derived_from: &str,
-) -> Option<acars::decode::compact::Kinematics> {
-    let (Some(latitude), Some(longitude)) = (latitude, longitude) else {
-        return None;
-    };
-    if latitude == 0.0 && longitude == 0.0 {
-        return None;
-    }
-    Some(acars::decode::compact::Kinematics {
-        position: Some(acars::decode::compact::Position {
-            latitude,
-            longitude,
-        }),
-        altitude_ft: normalize_airframes_altitude(altitude),
-        track,
-        ground_speed_knots: None,
-        derived_from: Some(derived_from.to_string()),
-    })
-}
-
-fn normalize_airframes_altitude(altitude: Option<f64>) -> Option<i32> {
-    altitude.and_then(|value| {
-        let rounded = value.round();
-        ((i32::MIN as f64)..=(i32::MAX as f64))
-            .contains(&rounded)
-            .then_some(rounded as i32)
-    })
-}
-
 fn normalize_arinc622_text(text: &str) -> Option<String> {
     if text.starts_with('/') {
         return has_arinc622_imi(text).then(|| text.to_string());
@@ -646,6 +513,7 @@ async fn websocket_connect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::Bearer;
 
     #[test]
     fn parse_airframes_url() {

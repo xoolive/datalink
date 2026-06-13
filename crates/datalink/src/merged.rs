@@ -18,11 +18,15 @@ use acars::demod::vhf::VhfChannel;
 use desperado::dsp::channelizer::Channelizer;
 use desperado::Gain;
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::time::SystemTime;
+
+use crate::event::{
+    Aircraft, Bearer, DecodedEvent, ProtocolMessage, ReceiverMetadata, SourceClass, SourceMetadata,
+};
 
 /// Top-level TOML configuration for merged receiver mode.
 #[derive(Debug, Clone, Deserialize)]
@@ -110,18 +114,6 @@ pub(crate) struct SourceConfig {
     pub receivers: Vec<ReceiverConfig>,
 }
 
-/// Broad category of input source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum SourceClass {
-    /// Raw I/Q samples from a file, stdin, or SDR.
-    Iq,
-    /// Upstream decoded events such as Airframes.io websocket messages.
-    Events,
-    /// Standalone frames or payloads that do not require demodulation.
-    Frames,
-}
-
 /// Receiver pipeline attached to an I/Q source.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,45 +121,6 @@ pub(crate) struct ReceiverConfig {
     pub bearer: Bearer,
     #[serde(default, alias = "channel")]
     pub channels: Option<Vec<u32>>,
-}
-
-// TODO remove alias
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum Bearer {
-    /// Classic VHF ACARS / Plain Old ACARS bearer.
-    #[serde(alias = "acars", alias = "vhf")]
-    Vhf,
-    /// VDL Mode 2 bearer, normally AVLC frames on 136 MHz channels.
-    #[serde(alias = "vdl", alias = "vdl2")]
-    Vdl2,
-    /// HF Data Link bearer.
-    #[serde(alias = "hf", alias = "hfdl")]
-    Hfdl,
-    /// Standalone decoded application payload with no live RF bearer.
-    Decoded,
-    /// Unknown or upstream-provided bearer value that does not match a known variant.
-    #[serde(other)]
-    #[default]
-    Unknown,
-}
-
-impl Bearer {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Bearer::Vhf => "vhf",
-            Bearer::Vdl2 => "vdl2",
-            Bearer::Hfdl => "hfdl",
-            Bearer::Decoded => "decoded",
-            Bearer::Unknown => "unknown",
-        }
-    }
-}
-
-impl std::fmt::Display for Bearer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
 }
 
 impl Config {
@@ -224,6 +177,19 @@ impl Config {
             }
         }
         Ok(())
+    }
+}
+
+impl TryFrom<&SourceConfig> for SourceMetadata {
+    type Error = anyhow::Error;
+
+    fn try_from(source: &SourceConfig) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: source.id.clone(),
+            name: source.display_name().to_string(),
+            class: source.inferred_class()?,
+            format: source.format.clone(),
+        })
     }
 }
 
@@ -301,114 +267,6 @@ fn validate_channel_bandwidth(
         );
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct DecodedEvent {
-    /// Event class emitted by the receiver; currently `"message"` for decoded rows.
-    pub event: &'static str,
-    /// Receive or upstream event timestamp as Unix epoch seconds when available.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<f64>,
-    /// Physical or feed bearer that produced the message.
-    pub bearer: Bearer,
-    /// Metadata describing the file, SDR, websocket, or frame source.
-    pub source: SourceMetadata,
-    /// Receiver metadata for channelized I/Q sources.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub receiver: Option<ReceiverMetadata>,
-    /// Best-effort aircraft identity extracted from frame addresses or payload metadata.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aircraft: Option<Aircraft>,
-    /// Best-effort normalized position/altitude/speed summary extracted from the payload.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kinematics: Option<acars::decode::compact::Kinematics>,
-    /// Raw decoded frame bytes as uppercase hexadecimal when the source exposes them.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_frame_hex: Option<String>,
-    /// Protocol-specific decoded message body.
-    pub message: ProtocolMessage,
-}
-
-// TODO re-evaluate if we really want Box
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
-pub(crate) enum ProtocolMessage {
-    /// Message received from the Airframes.io websocket and normalized by this CLI.
-    Airframes(Box<crate::airframes::AirframesMessage>),
-    /// VDL2 AVLC frame, including link-layer addresses and dispatched payload.
-    Avlc(Box<acars::decode::avlc::AvlcFrame>),
-    /// Classic ACARS frame decoded directly from VHF ACARS or standalone input.
-    Acars(Box<acars::decode::acars::AcarsMessage>),
-    /// HFDL frame decoded into SPDU or MPDU structures.
-    Hfdl(Box<acars::decode::hfdl::HfdlMessage>),
-    /// Standalone ACARS application payload decoded without a surrounding bearer frame.
-    App(Box<acars::decode::payload::AcarsAppPayload>),
-}
-
-impl ProtocolMessage {
-    pub fn kinematics(&self) -> Option<acars::decode::compact::Kinematics> {
-        use acars::decode::compact::ExtractKinematics;
-        match self {
-            Self::Airframes(msg) => {
-                if let Some(app) = &msg.app {
-                    app.kinematics()
-                } else {
-                    crate::airframes::airframes_payload_kinematics(&msg.payload)
-                }
-            }
-            Self::Avlc(frame) => frame.kinematics(),
-            Self::Acars(msg) => msg.kinematics(),
-            Self::Hfdl(msg) => msg.kinematics(),
-            Self::App(app) => app.kinematics(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct Aircraft {
-    /// ICAO 24-bit aircraft address as six lowercase hexadecimal characters.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub icao24: Option<String>,
-    /// Upstream aircraft identifier when available, currently from Airframes.io rows.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aircraft_id: Option<u64>,
-    /// Aircraft registration or tail number when present in the payload or upstream row.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub registration: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct SourceMetadata {
-    /// Stable source identifier from configuration or the frontend default.
-    pub id: String,
-    /// Human-readable source label.
-    pub name: String,
-    /// Source class: I/Q samples, already-decoded events, or standalone frames.
-    pub class: SourceClass,
-    /// Source format hint such as `cf32`, `cu8`, `wav`, or `airframes.io`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct ReceiverMetadata {
-    /// Bearer decoded by this receiver pipeline.
-    pub bearer: Bearer,
-    /// Channel center frequency in Hz for channelized I/Q receivers.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub channel_hz: Option<u32>,
-}
-
-impl SourceMetadata {
-    pub(crate) fn from_config(source: &SourceConfig) -> anyhow::Result<Self> {
-        Ok(Self {
-            id: source.id.clone(),
-            name: source.display_name().to_string(),
-            class: source.inferred_class()?,
-            format: source.format.clone(),
-        })
-    }
 }
 
 /// Runtime output sink for JSONL and optional Redis publishing.
@@ -520,7 +378,7 @@ fn device_url(scheme: &str, value: &toml::Value) -> String {
 
 async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow::Result<()> {
     let source_url = source_url(source)?;
-    let source_meta = SourceMetadata::from_config(source)?;
+    let source_meta = SourceMetadata::try_from(source)?;
 
     let has_hfdl = source.receivers.iter().any(|r| r.bearer == Bearer::Hfdl);
     let is_wav = source
@@ -752,7 +610,7 @@ impl LiveReceiver {
                             };
                             let pmsg = ProtocolMessage::Acars(Box::new(message));
                             events.push(DecodedEvent {
-                                event: "message",
+                                event: "message".to_string(),
                                 timestamp: Some(ctx.timestamp_unix),
                                 bearer: *bearer,
                                 source: source_meta.clone(),
@@ -805,7 +663,7 @@ impl LiveReceiver {
                             }
                             let pmsg = ProtocolMessage::Avlc(Box::new(avlc));
                             events.push(DecodedEvent {
-                                event: "message",
+                                event: "message".to_string(),
                                 timestamp: Some(ctx.timestamp_unix),
                                 bearer: *bearer,
                                 source: source_meta.clone(),
