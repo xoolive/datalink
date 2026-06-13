@@ -50,7 +50,7 @@ For reference, here are frequencies for other surveillance systems:
 | System              | Typical frequencies | Coverage      | Common tools in the ecosystem                                                                                                                    |
 | ------------------- | ------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | ADS-B / Mode&nbsp;S | 1090 MHz            | Line of sight | [`jet1090`](https://mode-s.org/jet1090/), [`dump1090`](https://github.com/flightaware/dump1090), [`readsb`](https://github.com/wiedehopf/readsb) |
-| AIS (ships)         | ±136 MHz            | Line of sight | [`ship136`](https://github.com/xoolive/ship136), [`AIS-catcher`](https://github.com/jvde-github/AIS-catcher)                                     |
+| AIS (ships)         | ±162 MHz            | Line of sight | [`ship162`](https://github.com/xoolive/ship162), [`AIS-catcher`](https://github.com/jvde-github/AIS-catcher)                                     |
 
 ### Known VHF ACARS channels
 
