@@ -349,7 +349,7 @@ pub(crate) async fn decode_file_values(
     format: Option<&str>,
     center_freq: Option<u32>,
     sample_rate: Option<u32>,
-    channels: Option<Vec<u32>>,
+    channels: Option<&[u32]>,
     source_meta: &SourceMetadata,
     receiver_bearer: Bearer,
 ) -> anyhow::Result<Vec<DecodedEvent>> {
@@ -360,7 +360,7 @@ pub(crate) async fn decode_file_values(
         name: None,
         center_freq,
         sample_rate,
-        channels,
+        channels: channels.map(<[u32]>::to_vec),
         gain: None,
         bias_tee: None,
         amp_enable: None,
@@ -516,7 +516,7 @@ async fn handle_avlc_frame(
                 return Ok(());
             }
 
-            let pmsg = ProtocolMessage::Avlc(Box::new(avlc.clone()));
+            let pmsg = ProtocolMessage::Avlc(Box::new(avlc));
 
             let event = DecodedEvent {
                 event: "message".to_string(),

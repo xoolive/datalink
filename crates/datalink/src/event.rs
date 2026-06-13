@@ -269,7 +269,7 @@ fn kinematics_from_airframes_position(
             longitude,
         }),
         altitude_ft: normalize_airframes_altitude(altitude),
-        track,
+        track, // TODO sometimes airframes send 0.0 when it should've been None
         ground_speed_knots: None,
         derived_from: Some(derived_from.to_string()),
     })

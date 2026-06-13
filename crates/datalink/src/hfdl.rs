@@ -249,7 +249,7 @@ pub(crate) async fn decode_file_values(
     format: Option<&str>,
     center_freq: Option<u32>,
     sample_rate: Option<u32>,
-    channels: Option<Vec<u32>>,
+    channels: Option<&[u32]>,
     start_second: f64,
     max_seconds: f64,
     source_meta: &SourceMetadata,
@@ -262,7 +262,7 @@ pub(crate) async fn decode_file_values(
             .unwrap_or(SampleFormat::Cf32),
         center_freq: center_freq.unwrap_or(10_000_000),
         sample_rate: sample_rate.unwrap_or(8_000_000),
-        channel: channels.map(|v| v.into_iter().map(|hz| hz as f64).collect()),
+        channel: channels.map(|v| v.iter().map(|&hz| hz as f64).collect()),
         start_second,
         max_seconds,
         stats: false,
@@ -413,7 +413,7 @@ async fn samples_for_source(
             .clone()
             .map(|channels| channels.into_iter().map(|hz| hz as f64).collect())
     });
-    let channels = channels_khz_for(configured_channels.as_ref(), sample_rate, center_freq);
+    let channels = channels_khz_for(configured_channels.as_deref(), sample_rate, center_freq);
 
     let samples = match &effective_source.address {
         Address::File { file } => {
@@ -436,7 +436,8 @@ async fn samples_for_source(
             let center_freq = inferred
                 .map(|params| params.center_freq)
                 .unwrap_or_else(|| effective_center_freq(&path, format, center_freq));
-            let channels = channels_khz_for(configured_channels.as_ref(), sample_rate, center_freq);
+            let channels =
+                channels_khz_for(configured_channels.as_deref(), sample_rate, center_freq);
             let samples = read_complex_window(
                 &path,
                 format,
@@ -674,14 +675,18 @@ fn decode_complex_bytes(format: SampleFormat, raw: &[u8], out: &mut [Complex<f32
 
 /// Resolve requested channels or derive default HFDL channels within the source bandwidth.
 fn channels_khz_for(
-    configured_channels: Option<&Vec<f64>>,
+    configured_channels: Option<&[f64]>,
     sample_rate: u32,
     center_freq: u32,
 ) -> Vec<f64> {
     if let Some(channels) = configured_channels {
-        return channels.iter().copied().map(to_khz).collect();
+        channels.iter().copied().map(to_khz).collect()
+    } else {
+        auto_channels_khz(sample_rate, center_freq).collect()
     }
+}
 
+fn auto_channels_khz(sample_rate: u32, center_freq: u32) -> impl Iterator<Item = f64> {
     let center_khz = center_freq as f64 / 1000.0;
     let usable_half_bw_khz = sample_rate as f64 * 0.40 / 1000.0;
     let lo = center_khz - usable_half_bw_khz;
@@ -689,8 +694,7 @@ fn channels_khz_for(
     KNOWN_HFDL_CHANNELS_KHZ
         .iter()
         .copied()
-        .filter(|freq| *freq >= lo && *freq <= hi)
-        .collect()
+        .filter(move |freq| *freq >= lo && *freq <= hi)
 }
 
 fn to_khz(freq: f64) -> f64 {
@@ -841,7 +845,7 @@ mod tests {
             redis_retry_interval: None,
         };
         let channels = channels_khz_for(
-            options.channel.as_ref(),
+            options.channel.as_deref(),
             options.sample_rate,
             options.center_freq,
         );

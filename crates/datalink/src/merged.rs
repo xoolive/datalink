@@ -397,7 +397,7 @@ async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow
                     source.format.as_deref(),
                     source.center_freq,
                     source.sample_rate,
-                    receiver.channels.clone(),
+                    receiver.channels.as_deref(),
                     source.start_second.unwrap_or(0.0),
                     source.max_seconds.unwrap_or(20.0),
                     &source_meta,
@@ -414,7 +414,7 @@ async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow
                     source.format.as_deref(),
                     source.center_freq,
                     source.sample_rate,
-                    receiver.channels.clone(),
+                    receiver.channels.as_deref(),
                     &source_meta,
                     receiver.bearer,
                 )
@@ -429,7 +429,7 @@ async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow
                     source.format.as_deref(),
                     source.center_freq,
                     source.sample_rate,
-                    receiver.channels.clone(),
+                    receiver.channels.as_deref(),
                     &source_meta,
                     receiver.bearer,
                 )
