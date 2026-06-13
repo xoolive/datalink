@@ -26,6 +26,7 @@ pub struct AdscMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", content = "data")]
 pub enum AdscTag {
     // Downlink tags.
     Acknowledgement { contract_number: u8 },

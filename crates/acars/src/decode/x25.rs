@@ -48,7 +48,7 @@ pub struct X25Packet {
 
 /// Inner protocol payload of an X.25 Data packet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum X25Inner {
     ClnpCompressed(ClnpCompressedPdu),
     #[serde(serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant")]
@@ -70,7 +70,7 @@ pub struct ClnpCompressedPdu {
 
 /// Inner content of a CLNP data PDU.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum ClnpInner {
     Idrp(IdrpPdu),
     Cotp(Vec<CotpPdu>),
@@ -143,7 +143,7 @@ pub struct CotpVarParam {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CotpParamValue {
     #[serde(serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant")]
     Bytes(Vec<u8>),

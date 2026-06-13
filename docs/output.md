@@ -81,7 +81,8 @@ An ADS-C event captured from the airframes.io websocket feed looks like this:
         "addr_type": "aircraft"
       },
       "app": {
-        "Arinc622": {
+        "kind": "Arinc622",
+        "data": {
           "atsu_address": "PIKCPYA",
           "imi": "ADS",
           "registration": "D-AALB",
@@ -92,7 +93,8 @@ An ADS-C event captured from the airframes.io websocket feed looks like this:
               "registration": "D-AALB",
               "tags": [
                 {
-                  "EventContractRequest": {
+                  "kind": "EventContractRequest",
+                  "data": {
                     "contract_number": 6,
                     "groups": [
                       {

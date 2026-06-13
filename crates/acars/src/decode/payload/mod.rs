@@ -61,6 +61,7 @@ pub enum PayloadError {
 /// ARINC 622 messages keep their standards-defined header and IMI-dispatched
 /// payload together. Other variants are inferred from ACARS labels/sublabels.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", content = "data")]
 pub enum AcarsAppPayload {
     /// Standards-defined ARINC 622 envelope and decoded payload.
     Arinc622(Arinc622Message),
