@@ -178,7 +178,7 @@ impl ExtractKinematics for CpdlcElementBody {
             | Self::PositionAltitudeSpeed {
                 position, altitude, ..
             } => merge_cpdlc_kinematics(position, altitude),
-            Self::PositionPosition { positions } => positions.first()?.kinematics(),
+            Self::PositionPosition { position } => position.first()?.kinematics(),
             _ => None,
         }
     }

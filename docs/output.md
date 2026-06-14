@@ -81,37 +81,37 @@ An ADS-C event captured from the airframes.io websocket feed looks like this:
         "addr_type": "aircraft"
       },
       "app": {
-        "kind": "Arinc622",
+        "kind": "arinc622",
         "data": {
           "atsu_address": "PIKCPYA",
           "imi": "ADS",
           "registration": "D-AALB",
           "payload": {
-            "kind": "Adsc",
+            "kind": "adsc",
             "data": {
               "atsu_address": "PIKCPYA",
               "registration": "D-AALB",
               "tags": [
                 {
-                  "kind": "EventContractRequest",
+                  "kind": "event_contract_request",
                   "data": {
                     "contract_number": 6,
                     "groups": [
                       {
                         "kind": "lateral_deviation_change",
-                        "value": {
+                        "data": {
                           "threshold_nm": 3.0
                         }
                       },
                       {
                         "kind": "vertical_speed_change",
-                        "value": {
+                        "data": {
                           "threshold_ft_per_min": -5056
                         }
                       },
                       {
                         "kind": "altitude_range",
-                        "value": {
+                        "data": {
                           "ceiling_ft": 220425,
                           "floor_ft": 216675
                         }
@@ -133,6 +133,65 @@ An ADS-C event captured from the airframes.io websocket feed looks like this:
 ```
 
 For an ACARS frame decoded directly by the VHF path, the top-level envelope is the same, but `message.kind` is `"acars"` and `message.data` contains the ACARS fields such as `label`, `text`, and `app`.
+
+CPDLC elements also include `fragments`, a phrase AST compiled from the bundled CPDLC catalog templates. Each fragment is either literal text or a typed value slot. Consumers resolve a value slot from the element body: if `body.kind` equals the slot, use `body.data`; otherwise use `body.data[slot]`:
+
+```json
+{
+  "id": 20,
+  "catalog_name": "uM20Altitude",
+  "fragments": [
+    {
+      "kind": "text",
+      "data": "CLIMB TO AND MAINTAIN "
+    },
+    {
+      "kind": "value",
+      "data": "altitude"
+    }
+  ],
+  "body": {
+    "kind": "altitude",
+    "data": {
+      "kind": "flight_level",
+      "data": 320
+    }
+  },
+  "is_additional": false
+}
+```
+
+```json
+{
+  "id": 163,
+  "catalog_name": "uM163ICAOfacilitydesignationTp4table",
+  "fragments": [
+    {
+      "kind": "value",
+      "data": "icao_facility_designation"
+    },
+    {
+      "kind": "text",
+      "data": " "
+    },
+    {
+      "kind": "value",
+      "data": "tp4_table"
+    }
+  ],
+  "body": {
+    "kind": "icao_facility_designation_tp4_table",
+    "data": {
+      "icao_facility_designation": {
+        "kind": "icao",
+        "data": "FNAN"
+      },
+      "tp4_table": "label_a"
+    }
+  },
+  "is_additional": false
+}
+```
 
 The exact nested body depends on the decoded protocol, but the top-level envelope is designed to make mixed sources easier to consume.
 

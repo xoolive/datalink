@@ -121,7 +121,7 @@ pub enum SFunc {
 /// `Acars` boxes the `AcarsMessage` and `XidMessage` to avoid blowing up the
 /// enum size, since they are substantially larger than the other variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum AvlcPayload {
     /// ACARS application message, decoded from I-frame payload starting `0xFF 0xFF 0x01`.
     Acars(Box<AcarsMessage>),

@@ -61,79 +61,67 @@ pub enum PayloadError {
 /// ARINC 622 messages keep their standards-defined header and IMI-dispatched
 /// payload together. Other variants are inferred from ACARS labels/sublabels.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", content = "data")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum AcarsAppPayload {
     /// Standards-defined ARINC 622 envelope and decoded payload.
     Arinc622(Arinc622Message),
 
     /// MIAM (Management of Integrated Avionics Maintenance) — label `MA` or `H1/T1`.
-    #[serde(rename = "MIAM")]
     Miam(MiamMessage),
 
     /// OHMA (Boeing 737 MAX health monitoring) — label `H1` sublabel `T1`.
-    #[serde(rename = "OHMA")]
     Ohma(OhmaMessage),
 
     /// ACARS `SA` Media Advisory — link established/lost notification.
-    #[serde(rename = "SA")]
     MediaAdvisory(MediaAdvisory),
 
     /// ACARS `SQ` squitter / ground-station broadcast.
-    #[serde(rename = "SQ")]
     Squitter(SquitterMessage),
 
     /// ACARS label `80` AOC position/event report.
-    #[serde(rename = "AOC80")]
     AocReport(AocMessage),
 
     /// AOC weather/METAR bundle.
     Weather(WeatherBundle),
 
     /// ACARS label `5Z` slash-field AOC message.
-    #[serde(rename = "5Z")]
+    #[serde(rename = "label_5z")]
     Label5z(Label5zMessage),
 
     /// AOC position/telemetry report.
     AocPosition(AocPositionMessage),
 
     /// ACARS label `32` CSV telemetry.
-    #[serde(rename = "32")]
+    #[serde(rename = "label_32")]
     Label32(Label32Message),
 
     /// ACARS label `16` heterogeneous telemetry classifier.
-    #[serde(rename = "16")]
+    #[serde(rename = "label_16")]
     Label16(Label16Message),
 
     /// ACARS label `37` obfuscated/encoded ops classifier.
-    #[serde(rename = "37")]
+    #[serde(rename = "label_37")]
     Label37(Label37Message),
 
     /// ACARS label `Q0` — ACARS link test / keepalive. Payload is always empty.
-    #[serde(rename = "Q0")]
     LinkTest,
 
     /// ACARS label `QF` — OFF Destination Report (sent shortly after takeoff).
-    #[serde(rename = "QF")]
     OooiOffDestination(OooiOffDestination),
 
     /// ACARS label `QQ` — OFF Report, extended form with ICAO codes.
-    #[serde(rename = "QQ")]
     OooiOffReport(OooiOffReport),
 
     /// ACARS label `B9` — ATIS request (TI2 protocol, aircraft → ground).
-    #[serde(rename = "B9")]
     AtisRequest(AtisRequest),
 
     /// ACARS label `A9` — ATIS delivery (TI2 protocol, ground → aircraft).
-    #[serde(rename = "A9")]
     AtisDelivery(AtisDelivery),
 
     /// ACARS labels `A0`/`B0` — AFN CONTACT / logon.
-    #[serde(rename = "AFN")]
     Afn(AfnMessage),
 
     /// ACARS label `B1` — oceanic clearance / OC1.
-    #[serde(rename = "OC1")]
     OceanicClearance(OceanicClearance),
 
     /// Non-empty `text` with no structured decoder.

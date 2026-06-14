@@ -12,8 +12,8 @@
 
 use std::sync::OnceLock;
 
-use serde::ser::SerializeMap;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::decode::acars::MessageDirection;
@@ -94,74 +94,111 @@ pub struct CpdlcPduSummary {
     pub remaining_bits_after_element: usize,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CpdlcElement {
     pub id: u16,
+    pub catalog_name: String,
+    pub fragments: Vec<CpdlcPhraseFragment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<CpdlcElementBody>,
     pub is_additional: bool,
 }
 
-impl Serialize for CpdlcElement {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let body = self
-            .body
-            .as_ref()
-            .filter(|body| !matches!(body, CpdlcElementBody::Null));
-        let mut len = 2;
-        if body.is_some() {
-            len += 1;
-        }
-        let mut map = serializer.serialize_map(Some(len))?;
-        map.serialize_entry("id", &self.id)?;
-        if let Some(body) = body {
-            map.serialize_entry("body", body)?;
-        }
-        map.serialize_entry("is_additional", &self.is_additional)?;
-        map.end()
-    }
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct CpdlcCatalog {
     uplink: Vec<CpdlcElementInfo>,
     downlink: Vec<CpdlcElementInfo>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CpdlcElementInfo {
-    pub id: u16,
-    pub name: String,
+struct RawCpdlcCatalog {
+    uplink: Vec<RawCpdlcElementInfo>,
+    downlink: Vec<RawCpdlcElementInfo>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize)]
+struct RawCpdlcElementInfo {
+    id: u16,
+    name: String,
+    template: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct CpdlcElementInfo {
+    id: u16,
+    pub(crate) catalog_name: String,
+    fragments: Vec<CpdlcTemplateFragment>,
+    body_slots: Option<Vec<CpdlcTemplateSlot>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CpdlcTemplateFragment {
+    Text(String),
+    Slot(CpdlcTemplateSlot),
+}
+
+// Phrase value fragments serialize one of these slots. The frontend resolves a
+// slot against an element body by using `body.data` when `body.kind == slot`, or
+// `body.data[slot]` for compound bodies. Keep `CpdlcTemplateSlot::as_str`, these
+// serde names, and `CpdlcElementBody` variant/field names aligned.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CpdlcTemplateSlot {
+    Altimeter,
+    Altitude,
+    Altitude2,
+    AtisCode,
+    BeaconCode,
+    Degrees,
+    Direction,
+    DistanceOffset,
+    ErrorInformation,
+    FreeText,
+    Frequency,
+    IcaoFacilityDesignation,
+    IcaoUnitName,
+    Position,
+    PositionReport,
+    ProcedureName,
+    RouteClearance,
+    Speed,
+    Time,
+    Tp4Table,
+    VersionNumber,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum CpdlcPhraseFragment {
+    Text(String),
+    Value(CpdlcTemplateSlot),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CpdlcElementBody {
-    Null,
     Altitude(CpdlcAltitude),
     AltitudeTime {
         altitude: CpdlcAltitude,
         time: CpdlcTime,
     },
     FreeText(String),
-    IcaoFacilityDesignation(String),
+    IcaoFacilityDesignation(IcaoFacilityDesignation),
     IcaoFacilityDesignationTp4Table {
-        facility: String,
-        table: Tp4Table,
+        icao_facility_designation: IcaoFacilityDesignation,
+        tp4_table: Tp4Table,
     },
     IcaoUnitNameFrequency {
-        unit: IcaoUnitName,
+        icao_unit_name: IcaoUnitName,
         frequency: CpdlcFrequency,
     },
     TimeIcaoUnitNameFrequency {
         time: CpdlcTime,
-        unit: IcaoUnitName,
+        icao_unit_name: IcaoUnitName,
         frequency: CpdlcFrequency,
     },
     DistanceOffsetDirection {
-        distance: DistanceOffset,
+        distance_offset: DistanceOffset,
         direction: CpdlcDirection,
     },
     Position(CpdlcPosition),
@@ -174,8 +211,8 @@ pub enum CpdlcElementBody {
         position: CpdlcPosition,
     },
     AltitudeAltitude {
-        first: CpdlcAltitude,
-        second: CpdlcAltitude,
+        altitude: CpdlcAltitude,
+        altitude2: CpdlcAltitude,
     },
     TimeAltitude {
         time: CpdlcTime,
@@ -183,17 +220,17 @@ pub enum CpdlcElementBody {
     },
     PositionDistanceOffsetDirection {
         position: CpdlcPosition,
-        distance: DistanceOffset,
+        distance_offset: DistanceOffset,
         direction: CpdlcDirection,
     },
     PositionIcaoUnitNameFrequency {
         position: CpdlcPosition,
-        unit: IcaoUnitName,
+        icao_unit_name: IcaoUnitName,
         frequency: CpdlcFrequency,
     },
     TimeDistanceOffsetDirection {
         time: CpdlcTime,
-        distance: DistanceOffset,
+        distance_offset: DistanceOffset,
         direction: CpdlcDirection,
     },
     Frequency(CpdlcFrequency),
@@ -212,7 +249,7 @@ pub enum CpdlcElementBody {
     },
     PositionSpeedSpeed {
         position: CpdlcPosition,
-        speeds: [CpdlcSpeed; 2],
+        speed: [CpdlcSpeed; 2],
     },
     PositionAltitudeSpeed {
         position: CpdlcPosition,
@@ -225,7 +262,7 @@ pub enum CpdlcElementBody {
     },
     PositionTimeTime {
         position: CpdlcPosition,
-        times: [CpdlcTime; 2],
+        time: [CpdlcTime; 2],
     },
     TimePositionAltitude {
         time: CpdlcTime,
@@ -245,10 +282,10 @@ pub enum CpdlcElementBody {
     },
     AltitudeSpeedSpeed {
         altitude: CpdlcAltitude,
-        speeds: [CpdlcSpeed; 2],
+        speed: [CpdlcSpeed; 2],
     },
     PositionPosition {
-        positions: [CpdlcPosition; 2],
+        position: [CpdlcPosition; 2],
     },
     PositionReport(Box<CpdlcPositionReport>),
     ErrorInformation(CpdlcErrorInformation),
@@ -262,182 +299,6 @@ pub enum CpdlcElementBody {
     BeaconCode(String),
     VersionNumber(u8),
     Unsupported,
-}
-
-impl Serialize for CpdlcElementBody {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut map = serializer.serialize_map(None)?;
-        match self {
-            Self::Null => map.serialize_entry("null", &true)?,
-            Self::Altitude(altitude) => map.serialize_entry("altitude", altitude)?,
-            Self::AltitudeTime { altitude, time } => {
-                map.serialize_entry("altitude", altitude)?;
-                map.serialize_entry("time", time)?;
-            }
-            Self::FreeText(text) => map.serialize_entry("free_text", text)?,
-            Self::IcaoFacilityDesignation(facility) => {
-                map.serialize_entry("facility", &FacilityJson::Icao(facility))?;
-            }
-            Self::IcaoFacilityDesignationTp4Table { facility, table } => {
-                map.serialize_entry("facility", &FacilityJson::Icao(facility))?;
-                map.serialize_entry("tp4_table", table)?;
-            }
-            Self::IcaoUnitNameFrequency { unit, frequency } => {
-                map.serialize_entry("icao_unit", unit)?;
-                map.serialize_entry("frequency", frequency)?;
-            }
-            Self::TimeIcaoUnitNameFrequency {
-                time,
-                unit,
-                frequency,
-            } => {
-                map.serialize_entry("time", time)?;
-                map.serialize_entry("icao_unit", unit)?;
-                map.serialize_entry("frequency", frequency)?;
-            }
-            Self::DistanceOffsetDirection {
-                distance,
-                direction,
-            } => {
-                map.serialize_entry("distance", distance)?;
-                map.serialize_entry("direction", direction)?;
-            }
-            Self::Position(position) => map.serialize_entry("position", position)?,
-            Self::PositionAltitude { position, altitude } => {
-                map.serialize_entry("position", position)?;
-                map.serialize_entry("altitude", altitude)?;
-            }
-            Self::AltitudePosition { altitude, position } => {
-                map.serialize_entry("altitude", altitude)?;
-                map.serialize_entry("position", position)?;
-            }
-            Self::AltitudeAltitude { first, second } => {
-                map.serialize_entry("altitude", first)?;
-                map.serialize_entry("altitude2", second)?;
-            }
-            Self::TimeAltitude { time, altitude } => {
-                map.serialize_entry("time", time)?;
-                map.serialize_entry("altitude", altitude)?;
-            }
-            Self::PositionDistanceOffsetDirection {
-                position,
-                distance,
-                direction,
-            } => {
-                map.serialize_entry("position", position)?;
-                map.serialize_entry("distance", distance)?;
-                map.serialize_entry("direction", direction)?;
-            }
-            Self::PositionIcaoUnitNameFrequency {
-                position,
-                unit,
-                frequency,
-            } => {
-                map.serialize_entry("position", position)?;
-                map.serialize_entry("icao_unit", unit)?;
-                map.serialize_entry("frequency", frequency)?;
-            }
-            Self::TimeDistanceOffsetDirection {
-                time,
-                distance,
-                direction,
-            } => {
-                map.serialize_entry("time", time)?;
-                map.serialize_entry("distance", distance)?;
-                map.serialize_entry("direction", direction)?;
-            }
-            Self::Frequency(frequency) => map.serialize_entry("frequency", frequency)?,
-            Self::Time(time) => map.serialize_entry("time", time)?,
-            Self::DirectionDegrees { direction, degrees } => {
-                map.serialize_entry("direction", direction)?;
-                map.serialize_entry("degrees", degrees)?;
-            }
-            Self::Degrees(degrees) => map.serialize_entry("degrees", degrees)?,
-            Self::AtisCode(code) => map.serialize_entry("atis", code)?,
-            Self::ProcedureName(procedure) => map.serialize_entry("procedure", procedure)?,
-            Self::Speed(speed) => map.serialize_entry("speed", speed)?,
-            Self::TimeSpeed { time, speed } => {
-                map.serialize_entry("time", time)?;
-                map.serialize_entry("speed", speed)?;
-            }
-            Self::PositionSpeedSpeed { position, speeds } => {
-                map.serialize_entry("position", position)?;
-                map.serialize_entry("speeds", speeds)?;
-            }
-            Self::PositionAltitudeSpeed {
-                position,
-                altitude,
-                speed,
-            } => {
-                map.serialize_entry("position", position)?;
-                map.serialize_entry("altitude", altitude)?;
-                map.serialize_entry("speed", speed)?;
-            }
-            Self::PositionTime { position, time } => {
-                map.serialize_entry("position", position)?;
-                map.serialize_entry("time", time)?;
-            }
-            Self::PositionTimeTime { position, times } => {
-                map.serialize_entry("position", position)?;
-                map.serialize_entry("times", times)?;
-            }
-            Self::TimePositionAltitude {
-                time,
-                position,
-                altitude,
-            } => {
-                map.serialize_entry("time", time)?;
-                map.serialize_entry("position", position)?;
-                map.serialize_entry("altitude", altitude)?;
-            }
-            Self::PositionTimeAltitude {
-                position,
-                time,
-                altitude,
-            } => {
-                map.serialize_entry("position", position)?;
-                map.serialize_entry("time", time)?;
-                map.serialize_entry("altitude", altitude)?;
-            }
-            Self::TimePositionAltitudeSpeed {
-                time,
-                position,
-                altitude,
-                speed,
-            } => {
-                map.serialize_entry("time", time)?;
-                map.serialize_entry("position", position)?;
-                map.serialize_entry("altitude", altitude)?;
-                map.serialize_entry("speed", speed)?;
-            }
-            Self::AltitudeSpeedSpeed { altitude, speeds } => {
-                map.serialize_entry("altitude", altitude)?;
-                map.serialize_entry("speeds", speeds)?;
-            }
-            Self::PositionPosition { positions } => map.serialize_entry("positions", positions)?,
-            Self::PositionReport(report) => map.serialize_entry("position_report", report)?,
-            Self::ErrorInformation(error) => map.serialize_entry("error", error)?,
-            Self::Altimeter(altimeter) => map.serialize_entry("altimeter", altimeter)?,
-            Self::RouteClearance(route) => map.serialize_entry("route_clearance", route)?,
-            Self::OpaqueRouteClearance {
-                remaining_bits,
-                payload_hex,
-            } => {
-                let opaque = OpaquePayloadJson {
-                    hex: payload_hex,
-                    remaining_bits: *remaining_bits,
-                };
-                map.serialize_entry("route_clearance", &opaque)?;
-            }
-            Self::BeaconCode(code) => map.serialize_entry("beacon_code", code)?,
-            Self::VersionNumber(version) => map.serialize_entry("version", version)?,
-            Self::Unsupported => map.serialize_entry("unsupported", &true)?,
-        }
-        map.end()
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -455,7 +316,7 @@ pub struct RouteClearance {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", content = "value")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum RouteInformation {
     PublishedIdentifier {
         fix: String,
@@ -474,7 +335,8 @@ pub enum RouteInformation {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CpdlcAltitude {
     QnhFeet(u16),
     QnhMeters(u16),
@@ -486,36 +348,10 @@ pub enum CpdlcAltitude {
     FlightLevelMetric(u16),
 }
 
-#[derive(Serialize)]
-enum FacilityJson<'a> {
-    #[serde(rename = "ICAO")]
-    Icao(&'a str),
-}
-
-#[derive(Serialize)]
-struct OpaquePayloadJson<'a> {
-    hex: &'a str,
-    remaining_bits: usize,
-}
-
-impl Serialize for CpdlcAltitude {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(1))?;
-        match self {
-            Self::QnhFeet(value) => map.serialize_entry("QNH_ft", value)?,
-            Self::QnhMeters(value) => map.serialize_entry("QNH_m", value)?,
-            Self::QfeFeet(value) => map.serialize_entry("QFE_ft", value)?,
-            Self::QfeMeters(value) => map.serialize_entry("QFE_m", value)?,
-            Self::GnssFeet(value) => map.serialize_entry("GNSS_ft", value)?,
-            Self::GnssMeters(value) => map.serialize_entry("GNSS_m", value)?,
-            Self::FlightLevel(value) => map.serialize_entry("FL", value)?,
-            Self::FlightLevelMetric(value) => map.serialize_entry("FL_m", value)?,
-        }
-        map.end()
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum IcaoFacilityDesignation {
+    Icao(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -525,6 +361,7 @@ pub struct CpdlcTime {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum Tp4Table {
     LabelA,
     LabelB,
@@ -537,7 +374,7 @@ pub struct IcaoUnitName {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "value")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum IcaoFacilityIdentification {
     Designation(String),
     Name(String),
@@ -556,7 +393,7 @@ pub enum IcaoFacilityFunction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "value")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CpdlcFrequency {
     HfKhz(u32),
     VhfKhz(u32),
@@ -565,7 +402,7 @@ pub enum CpdlcFrequency {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "unit", content = "value")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum DistanceOffset {
     Nm(u16),
     Km(u16),
@@ -587,7 +424,7 @@ pub enum CpdlcDirection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", content = "value")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CpdlcPosition {
     FixName(String),
     Navaid(String),
@@ -642,7 +479,7 @@ pub struct CpdlcPositionReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "unit", content = "value")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CpdlcTemperature {
     Celsius(i16),
     Fahrenheit(i16),
@@ -655,7 +492,7 @@ pub struct CpdlcWinds {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "unit", content = "value")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CpdlcWindSpeed {
     Knots(u16),
     Kmh(u16),
@@ -674,21 +511,21 @@ pub enum CpdlcVerticalDirection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "unit", content = "value")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CpdlcVerticalRate {
     FeetPerMinute(u16),
     MetersPerMinute(u16),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "unit", content = "value")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CpdlcDistance {
     NauticalMiles(u16),
     Kilometers(u16),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "reference", content = "value")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CpdlcDegrees {
     Magnetic(u16),
     True(u16),
@@ -710,7 +547,7 @@ pub enum CpdlcProcedureType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "value")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CpdlcSpeed {
     IndicatedKnots(u16),
     IndicatedKmh(u16),
@@ -723,7 +560,7 @@ pub enum CpdlcSpeed {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "unit", content = "value")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CpdlcAltimeter {
     InHgHundredths(u16),
     HectoPascals(u16),
@@ -759,23 +596,11 @@ pub struct AtcMessageHeader {
     pub timestamp: Option<CpdlcTimestamp>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CpdlcTimestamp {
     pub hour: u8,
     pub minute: u8,
     pub second: u8,
-}
-
-impl Serialize for CpdlcTimestamp {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&format!(
-            "{:02}:{:02}:{:02}",
-            self.hour, self.minute, self.second
-        ))
-    }
 }
 
 pub fn parse_cpdlc_payload_hex(payload_hex: &str) -> DecodeResult<CpdlcMessage> {
@@ -899,10 +724,16 @@ fn parse_element(
     is_additional: bool,
 ) -> Result<CpdlcElement, CpdlcDecodeError> {
     let id = bits.read_bits(8)? as u16;
-    element_info(kind, id).ok_or(CpdlcDecodeError::ElementIdOutOfRange(id))?;
-    let body = parse_element_body(bits, kind, id).ok();
+    let info = element_info(kind, id).ok_or(CpdlcDecodeError::ElementIdOutOfRange(id))?;
+    let body = info
+        .body_slots
+        .as_ref()
+        .and_then(|_| parse_element_body(bits, kind, id).ok());
+    let fragments = cpdlc_phrase_fragments(info, body.as_ref()).collect();
     Ok(CpdlcElement {
         id,
+        catalog_name: info.catalog_name.clone(),
+        fragments,
         body,
         is_additional,
     })
@@ -914,15 +745,16 @@ fn parse_element_body(
     element_id: u16,
 ) -> Result<CpdlcElementBody, CpdlcDecodeError> {
     match (kind, element_id) {
-        (PduKind::Downlink, id) if is_downlink_null(id) => Ok(CpdlcElementBody::Null),
-        (PduKind::Uplink, id) if is_uplink_null(id) => Ok(CpdlcElementBody::Null),
         (PduKind::Downlink, 6 | 8 | 9 | 10 | 28 | 29 | 30 | 32 | 37 | 38 | 54 | 61 | 72) => {
             Ok(CpdlcElementBody::Altitude(parse_altitude(bits)?))
         }
         (PduKind::Downlink, 7 | 76 | 77) => {
             let first = parse_altitude(bits)?;
             let second = parse_altitude(bits)?;
-            Ok(CpdlcElementBody::AltitudeAltitude { first, second })
+            Ok(CpdlcElementBody::AltitudeAltitude {
+                altitude: first,
+                altitude2: second,
+            })
         }
         (PduKind::Downlink, 11 | 12) => {
             let position = parse_position(bits)?;
@@ -938,7 +770,7 @@ fn parse_element_body(
             let distance = parse_distance_offset(bits)?;
             let direction = parse_direction(bits)?;
             Ok(CpdlcElementBody::DistanceOffsetDirection {
-                distance,
+                distance_offset: distance,
                 direction,
             })
         }
@@ -948,7 +780,7 @@ fn parse_element_body(
             let direction = parse_direction(bits)?;
             Ok(CpdlcElementBody::PositionDistanceOffsetDirection {
                 position,
-                distance,
+                distance_offset: distance,
                 direction,
             })
         }
@@ -973,9 +805,9 @@ fn parse_element_body(
         (PduKind::Downlink, 62) => Ok(CpdlcElementBody::ErrorInformation(parse_error_information(
             bits,
         )?)),
-        (PduKind::Downlink, 64) => Ok(CpdlcElementBody::IcaoFacilityDesignation(parse_fixed_ia5(
-            bits, 4,
-        )?)),
+        (PduKind::Downlink, 64) => Ok(CpdlcElementBody::IcaoFacilityDesignation(
+            IcaoFacilityDesignation::Icao(parse_fixed_ia5(bits, 4)?),
+        )),
         (PduKind::Downlink, 67 | 68) => Ok(CpdlcElementBody::FreeText(parse_free_text(bits)?)),
         (PduKind::Downlink, 71) => Ok(CpdlcElementBody::Degrees(parse_degrees(bits)?)),
         (PduKind::Downlink, 79) => Ok(CpdlcElementBody::AtisCode(parse_fixed_ia5(bits, 1)?)),
@@ -1007,7 +839,10 @@ fn parse_element_body(
         (PduKind::Uplink, 30 | 31 | 32 | 180) => {
             let first = parse_altitude(bits)?;
             let second = parse_altitude(bits)?;
-            Ok(CpdlcElementBody::AltitudeAltitude { first, second })
+            Ok(CpdlcElementBody::AltitudeAltitude {
+                altitude: first,
+                altitude2: second,
+            })
         }
         (PduKind::Uplink, 61) => {
             let position = parse_position(bits)?;
@@ -1027,7 +862,10 @@ fn parse_element_body(
         (PduKind::Uplink, 54) => {
             let position = parse_position(bits)?;
             let times = [parse_time(bits)?, parse_time(bits)?];
-            Ok(CpdlcElementBody::PositionTimeTime { position, times })
+            Ok(CpdlcElementBody::PositionTimeTime {
+                position,
+                time: times,
+            })
         }
         (PduKind::Uplink, 59) => {
             let position = parse_position(bits)?;
@@ -1065,7 +903,7 @@ fn parse_element_body(
             let distance = parse_distance_offset(bits)?;
             let direction = parse_direction(bits)?;
             Ok(CpdlcElementBody::DistanceOffsetDirection {
-                distance,
+                distance_offset: distance,
                 direction,
             })
         }
@@ -1075,7 +913,7 @@ fn parse_element_body(
             let direction = parse_direction(bits)?;
             Ok(CpdlcElementBody::PositionDistanceOffsetDirection {
                 position,
-                distance,
+                distance_offset: distance,
                 direction,
             })
         }
@@ -1085,7 +923,7 @@ fn parse_element_body(
             let direction = parse_direction(bits)?;
             Ok(CpdlcElementBody::TimeDistanceOffsetDirection {
                 time,
-                distance,
+                distance_offset: distance,
                 direction,
             })
         }
@@ -1114,7 +952,9 @@ fn parse_element_body(
         (PduKind::Uplink, 81) => Ok(CpdlcElementBody::ProcedureName(parse_procedure_name(bits)?)),
         (PduKind::Uplink, 77 | 88) => {
             let positions = [parse_position(bits)?, parse_position(bits)?];
-            Ok(CpdlcElementBody::PositionPosition { positions })
+            Ok(CpdlcElementBody::PositionPosition {
+                position: positions,
+            })
         }
         (PduKind::Uplink, 98) => {
             let direction = parse_direction(bits)?;
@@ -1130,12 +970,18 @@ fn parse_element_body(
         (PduKind::Uplink, 104) => {
             let position = parse_position(bits)?;
             let speeds = [parse_speed(bits)?, parse_speed(bits)?];
-            Ok(CpdlcElementBody::PositionSpeedSpeed { position, speeds })
+            Ok(CpdlcElementBody::PositionSpeedSpeed {
+                position,
+                speed: speeds,
+            })
         }
         (PduKind::Uplink, 105) => {
             let altitude = parse_altitude(bits)?;
             let speeds = [parse_speed(bits)?, parse_speed(bits)?];
-            Ok(CpdlcElementBody::AltitudeSpeedSpeed { altitude, speeds })
+            Ok(CpdlcElementBody::AltitudeSpeedSpeed {
+                altitude,
+                speed: speeds,
+            })
         }
         (PduKind::Uplink, 106 | 108 | 109 | 111 | 112 | 115 | 151) => {
             Ok(CpdlcElementBody::Speed(parse_speed(bits)?))
@@ -1143,7 +989,10 @@ fn parse_element_body(
         (PduKind::Uplink, 117 | 120) => {
             let unit = parse_icao_unit_name(bits)?;
             let frequency = parse_frequency(bits)?;
-            Ok(CpdlcElementBody::IcaoUnitNameFrequency { unit, frequency })
+            Ok(CpdlcElementBody::IcaoUnitNameFrequency {
+                icao_unit_name: unit,
+                frequency,
+            })
         }
         (PduKind::Uplink, 118 | 121) => {
             let position = parse_position(bits)?;
@@ -1151,7 +1000,7 @@ fn parse_element_body(
             let frequency = parse_frequency(bits)?;
             Ok(CpdlcElementBody::PositionIcaoUnitNameFrequency {
                 position,
-                unit,
+                icao_unit_name: unit,
                 frequency,
             })
         }
@@ -1161,7 +1010,7 @@ fn parse_element_body(
             let frequency = parse_frequency(bits)?;
             Ok(CpdlcElementBody::TimeIcaoUnitNameFrequency {
                 time,
-                unit,
+                icao_unit_name: unit,
                 frequency,
             })
         }
@@ -1172,9 +1021,9 @@ fn parse_element_body(
         (PduKind::Uplink, 159) => Ok(CpdlcElementBody::ErrorInformation(parse_error_information(
             bits,
         )?)),
-        (PduKind::Uplink, 160) => Ok(CpdlcElementBody::IcaoFacilityDesignation(parse_fixed_ia5(
-            bits, 4,
-        )?)),
+        (PduKind::Uplink, 160) => Ok(CpdlcElementBody::IcaoFacilityDesignation(
+            IcaoFacilityDesignation::Icao(parse_fixed_ia5(bits, 4)?),
+        )),
         (PduKind::Uplink, 163) => {
             let facility = parse_fixed_ia5(bits, 4)?;
             let table = if bits.read_bool()? {
@@ -1182,7 +1031,10 @@ fn parse_element_body(
             } else {
                 Tp4Table::LabelA
             };
-            Ok(CpdlcElementBody::IcaoFacilityDesignationTp4Table { facility, table })
+            Ok(CpdlcElementBody::IcaoFacilityDesignationTp4Table {
+                icao_facility_designation: IcaoFacilityDesignation::Icao(facility),
+                tp4_table: table,
+            })
         }
         (PduKind::Uplink, 169 | 170) => Ok(CpdlcElementBody::FreeText(parse_free_text(bits)?)),
         _ => Ok(CpdlcElementBody::Unsupported),
@@ -1770,14 +1622,6 @@ fn parse_numeric_string(bits: &mut BitReader<'_>, len: usize) -> Result<String, 
     Ok(out)
 }
 
-fn is_downlink_null(id: u16) -> bool {
-    element_info(PduKind::Downlink, id).is_some_and(|info| info.name.ends_with("NULL"))
-}
-
-fn is_uplink_null(id: u16) -> bool {
-    element_info(PduKind::Uplink, id).is_some_and(|info| info.name.ends_with("NULL"))
-}
-
 fn element_info(kind: PduKind, id: u16) -> Option<&'static CpdlcElementInfo> {
     let catalog = cpdlc_catalog();
     let elements = match kind {
@@ -1790,13 +1634,15 @@ fn element_info(kind: PduKind, id: u16) -> Option<&'static CpdlcElementInfo> {
 fn cpdlc_catalog() -> &'static CpdlcCatalog {
     static CATALOG: OnceLock<CpdlcCatalog> = OnceLock::new();
     CATALOG.get_or_init(|| {
-        serde_json::from_str(include_str!("../../../../data/cpdlc_fans.json"))
-            .expect("valid bundled FANS-1/A CPDLC element catalog")
+        let catalog: RawCpdlcCatalog =
+            serde_json::from_str(include_str!("../../../../data/cpdlc_fans.json"))
+                .expect("valid bundled FANS-1/A CPDLC element catalog");
+        catalog.into()
     })
 }
 
 /// Look up an ATN B1 element by direction and numeric ID.
-pub fn atn_element_info(kind: PduKind, id: u16) -> Option<&'static CpdlcElementInfo> {
+pub(crate) fn atn_element_info(kind: PduKind, id: u16) -> Option<&'static CpdlcElementInfo> {
     let catalog = atn_catalog();
     let elements = match kind {
         PduKind::Uplink => &catalog.uplink,
@@ -1808,9 +1654,173 @@ pub fn atn_element_info(kind: PduKind, id: u16) -> Option<&'static CpdlcElementI
 fn atn_catalog() -> &'static CpdlcCatalog {
     static ATN_CATALOG: OnceLock<CpdlcCatalog> = OnceLock::new();
     ATN_CATALOG.get_or_init(|| {
-        serde_json::from_str(include_str!("../../../../data/cpdlc_atn.json"))
-            .expect("valid bundled ATN B1 CPDLC element catalog")
+        let catalog: RawCpdlcCatalog =
+            serde_json::from_str(include_str!("../../../../data/cpdlc_atn.json"))
+                .expect("valid bundled ATN B1 CPDLC element catalog");
+        catalog.into()
     })
+}
+
+impl From<RawCpdlcCatalog> for CpdlcCatalog {
+    fn from(raw: RawCpdlcCatalog) -> Self {
+        Self {
+            uplink: raw.uplink.into_iter().map(Into::into).collect(),
+            downlink: raw.downlink.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<RawCpdlcElementInfo> for CpdlcElementInfo {
+    fn from(raw: RawCpdlcElementInfo) -> Self {
+        let fragments: Vec<_> = parse_template_fragments(&raw.template).collect();
+        let slots: Vec<_> = fragments
+            .iter()
+            .filter_map(|fragment| match fragment {
+                CpdlcTemplateFragment::Slot(slot) => Some(*slot),
+                CpdlcTemplateFragment::Text(_) => None,
+            })
+            .collect();
+        Self {
+            id: raw.id,
+            catalog_name: raw.name,
+            fragments,
+            body_slots: (!slots.is_empty()).then_some(slots),
+        }
+    }
+}
+
+fn parse_template_fragments(template: &str) -> impl Iterator<Item = CpdlcTemplateFragment> + '_ {
+    TemplateFragmentIter { rest: template }
+}
+
+struct TemplateFragmentIter<'a> {
+    rest: &'a str,
+}
+
+impl Iterator for TemplateFragmentIter<'_> {
+    type Item = CpdlcTemplateFragment;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.rest.is_empty() {
+            return None;
+        }
+        let Some(start) = self.rest.find('[') else {
+            let text = self.rest;
+            self.rest = "";
+            return Some(CpdlcTemplateFragment::Text(text.to_string()));
+        };
+        if start > 0 {
+            let (text, rest) = self.rest.split_at(start);
+            self.rest = rest;
+            return Some(CpdlcTemplateFragment::Text(text.to_string()));
+        }
+        let Some(end) = self.rest.find(']') else {
+            let text = self.rest;
+            self.rest = "";
+            return Some(CpdlcTemplateFragment::Text(text.to_string()));
+        };
+        let raw_slot = &self.rest[1..end];
+        self.rest = &self.rest[end + 1..];
+        Some(
+            CpdlcTemplateSlot::parse(raw_slot)
+                .map(CpdlcTemplateFragment::Slot)
+                .unwrap_or_else(|| CpdlcTemplateFragment::Text(format!("[{raw_slot}]"))),
+        )
+    }
+}
+
+impl CpdlcTemplateSlot {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Altimeter => "altimeter",
+            Self::Altitude => "altitude",
+            Self::Altitude2 => "altitude2",
+            Self::AtisCode => "atis_code",
+            Self::BeaconCode => "beacon_code",
+            Self::Degrees => "degrees",
+            Self::Direction => "direction",
+            Self::DistanceOffset => "distance_offset",
+            Self::ErrorInformation => "error_information",
+            Self::FreeText => "free_text",
+            Self::Frequency => "frequency",
+            Self::IcaoFacilityDesignation => "icao_facility_designation",
+            Self::IcaoUnitName => "icao_unit_name",
+            Self::Position => "position",
+            Self::PositionReport => "position_report",
+            Self::ProcedureName => "procedure_name",
+            Self::RouteClearance => "route_clearance",
+            Self::Speed => "speed",
+            Self::Time => "time",
+            Self::Tp4Table => "tp4_table",
+            Self::VersionNumber => "version_number",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        let slot = value
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+        Some(match slot.as_str() {
+            "altimeter" => Self::Altimeter,
+            "altitude" => Self::Altitude,
+            "altitude2" => Self::Altitude2,
+            "atiscode" => Self::AtisCode,
+            "beaconcode" => Self::BeaconCode,
+            "degrees" => Self::Degrees,
+            "direction" => Self::Direction,
+            "distanceoffset" => Self::DistanceOffset,
+            "errorinformation" => Self::ErrorInformation,
+            "freetext" => Self::FreeText,
+            "frequency" => Self::Frequency,
+            "icaofacilitydesignation" => Self::IcaoFacilityDesignation,
+            "icaounitname" => Self::IcaoUnitName,
+            "position" => Self::Position,
+            "positionreport" => Self::PositionReport,
+            "procedurename" => Self::ProcedureName,
+            "routeclearance" => Self::RouteClearance,
+            "speed" => Self::Speed,
+            "time" => Self::Time,
+            "tp4table" => Self::Tp4Table,
+            "versionnumber" => Self::VersionNumber,
+            _ => return None,
+        })
+    }
+}
+
+pub(crate) fn cpdlc_phrase_fragments<'a>(
+    info: &'a CpdlcElementInfo,
+    body: Option<&'a CpdlcElementBody>,
+) -> impl Iterator<Item = CpdlcPhraseFragment> + 'a {
+    info.fragments
+        .iter()
+        .filter_map(move |fragment| match fragment {
+            CpdlcTemplateFragment::Text(text) => Some(CpdlcPhraseFragment::Text(text.clone())),
+            // emit unresolved references (some messages may be corrupted, let downstream handle)
+            CpdlcTemplateFragment::Slot(slot) => (body.is_none()
+                || body.is_some_and(|body| body.contains_slot(*slot)))
+            .then_some(CpdlcPhraseFragment::Value(*slot)),
+        })
+}
+
+impl CpdlcElementBody {
+    fn contains_slot(&self, slot: CpdlcTemplateSlot) -> bool {
+        let slot = slot.as_str();
+        let Ok(body) = serde_json::to_value(self) else {
+            return false;
+        };
+
+        body.get("kind").and_then(Value::as_str) == Some(slot)
+            || body
+                .get("data")
+                .and_then(Value::as_object)
+                .is_some_and(|object| object.contains_key(slot))
+            || matches!(
+                (slot, self),
+                ("route_clearance", Self::OpaqueRouteClearance { .. })
+            )
+    }
 }
 
 fn parse_header(bits: &mut BitReader<'_>) -> Result<AtcMessageHeader, CpdlcDecodeError> {
@@ -1923,5 +1933,39 @@ mod tests {
         let msg = parse_cpdlc_payload_hex("21221BE8E5DAAF64").unwrap();
         assert_eq!(msg.payload_len_bytes, 8);
         assert!(msg.downlink.is_some() || msg.uplink.is_some());
+    }
+
+    #[test]
+    fn parsed_catalog_slots_resolve_against_body_serde_names() {
+        for kind in [PduKind::Uplink, PduKind::Downlink] {
+            let elements = match kind {
+                PduKind::Uplink => &cpdlc_catalog().uplink,
+                PduKind::Downlink => &cpdlc_catalog().downlink,
+            };
+
+            for info in elements {
+                let Some(slots) = &info.body_slots else {
+                    continue;
+                };
+                let mut bits = BitReader::new(&[0x55; 256]);
+                let Ok(body) = parse_element_body(&mut bits, kind, info.id) else {
+                    continue;
+                };
+                if matches!(body, CpdlcElementBody::Unsupported) {
+                    continue;
+                }
+
+                for slot in slots {
+                    assert!(
+                        body.contains_slot(*slot),
+                        "{} {kind:?} id {} body {:?} does not expose template slot {:?}",
+                        info.catalog_name,
+                        info.id,
+                        body,
+                        slot
+                    );
+                }
+            }
+        }
     }
 }

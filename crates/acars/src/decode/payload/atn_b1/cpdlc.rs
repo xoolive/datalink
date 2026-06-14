@@ -12,9 +12,10 @@ use rasn_atn_cpdlc::{
 };
 
 use crate::decode::payload::arinc622::cpdlc::{
-    AtcMessageHeader as FansHeader, CpdlcElement, CpdlcElementBody, CpdlcFrequency,
-    CpdlcPduSummary, CpdlcTimestamp, IcaoFacilityFunction, IcaoFacilityIdentification,
-    IcaoUnitName, PduKind,
+    atn_element_info, cpdlc_phrase_fragments, AtcMessageHeader as FansHeader, CpdlcElement,
+    CpdlcElementBody, CpdlcFrequency, CpdlcPduSummary, CpdlcPhraseFragment, CpdlcTimestamp,
+    IcaoFacilityDesignation, IcaoFacilityFunction, IcaoFacilityIdentification, IcaoUnitName,
+    PduKind,
 };
 
 /// Attempt to decode ATN B1 CPDLC from the inner bytes of a ULCS PDV-list
@@ -78,9 +79,17 @@ fn convert_header(h: &rasn_atn_cpdlc::AtcMessageHeader) -> FansHeader {
     }
 }
 
-fn make_element(id: u16, _kind: PduKind, body: Option<CpdlcElementBody>) -> CpdlcElement {
+fn make_element(id: u16, kind: PduKind, body: Option<CpdlcElementBody>) -> CpdlcElement {
+    let info = atn_element_info(kind, id);
+    let fragments = info
+        .map(|info| cpdlc_phrase_fragments(info, body.as_ref()).collect())
+        .unwrap_or_else(|| vec![CpdlcPhraseFragment::Text(format!("ATN B1 element {id}"))]);
     CpdlcElement {
         id,
+        catalog_name: info
+            .map(|info| info.catalog_name.clone())
+            .unwrap_or_else(|| format!("ATN B1 element {id}")),
+        fragments,
         body,
         is_additional: false,
     }
@@ -89,29 +98,29 @@ fn make_element(id: u16, _kind: PduKind, body: Option<CpdlcElementBody>) -> Cpdl
 fn convert_uplink_element(e: &AtcUplinkMsgElementId) -> CpdlcElement {
     use AtcUplinkMsgElementId::*;
     let (id, body) = match e {
-        UM0Null(()) => (0, Some(CpdlcElementBody::Null)),
-        UM1Null(()) => (1, Some(CpdlcElementBody::Null)),
-        UM2Null(()) => (2, Some(CpdlcElementBody::Null)),
-        UM3Null(()) => (3, Some(CpdlcElementBody::Null)),
-        UM4Null(()) => (4, Some(CpdlcElementBody::Null)),
-        UM5Null(()) => (5, Some(CpdlcElementBody::Null)),
-        UM107Null(()) => (107, Some(CpdlcElementBody::Null)),
-        UM116Null(()) => (116, Some(CpdlcElementBody::Null)),
-        UM127Null(()) => (127, Some(CpdlcElementBody::Null)),
-        UM132Null(()) => (132, Some(CpdlcElementBody::Null)),
-        UM137Null(()) => (137, Some(CpdlcElementBody::Null)),
-        UM141Null(()) => (141, Some(CpdlcElementBody::Null)),
-        UM144Null(()) => (144, Some(CpdlcElementBody::Null)),
-        UM147Null(()) => (147, Some(CpdlcElementBody::Null)),
-        UM154Null(()) => (154, Some(CpdlcElementBody::Null)),
-        UM161Null(()) => (161, Some(CpdlcElementBody::Null)),
-        UM167Null(()) => (167, Some(CpdlcElementBody::Null)),
-        UM191Null(()) => (191, Some(CpdlcElementBody::Null)),
-        UM193Null(()) => (193, Some(CpdlcElementBody::Null)),
-        UM200Null(()) => (200, Some(CpdlcElementBody::Null)),
-        UM227Null(()) => (227, Some(CpdlcElementBody::Null)),
-        UM134SpeedTypeSpeedTypeSpeedType(_) => (134, Some(CpdlcElementBody::Null)),
-        UM166TrafficType(_) => (166, Some(CpdlcElementBody::Null)),
+        UM0Null(()) => (0, None),
+        UM1Null(()) => (1, None),
+        UM2Null(()) => (2, None),
+        UM3Null(()) => (3, None),
+        UM4Null(()) => (4, None),
+        UM5Null(()) => (5, None),
+        UM107Null(()) => (107, None),
+        UM116Null(()) => (116, None),
+        UM127Null(()) => (127, None),
+        UM132Null(()) => (132, None),
+        UM137Null(()) => (137, None),
+        UM141Null(()) => (141, None),
+        UM144Null(()) => (144, None),
+        UM147Null(()) => (147, None),
+        UM154Null(()) => (154, None),
+        UM161Null(()) => (161, None),
+        UM167Null(()) => (167, None),
+        UM191Null(()) => (191, None),
+        UM193Null(()) => (193, None),
+        UM200Null(()) => (200, None),
+        UM227Null(()) => (227, None),
+        UM134SpeedTypeSpeedTypeSpeedType(_) => (134, None),
+        UM166TrafficType(_) => (166, None),
         UM183FreeText(ft) => (183, Some(CpdlcElementBody::FreeText(ia5_str(&ft.0)))),
         UM187FreeText(ft) => (187, Some(CpdlcElementBody::FreeText(ia5_str(&ft.0)))),
         UM194FreeText(ft) => (194, Some(CpdlcElementBody::FreeText(ia5_str(&ft.0)))),
@@ -120,10 +129,12 @@ fn convert_uplink_element(e: &AtcUplinkMsgElementId) -> CpdlcElement {
         UM197FreeText(ft) => (197, Some(CpdlcElementBody::FreeText(ia5_str(&ft.0)))),
         UM198FreeText(ft) => (198, Some(CpdlcElementBody::FreeText(ia5_str(&ft.0)))),
         UM199FreeText(ft) => (199, Some(CpdlcElementBody::FreeText(ia5_str(&ft.0)))),
-        UM160Facility(f) => (160, Some(facility_body(f))),
+        UM160Facility(f) => (160, facility_body(f)),
         UM163FacilityDesignation(fd) => (
             163,
-            Some(CpdlcElementBody::IcaoFacilityDesignation(fd_str(fd))),
+            Some(CpdlcElementBody::IcaoFacilityDesignation(
+                IcaoFacilityDesignation::Icao(fd_str(fd)),
+            )),
         ),
         UM117UnitNameFrequency(unf) => (117, Some(unit_freq(&unf.unit_name, &unf.frequency))),
         UM118PositionUnitNameFrequency(_) => (118, None),
@@ -143,17 +154,17 @@ fn convert_uplink_element(e: &AtcUplinkMsgElementId) -> CpdlcElement {
 fn convert_downlink_element(e: &AtcDownlinkMsgElementId) -> CpdlcElement {
     use AtcDownlinkMsgElementId::*;
     let (id, body) = match e {
-        DM0Null(()) => (0, Some(CpdlcElementBody::Null)),
-        DM1Null(()) => (1, Some(CpdlcElementBody::Null)),
-        DM2Null(()) => (2, Some(CpdlcElementBody::Null)),
-        DM3Null(()) => (3, Some(CpdlcElementBody::Null)),
-        DM4Null(()) => (4, Some(CpdlcElementBody::Null)),
-        DM5Null(()) => (5, Some(CpdlcElementBody::Null)),
-        DM63Null(()) => (63, Some(CpdlcElementBody::Null)),
-        DM65Null(()) => (65, Some(CpdlcElementBody::Null)),
-        DM66Null(()) => (66, Some(CpdlcElementBody::Null)),
-        DM99Null(()) => (99, Some(CpdlcElementBody::Null)),
-        DM100Null(()) => (100, Some(CpdlcElementBody::Null)),
+        DM0Null(()) => (0, None),
+        DM1Null(()) => (1, None),
+        DM2Null(()) => (2, None),
+        DM3Null(()) => (3, None),
+        DM4Null(()) => (4, None),
+        DM5Null(()) => (5, None),
+        DM63Null(()) => (63, None),
+        DM65Null(()) => (65, None),
+        DM66Null(()) => (66, None),
+        DM99Null(()) => (99, None),
+        DM100Null(()) => (100, None),
         DM67FreeText(ft) => (67, Some(CpdlcElementBody::FreeText(ia5_str(&ft.0)))),
         DM68FreeText(ft) => (68, Some(CpdlcElementBody::FreeText(ia5_str(&ft.0)))),
         DM90FreeText(ft) => (90, Some(CpdlcElementBody::FreeText(ia5_str(&ft.0)))),
@@ -167,7 +178,9 @@ fn convert_downlink_element(e: &AtcDownlinkMsgElementId) -> CpdlcElement {
         DM98FreeText(ft) => (98, Some(CpdlcElementBody::FreeText(ia5_str(&ft.0)))),
         DM64FacilityDesignation(fd) => (
             64,
-            Some(CpdlcElementBody::IcaoFacilityDesignation(fd_str(fd))),
+            Some(CpdlcElementBody::IcaoFacilityDesignation(
+                IcaoFacilityDesignation::Icao(fd_str(fd)),
+            )),
         ),
         other => (id_from_debug(&format!("{other:?}"), "DM"), None),
     };
@@ -182,10 +195,12 @@ fn fd_str(fd: &FacilityDesignation) -> String {
     ia5_str(&fd.0)
 }
 
-fn facility_body(f: &Facility) -> CpdlcElementBody {
+fn facility_body(f: &Facility) -> Option<CpdlcElementBody> {
     match f {
-        Facility::FacilityDesignation(fd) => CpdlcElementBody::IcaoFacilityDesignation(fd_str(fd)),
-        Facility::NoFacility(()) => CpdlcElementBody::Null,
+        Facility::FacilityDesignation(fd) => Some(CpdlcElementBody::IcaoFacilityDesignation(
+            IcaoFacilityDesignation::Icao(fd_str(fd)),
+        )),
+        Facility::NoFacility(()) => None,
     }
 }
 
@@ -206,7 +221,7 @@ fn unit_freq(unit: &UnitName, freq: &Frequency) -> CpdlcElementBody {
         Frequency::FrequencySatChannel(_) => CpdlcFrequency::VhfKhz(0),
     };
     CpdlcElementBody::IcaoUnitNameFrequency {
-        unit: IcaoUnitName { facility, function },
+        icao_unit_name: IcaoUnitName { facility, function },
         frequency,
     }
 }
@@ -244,10 +259,7 @@ mod tests {
         assert!(matches!(kind, PduKind::Uplink));
         assert_eq!(s.header.msg_id, 0);
         assert_eq!(s.elements[0].id, 227);
-        assert!(matches!(
-            s.elements[0].body.as_ref(),
-            Some(CpdlcElementBody::Null)
-        ));
+        assert!(s.elements[0].body.is_none());
     }
 
     #[test]
@@ -256,8 +268,10 @@ mod tests {
         assert_eq!(s.header.msg_id, 4);
         assert_eq!(s.elements[0].id, 117);
         // verify facility EGTT
-        if let Some(CpdlcElementBody::IcaoUnitNameFrequency { unit, frequency }) =
-            &s.elements[0].body
+        if let Some(CpdlcElementBody::IcaoUnitNameFrequency {
+            icao_unit_name: unit,
+            frequency,
+        }) = &s.elements[0].body
         {
             if let IcaoFacilityIdentification::Designation(d) = &unit.facility {
                 assert_eq!(d, "EGTT");
@@ -281,7 +295,7 @@ mod tests {
         let (s, _) = decode_fixture("00a808e32ae8678bce7c2028226468b14808a578d140");
         assert_eq!(s.elements[0].id, 160);
         if let Some(CpdlcElementBody::IcaoFacilityDesignation(f)) = &s.elements[0].body {
-            assert_eq!(f, "LFEE");
+            assert_eq!(f, &IcaoFacilityDesignation::Icao("LFEE".to_string()));
         } else {
             panic!("expected IcaoFacilityDesignation");
         }

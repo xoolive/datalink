@@ -113,7 +113,7 @@ pub struct Message {
 
 /// ARINC 622 payload decoded according to `Message::imi`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", content = "data")]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum Payload {
     /// ADS-C message with fully decoded tag list.
     Adsc(adsc::AdscMessage),
