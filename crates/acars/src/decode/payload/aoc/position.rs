@@ -102,7 +102,9 @@ fn parse_latlon_text(label: &str, raw: &str) -> Option<AocPositionMessage> {
 fn parse_label44(raw: &str) -> Option<AocPositionMessage> {
     let parts: Vec<&str> = raw.split(',').map(str::trim).collect();
     let coord = parts.get(1)?;
-    let (lat, lon) = parse_compact_ns_ew(coord)?;
+    let (lat, lon) = parse_compact_ns_ew(coord)
+        .or_else(|| parse_spaced_scaled_decimal_pair(coord))
+        .or_else(|| find_latlon(coord))?;
     Some(AocPositionMessage {
         format: "label44".into(),
         latitude: Some(lat),
@@ -155,7 +157,10 @@ fn parse_label83(raw: &str) -> Option<AocPositionMessage> {
 
 fn parse_decimal_pair(s: &str) -> Option<(f64, f64)> {
     let s = s.trim();
-    let ew = s[1..].find(['E', 'W']).map(|i| i + 1)?;
+    if s.len() < 2 {
+        return None;
+    }
+    let ew = s.get(1..)?.find(['E', 'W']).map(|i| i + 1)?;
     let sep = s[..ew]
         .rfind(|c: char| !c.is_ascii_digit() && c != '.')
         .map(|i| i + 1)
@@ -184,6 +189,36 @@ fn find_latlon(s: &str) -> Option<(f64, f64)> {
     None
 }
 
+fn parse_spaced_scaled_decimal_pair(s: &str) -> Option<(f64, f64)> {
+    let mut tokens = s.split_whitespace();
+    Some((
+        parse_scaled_hemi_decimal(tokens.next()?)?,
+        parse_scaled_hemi_decimal(tokens.next()?)?,
+    ))
+}
+
+fn parse_scaled_hemi_decimal(tok: &str) -> Option<f64> {
+    let tok = tok.trim_matches(',');
+    if tok.contains('.') {
+        return parse_signed_decimal_token(tok);
+    }
+    let hemi = tok.chars().next()?;
+    let deg_digits = match hemi {
+        'N' | 'S' => 2,
+        'E' | 'W' => 3,
+        _ => return None,
+    };
+    let rest = tok.get(1..)?;
+    if rest.len() <= deg_digits || !rest.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let sign = if matches!(hemi, 'S' | 'W') { -1.0 } else { 1.0 };
+    let value = format!("{}.{}", &rest[..deg_digits], &rest[deg_digits..])
+        .parse::<f64>()
+        .ok()?;
+    Some(sign * value)
+}
+
 fn parse_trailing_hemi(tok: &str) -> Option<f64> {
     let hemi = tok.chars().last()?;
     let sign = match hemi {
@@ -202,11 +237,14 @@ fn parse_signed_decimal_token(tok: &str) -> Option<f64> {
         'S' | 'W' => -1.0,
         _ => return None,
     };
-    tok[1..].parse::<f64>().ok().map(|v| sign * v)
+    tok.get(1..)?.parse::<f64>().ok().map(|v| sign * v)
 }
 
 fn parse_compact_ns_ew(s: &str) -> Option<(f64, f64)> {
-    let ew = s[1..].find(['E', 'W']).map(|i| i + 1)?;
+    if s.len() < 2 {
+        return None;
+    }
+    let ew = s.get(1..)?.find(['E', 'W']).map(|i| i + 1)?;
     let lat = parse_deg_min_decimal(&s[..ew], 2)?;
     let lon = parse_deg_min_decimal(&s[ew..], 3)?;
     Some((lat, lon))
@@ -219,7 +257,7 @@ fn parse_deg_min_decimal(s: &str, deg_digits: usize) -> Option<f64> {
         'S' | 'W' => -1.0,
         _ => return None,
     };
-    let rest = &s[1..];
+    let rest = s.get(1..)?;
     if rest.len() <= deg_digits {
         return None;
     }
@@ -242,6 +280,24 @@ mod tests {
         assert!((msg.latitude.unwrap() - 28.282).abs() < 0.001);
         assert!((msg.longitude.unwrap() + 82.571).abs() < 0.001);
         assert_eq!(msg.destination.as_deref(), Some("KCLE"));
+    }
+
+    #[test]
+    fn parses_label44_missing_position() {
+        // airframes id: 6748745696
+        assert_eq!(parse_aoc_position("44", "00POS03,,430,KSRQ,KLCI"), None);
+    }
+
+    #[test]
+    fn parses_label44_spaced_hemisphere_pair() {
+        // airframes id: 6748746513
+        let msg = parse_aoc_position("44", "POS02,N53042 W001347,,EGSS,CYQM,0522,0832,1443,*****")
+            .unwrap();
+        assert!((msg.latitude.unwrap() - 53.042).abs() < 0.001);
+        assert!((msg.longitude.unwrap() + 1.347).abs() < 0.001);
+        assert_eq!(msg.departure.as_deref(), Some("EGSS"));
+        assert_eq!(msg.destination.as_deref(), Some("CYQM"));
+        assert_eq!(msg.timestamp.as_deref(), Some("0832"));
     }
 
     #[test]
