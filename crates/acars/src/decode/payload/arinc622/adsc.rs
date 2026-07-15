@@ -38,8 +38,8 @@ pub enum AdscTag {
     LateralDeviationChangeEvent(AdscBasicReport),
     FlightId(AdscFlightId),
     PredictedRoute(AdscPredictedRoute),
-    EarthReferenceData(AdscEarthAirReference),
-    AirReferenceData(AdscEarthAirReference),
+    EarthReferenceData(AdscEarthReferenceData),
+    AirReferenceData(AdscAirReferenceData),
     MeteoData(AdscMeteo),
     AirframeId(AdscAirframeId),
     VerticalRateChangeEvent(AdscBasicReport),
@@ -183,12 +183,34 @@ pub struct AdscPredictedRoute {
     pub next_next_altitude_ft: i32,
 }
 
+/// Tag 14 — Earth Reference Data: the ground-relative side of the wind
+/// triangle (true track + ground speed) plus vertical speed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AdscEarthAirReference {
-    pub heading_or_track_degrees: f64,
-    pub heading_invalid: bool,
-    pub speed: f64,
+pub struct AdscEarthReferenceData {
+    /// `None` when `track_invalid` is true; the field is then omitted from JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub true_track_degrees: Option<f64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub track_invalid: bool,
+    pub ground_speed_kt: f64,
     pub vertical_speed_ft_per_min: i32,
+}
+
+/// Tag 15 — Air Reference Data: the air-relative side of the wind triangle
+/// (true heading + Mach number) plus vertical speed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdscAirReferenceData {
+    /// `None` when `heading_invalid` is true; the field is then omitted from JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub true_heading_degrees: Option<f64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub heading_invalid: bool,
+    pub mach: f64,
+    pub vertical_speed_ft_per_min: i32,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -573,16 +595,33 @@ pub fn parse_adsc_payload_bytes_with_direction(
             14 | 15 => {
                 let (_, raw) = EarthAirRefRaw::from_bytes((take(buf, &mut idx, 5)?, 0))
                     .map_err(|e| DecodeError::Deku(e.to_string()))?;
-                let report = AdscEarthAirReference {
-                    heading_or_track_degrees: decode_heading(raw.heading_raw),
-                    heading_invalid: raw.heading_invalid != 0,
-                    speed: decode_speed(raw.speed_raw),
-                    vertical_speed_ft_per_min: decode_vertical_speed(raw.vertical_speed_raw),
-                };
+                // Tags 14 and 15 share the same bit layout (EarthAirRefRaw) but
+                // carry different physical quantities: Tag 14 is the
+                // ground-relative side of the wind triangle (true track + ground
+                // speed in knots), while Tag 15 is the air-relative side (true
+                // heading + Mach number). The speed field therefore uses a
+                // different scale per tag. See the OpenSky ADS-C dataset
+                // (Zenodo 14659997) and the libacars reference decoder, which
+                // applies the Mach scale (/2000) only for Tag 15.
+                let heading_degrees = decode_heading(raw.heading_raw);
+                let invalid = raw.heading_invalid != 0;
+                let vertical_speed_ft_per_min = decode_vertical_speed(raw.vertical_speed_raw);
+                // The angle is only meaningful when its validity bit is clear; keep it
+                // as Some then, otherwise None so serde omits it (and track_invalid / heading_invalid is emitted instead).
                 if tag == 14 {
-                    tags.push(AdscTag::EarthReferenceData(report));
+                    tags.push(AdscTag::EarthReferenceData(AdscEarthReferenceData {
+                        true_track_degrees: (!invalid).then_some(heading_degrees),
+                        track_invalid: invalid,
+                        ground_speed_kt: decode_ground_speed(raw.speed_raw),
+                        vertical_speed_ft_per_min,
+                    }));
                 } else {
-                    tags.push(AdscTag::AirReferenceData(report));
+                    tags.push(AdscTag::AirReferenceData(AdscAirReferenceData {
+                        true_heading_degrees: (!invalid).then_some(heading_degrees),
+                        heading_invalid: invalid,
+                        mach: decode_mach(raw.speed_raw),
+                        vertical_speed_ft_per_min,
+                    }));
                 }
             }
             16 => {
@@ -763,6 +802,18 @@ fn decode_timestamp(value: u16) -> f64 {
 
 fn decode_speed(value: u16) -> f64 {
     value as f64 / 2.0
+}
+
+fn decode_ground_speed(value: u16) -> f64 {
+    // Tag 14 Earth Reference ground speed, in knots (LSB = 0.5 kt).
+    value as f64 / 2.0
+}
+
+fn decode_mach(value: u16) -> f64 {
+    // Tag 15 Air Reference Mach number. The 13-bit field is encoded with the
+    // same 0.5 LSB as the ground-speed/wind fields, then divided by 1000 to
+    // yield Mach — so the raw value maps to Mach via /2000 (e.g. 1674 -> 0.837).
+    value as f64 / 2000.0
 }
 
 fn decode_vertical_speed(value: i16) -> i32 {

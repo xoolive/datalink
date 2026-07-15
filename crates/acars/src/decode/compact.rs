@@ -19,7 +19,9 @@ use crate::decode::payload::aoc::label32::Label32Message;
 use crate::decode::payload::aoc::oooi::{OooiOffDestination, OooiOffReport};
 use crate::decode::payload::aoc::position::AocPositionMessage;
 use crate::decode::payload::arinc620::squitter::SquitterMessage;
-use crate::decode::payload::arinc622::adsc::{AdscBasicReport, AdscEarthAirReference, AdscTag};
+use crate::decode::payload::arinc622::adsc::{
+    AdscAirReferenceData, AdscBasicReport, AdscEarthReferenceData, AdscTag,
+};
 use crate::decode::payload::arinc622::cpdlc::{
     CpdlcAltitude, CpdlcDegrees, CpdlcElementBody, CpdlcPosition, CpdlcPositionReport,
 };
@@ -142,11 +144,21 @@ impl ExtractKinematics for AdscBasicReport {
     }
 }
 
-impl ExtractKinematics for AdscEarthAirReference {
+impl ExtractKinematics for AdscEarthReferenceData {
     fn kinematics(&self) -> Option<Kinematics> {
         Some(Kinematics {
-            track: (!self.heading_invalid).then_some(self.heading_or_track_degrees),
-            derived_from: Some("adsc_earth_air".into()),
+            track: self.true_track_degrees,
+            derived_from: Some("adsc_earth".into()),
+            ..Default::default()
+        })
+    }
+}
+
+impl ExtractKinematics for AdscAirReferenceData {
+    fn kinematics(&self) -> Option<Kinematics> {
+        Some(Kinematics {
+            track: self.true_heading_degrees,
+            derived_from: Some("adsc_air".into()),
             ..Default::default()
         })
     }

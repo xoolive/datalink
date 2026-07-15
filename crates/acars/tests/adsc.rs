@@ -1,5 +1,5 @@
 use acars::decode::acars::{extract_sublabel_and_mfi, MessageDirection};
-use acars::decode::payload::arinc622::adsc::parse_adsc_app_text;
+use acars::decode::payload::arinc622::adsc::{parse_adsc_app_text, AdscTag};
 use acars::decode::payload::arinc622::{parse_and_dispatch, Imi, Payload};
 use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
@@ -64,6 +64,49 @@ fn opensky_adsc_message_samples_parse() {
         );
         assert!(!parsed.tags.is_empty(), "{name}: expected non-empty tags");
     }
+}
+
+#[test]
+fn earth_and_air_reference_decode_tag_specific_scales() {
+    // Regression for issue #17. A single ADS-C message carries both Tag 14
+    // (Earth Reference) and Tag 15 (Air Reference). The tags share a bit layout
+    // but decode speed with different scales: ground speed in knots for Tag 14
+    // and Mach for Tag 15. Previously Tag 15 reused the knot scale, turning
+    // Mach 0.837 into 837.0.
+    let text = "/MGQCAYA.ADS.A6-BLJ0707E9392157890809021F0E0B30E940040F0CD9A280046DD7";
+    let parsed = parse_adsc_app_text(text).expect("issue #17 sample should parse");
+    assert_eq!(parsed.atsu_address, "MGQCAYA");
+    assert_eq!(parsed.registration, "A6-BLJ");
+
+    let earth = parsed
+        .tags
+        .iter()
+        .find_map(|tag| match tag {
+            AdscTag::EarthReferenceData(data) => Some(data),
+            _ => None,
+        })
+        .expect("expected a Tag 14 Earth Reference group");
+    assert!(!earth.track_invalid);
+    assert!(approx_eq(earth.true_track_degrees.unwrap(), 31.46484375));
+    assert!(approx_eq(earth.ground_speed_kt, 466.5));
+    assert_eq!(earth.vertical_speed_ft_per_min, 16);
+
+    let air = parsed
+        .tags
+        .iter()
+        .find_map(|tag| match tag {
+            AdscTag::AirReferenceData(data) => Some(data),
+            _ => None,
+        })
+        .expect("expected a Tag 15 Air Reference group");
+    assert!(!air.heading_invalid);
+    assert!(approx_eq(air.true_heading_degrees.unwrap(), 36.123046875));
+    assert!(approx_eq(air.mach, 0.837));
+    assert_eq!(air.vertical_speed_ft_per_min, 16);
+}
+
+fn approx_eq(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-9
 }
 
 #[test]
