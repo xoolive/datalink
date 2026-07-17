@@ -82,7 +82,7 @@ pub struct DecodedEvent {
 
 // TODO re-evaluate if we really want Box
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum ProtocolMessage {
     /// Message received from the Airframes.io websocket and normalized by this CLI.
     Airframes(Box<AirframesMessage>),

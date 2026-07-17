@@ -1,0 +1,45 @@
+{
+  "files": [
+    "esm/package.json",
+    "esm/datalink_wasm_bg.wasm",
+    "esm/datalink_wasm_bg.wasm.d.ts",
+    "esm/datalink_wasm.js",
+    "esm/datalink_wasm_bg.js",
+    "esm/datalink_wasm.d.ts",
+    "nodejs/package.json",
+    "nodejs/datalink_wasm_bg.wasm",
+    "nodejs/datalink_wasm_bg.wasm.d.ts",
+    "nodejs/datalink_wasm.js",
+    "nodejs/datalink_wasm.d.ts",
+    "web/package.json",
+    "web/datalink_wasm_bg.wasm",
+    "web/datalink_wasm_bg.wasm.d.ts",
+    "web/datalink_wasm.js",
+    "web/datalink_wasm.d.ts"
+  ],
+  "main": "esm/datalink_wasm.js",
+  "module": "esm/datalink_wasm.js",
+  "types": "esm/datalink_wasm.d.ts",
+  "homepage": "https://github.com/xoolive/datalink#readme",
+  "bugs": {
+    "url": "https://github.com/xoolive/datalink/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "import": "./esm/datalink_wasm.js",
+      "types": "./esm/datalink_wasm.d.ts"
+    },
+    "./nodejs": {
+      "require": "./nodejs/datalink_wasm.js",
+      "import": "./nodejs/datalink_wasm.js",
+      "types": "./nodejs/datalink_wasm.d.ts"
+    },
+    "./web": {
+      "import": "./web/datalink_wasm.js",
+      "types": "./web/datalink_wasm.d.ts"
+    }
+  }
+}

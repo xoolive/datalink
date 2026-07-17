@@ -14,6 +14,8 @@ edition.workspace = true
 default = ["cli", "rtlsdr", "airspy", "hackrf", "websocket"]
 cli = [
     "acars/demod",
+    "acars/flate2",
+    "acars/rasn",
     "dep:anyhow",
     "dep:clap",
     "dep:hex",

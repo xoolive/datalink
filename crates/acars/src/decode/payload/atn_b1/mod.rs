@@ -47,7 +47,7 @@ pub fn decode_cotp_user_data(user_data: &[u8]) -> Option<AtnB1Pdu> {
 
 /// Decoded ATN B1 application PDU.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "app", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum AtnB1Pdu {
     Cpdlc(CpdlcPduSummary),
 }

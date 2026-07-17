@@ -11,18 +11,20 @@ edition.workspace = true
 [features]
 default = []
 demod = ["dep:desperado", "dep:num-complex"]
+flate2 = ["dep:flate2"]
+rasn = ["dep:rasn", "dep:rasn-atn-cpdlc"]
 
 [dependencies]
 deku.workspace = true
 hex.workspace = true
 num-complex = { version = "0.4", optional = true }
 base64 = "0.22"
-flate2 = "1"
+flate2 = { version = "1", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 desperado = { workspace = true, optional = true }
-rasn = "0.28"
-rasn-atn-cpdlc = "0.28"
+rasn = { version = "0.28", optional = true }
+rasn-atn-cpdlc = { version = "0.28", optional = true }
 
 [dev-dependencies]

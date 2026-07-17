@@ -113,10 +113,12 @@ pub struct Message {
 
 /// ARINC 622 payload decoded according to `Message::imi`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum Payload {
     /// ADS-C message with fully decoded tag list.
     Adsc(adsc::AdscMessage),
+    /// ADS-C disconnect request (`DIS`) with decoded reason.
+    AdscDisconnect(adsc::AdscDisconnectReason),
     /// FANS-1/A CPDLC message — shallow decoded header/element plus raw hex.
     Cpdlc(Box<cpdlc::CpdlcMessage>),
     /// AOC message (`AB1`) — raw hex payload.
@@ -280,6 +282,8 @@ pub fn parse_with_direction(text: &str, direction: MessageDirection) -> DecodeRe
         // can be as short as 4 hex chars (2 payload bytes + 2 CRC).
         Imi::Dr1 => 4,
         Imi::Ads => 4,
+        // DIS carries one reason byte followed by the two-byte CRC.
+        Imi::Dis => 6,
         _ => 8,
     };
     if payload_hex_full.len() < min_payload_hex_len || !payload_hex_full.len().is_multiple_of(2) {
@@ -300,10 +304,11 @@ pub fn parse_with_direction(text: &str, direction: MessageDirection) -> DecodeRe
     let payload_no_crc = &payload_hex_full[..payload_hex_full.len() - 4];
     let payload = match &raw.imi {
         Imi::Ads => Payload::Adsc(adsc::AdscMessage {
-            atsu_address: raw.atsu_address.clone(),
-            registration: raw.tail.registration.clone(),
             tags: adsc::parse_adsc_payload_hex_with_direction(payload_no_crc, direction)?,
         }),
+        Imi::Dis => {
+            Payload::AdscDisconnect(adsc::parse_adsc_disconnect_payload_hex(payload_no_crc)?)
+        }
         Imi::At1 => Payload::Cpdlc(Box::new(cpdlc::parse_cpdlc_payload_hex_with_direction(
             payload_no_crc,
             direction,
@@ -354,6 +359,18 @@ mod tests {
         assert_eq!(msg.imi, Imi::Ads);
         assert_eq!(msg.registration, "A7-ANR");
         assert!(matches!(msg.payload, Payload::Adsc(_)));
+    }
+
+    #[test]
+    fn test_parse_adsc_disconnect_envelope() {
+        let msg = parse("/NYCODYA.DIS.N861NW80FBFC").expect("DIS should parse");
+        assert_eq!(msg.atsu_address, "NYCODYA");
+        assert_eq!(msg.imi, Imi::Dis);
+        assert_eq!(msg.registration, "N861NW");
+        let Payload::AdscDisconnect(reason) = msg.payload else {
+            panic!("expected ADS-C disconnect payload");
+        };
+        assert_eq!(reason, adsc::AdscDisconnectReason::NormalDisconnect);
     }
 
     #[test]

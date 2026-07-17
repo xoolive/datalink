@@ -12,8 +12,11 @@ pub mod aoc;
 pub mod arinc620;
 pub mod arinc622;
 pub mod arinc623;
+#[cfg(feature = "rasn")]
 pub mod atn_b1;
+#[cfg(feature = "flate2")]
 pub mod boeing;
+#[cfg(feature = "flate2")]
 pub mod miam;
 
 use serde::{Deserialize, Serialize};
@@ -34,7 +37,9 @@ use self::arinc622::oceanic::OceanicClearance;
 use self::arinc622::Message as Arinc622Message;
 pub use self::arinc622::{Imi, Payload as Arinc622Payload};
 use self::arinc623::atis::{AtisDelivery, AtisRequest};
+#[cfg(feature = "flate2")]
 use self::boeing::ohma::OhmaMessage;
+#[cfg(feature = "flate2")]
 use self::miam::MiamMessage;
 
 /// Errors produced by payload-layer decoders (everything under `payload/`).
@@ -48,8 +53,10 @@ pub enum PayloadError {
     Arinc622(String),
     #[error("invalid Media Advisory: {0}")]
     MediaAdvisory(String),
+    #[cfg(feature = "flate2")]
     #[error("invalid MIAM frame: {0}")]
     Miam(String),
+    #[cfg(feature = "flate2")]
     #[error("invalid OHMA message: {0}")]
     Ohma(String),
     #[error("invalid SQ squitter: {0}")]
@@ -61,15 +68,17 @@ pub enum PayloadError {
 /// ARINC 622 messages keep their standards-defined header and IMI-dispatched
 /// payload together. Other variants are inferred from ACARS labels/sublabels.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum AcarsAppPayload {
     /// Standards-defined ARINC 622 envelope and decoded payload.
     Arinc622(Arinc622Message),
 
-    /// MIAM (Management of Integrated Avionics Maintenance) — label `MA` or `H1/T1`.
+    /// MIAM (Management of Integrated Avionics Maintenance) — label `MA`.
+    #[cfg(feature = "flate2")]
     Miam(MiamMessage),
 
     /// OHMA (Boeing 737 MAX health monitoring) — label `H1` sublabel `T1`.
+    #[cfg(feature = "flate2")]
     Ohma(OhmaMessage),
 
     /// ACARS `SA` Media Advisory — link established/lost notification.

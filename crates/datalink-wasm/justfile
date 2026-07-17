@@ -1,0 +1,30 @@
+_default: pkg
+
+pkg:
+  @just build_wasm bundler esm
+  @just build_wasm web web
+  @just build_wasm nodejs nodejs
+  @just copy_readme
+  @just copy_license
+  @just build_json
+
+clean:
+  rm -rf pkg
+
+pkgdir:
+  mkdir -p pkg
+
+build_wasm target outdir: pkgdir
+  wasm-pack build --target {{target}} --out-dir pkg/{{outdir}}
+
+copy_readme:
+  cp pkg/esm/README.md pkg/README.md
+
+copy_license:
+  cp LICENSE pkg/LICENSE
+
+build_json:
+  jq -s '.[0] * .[1]' pkg/esm/package.json package.json.patch > pkg/package.json
+
+test:
+  wasm-pack test --node

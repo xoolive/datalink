@@ -48,7 +48,7 @@ pub struct X25Packet {
 
 /// Inner protocol payload of an X.25 Data packet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum X25Inner {
     ClnpCompressed(ClnpCompressedPdu),
     #[serde(serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant")]
@@ -70,7 +70,7 @@ pub struct ClnpCompressedPdu {
 
 /// Inner content of a CLNP data PDU.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum ClnpInner {
     Idrp(IdrpPdu),
     Cotp(Vec<CotpPdu>),
@@ -143,7 +143,7 @@ pub struct CotpVarParam {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CotpParamValue {
     #[serde(serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant")]
     Bytes(Vec<u8>),
@@ -599,10 +599,15 @@ fn parse_cotp_tpdu(
             pdu.user_data = Some(user_data.to_vec());
             if code == COTP_TPDU_DT {
                 pdu.cpdlc = parse_cpdlc_user_data(user_data);
-                pdu.atn_cpdlc = crate::decode::payload::atn_b1::decode_cotp_user_data(user_data)
+                #[cfg(feature = "rasn")]
+                {
+                    pdu.atn_cpdlc = crate::decode::payload::atn_b1::decode_cotp_user_data(
+                        user_data,
+                    )
                     .map(|pdu| match pdu {
                         crate::decode::payload::atn_b1::AtnB1Pdu::Cpdlc(summary) => summary,
                     });
+                }
             }
         }
         user_data_end = full_buf.len();

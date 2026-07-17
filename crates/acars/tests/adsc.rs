@@ -54,15 +54,18 @@ fn opensky_adsc_message_samples_parse() {
             continue;
         };
 
-        let parsed = parse_adsc_app_text(&text)
-            .unwrap_or_else(|e| panic!("{name}: ADS-C parse failed: {e}"));
+        let message =
+            parse_and_dispatch(&text).unwrap_or_else(|e| panic!("{name}: ADS-C parse failed: {e}"));
 
-        assert_eq!(parsed.atsu_address, expect.atsu, "{name}: wrong ATSU");
+        assert_eq!(message.atsu_address, expect.atsu, "{name}: wrong ATSU");
         assert_eq!(
-            parsed.registration, expect.registration,
+            message.registration, expect.registration,
             "{name}: wrong registration"
         );
-        assert!(!parsed.tags.is_empty(), "{name}: expected non-empty tags");
+        let Payload::Adsc(adsc) = message.payload else {
+            panic!("{name}: expected ADS-C payload");
+        };
+        assert!(!adsc.tags.is_empty(), "{name}: expected non-empty tags");
     }
 }
 
@@ -75,8 +78,6 @@ fn earth_and_air_reference_decode_tag_specific_scales() {
     // Mach 0.837 into 837.0.
     let text = "/MGQCAYA.ADS.A6-BLJ0707E9392157890809021F0E0B30E940040F0CD9A280046DD7";
     let parsed = parse_adsc_app_text(text).expect("issue #17 sample should parse");
-    assert_eq!(parsed.atsu_address, "MGQCAYA");
-    assert_eq!(parsed.registration, "A6-BLJ");
 
     let earth = parsed
         .tags
@@ -103,6 +104,25 @@ fn earth_and_air_reference_decode_tag_specific_scales() {
     assert!(approx_eq(air.true_heading_degrees.unwrap(), 36.123046875));
     assert!(approx_eq(air.mach, 0.837));
     assert_eq!(air.vertical_speed_ft_per_min, 16);
+}
+
+#[test]
+fn adsc_serializes_with_external_payload_and_tag_keys() {
+    let text = "/MGQCAYA.ADS.A6-BLJ0707E9392157890809021F0E0B30E940040F0CD9A280046DD7";
+    let message = parse_and_dispatch(text).expect("issue #17 sample should parse");
+    let json = serde_json::to_value(message).expect("ARINC 622 should serialize");
+
+    assert!(json["payload"].get("kind").is_none());
+    let data = json["payload"]["adsc"]
+        .as_array()
+        .expect("ADS-C data array");
+    assert!(data.iter().any(|tag| tag.get("basic_report").is_some()));
+    assert!(data
+        .iter()
+        .any(|tag| tag.get("earth_reference_data").is_some()));
+    assert!(data
+        .iter()
+        .any(|tag| tag.get("air_reference_data").is_some()));
 }
 
 fn approx_eq(a: f64, b: f64) -> bool {
@@ -288,18 +308,10 @@ fn verify_json_output_schema() {
             panic!("Expected Adsc variant");
         };
         let msg_json = serde_json::to_value(&adsc_msg).expect("adsc should serialize");
-        assert!(
-            msg_json.get("atsu_address").is_some(),
-            "missing atsu_address in ADS-C"
-        );
-        assert!(
-            msg_json.get("registration").is_some(),
-            "missing registration in ADS-C"
-        );
-        assert!(msg_json.get("tags").is_some(), "missing tags in ADS-C");
-        if let Some(tags_array) = msg_json.get("tags").and_then(|v| v.as_array()) {
-            assert!(!tags_array.is_empty(), "tags should not be empty");
-        }
+        let data = msg_json
+            .as_array()
+            .expect("ADS-C should serialize transparently as its data array");
+        assert!(!data.is_empty(), "ADS-C data should not be empty");
     }
 }
 
@@ -331,20 +343,14 @@ fn end_to_end_acars_h1_arinc622_adsc_json_chain() {
         let Payload::Adsc(adsc_msg) = message.payload else {
             panic!("Expected Adsc payload");
         };
-        assert_eq!(
-            adsc_msg.registration, expect.registration,
-            "wrong registration in ADS-C"
-        );
-        assert_eq!(adsc_msg.atsu_address, expect.atsu, "wrong ATSU in ADS-C");
         assert!(
             !adsc_msg.tags.is_empty(),
             "ADS-C message should have decoded tags"
         );
         let json = serde_json::to_value(&adsc_msg).expect("JSON serialization should work");
-        assert!(json.get("tags").is_some(), "JSON should include tags");
         assert!(
-            json.get("registration").is_some(),
-            "JSON should include registration"
+            json.as_array().is_some_and(|data| !data.is_empty()),
+            "ADS-C should serialize as a non-empty data array"
         );
     }
 }

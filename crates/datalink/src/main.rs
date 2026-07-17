@@ -13,7 +13,7 @@ use datalink::event;
 use crate::event::{Bearer, DecodedEvent, ProtocolMessage, SourceClass, SourceMetadata};
 use acars::decode::acars::{parse_acars_frame, MessageDirection};
 use acars::decode::avlc::parse_avlc_frame;
-use acars::decode::payload::arinc622::adsc::parse_adsc_app_text;
+use acars::decode::payload::arinc622::parse_with_direction as parse_arinc622_with_direction;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -72,6 +72,8 @@ enum DecodeCommand {
     Adsc {
         #[arg(help = "ADS-C app text payload")]
         payload: String,
+        #[arg(short, long, value_enum, default_value_t = Direction::Unknown)]
+        direction: Direction,
     },
 }
 
@@ -143,17 +145,14 @@ fn run_decode(command: DecodeCommand) -> anyhow::Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&event)?);
         }
-        DecodeCommand::Adsc { payload } => {
-            let adsc = parse_adsc_app_text(payload.trim())?;
-
-            let acars_app = acars::decode::payload::AcarsAppPayload::Arinc622(
-                acars::decode::payload::arinc622::Message {
-                    atsu_address: adsc.atsu_address.clone(),
-                    imi: acars::decode::payload::arinc622::Imi::Ads,
-                    registration: adsc.registration.clone(),
-                    payload: acars::decode::payload::arinc622::Payload::Adsc(adsc.clone()),
-                },
-            );
+        DecodeCommand::Adsc { payload, direction } => {
+            let dir = match direction {
+                Direction::Unknown => MessageDirection::Unknown,
+                Direction::Uplink => MessageDirection::GroundToAir,
+                Direction::Downlink => MessageDirection::AirToGround,
+            };
+            let message = parse_arinc622_with_direction(payload.trim(), dir)?;
+            let acars_app = acars::decode::payload::AcarsAppPayload::Arinc622(message);
 
             let pmsg = ProtocolMessage::App(Box::new(acars_app));
 

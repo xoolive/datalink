@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/acars", "crates/datalink"]
+members = ["crates/acars", "crates/datalink", "crates/datalink-wasm"]
 resolver = "2"
 
 [workspace.package]

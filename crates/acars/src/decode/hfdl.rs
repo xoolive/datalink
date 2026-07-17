@@ -29,7 +29,7 @@ pub struct HfdlMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum HfdlPdu {
     Spdu(Spdu),
     Mpdu(Mpdu),
@@ -51,7 +51,7 @@ pub struct Spdu {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "direction", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum Mpdu {
     Uplink(UplinkMpdu),
     Downlink(DownlinkMpdu),
@@ -98,7 +98,7 @@ pub struct Lpdu {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum LpduData {
     Hfnpdu { hfnpdu: Box<HfnpduEnvelope> },
     IcaoReason { icao24: String, reason_code: u8 },
@@ -115,7 +115,7 @@ pub struct HfnpduEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum Hfnpdu {
     SystemTablePartial {
         total_pdu_count: u8,

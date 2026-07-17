@@ -1,3 +1,5 @@
+#![cfg(feature = "flate2")]
+
 /// Integration test: ACARS multi-block reassembly + OHMA decode.
 ///
 /// This test simulates the full pipeline for a multi-block OHMA message observed

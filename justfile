@@ -5,3 +5,9 @@ fmt:
 
 docs-serve:
   uvx zensical serve
+
+wasm:
+  just -f crates/datalink-wasm/justfile
+
+wasm-test:
+  just -f crates/datalink-wasm/justfile test

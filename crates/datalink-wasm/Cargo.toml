@@ -1,0 +1,31 @@
+[package]
+name = "datalink-wasm"
+description = "WebAssembly bindings for ACARS, ARINC 622, ADS-C, and FANS-1/A CPDLC decoding"
+repository = "https://github.com/xoolive/datalink"
+keywords = ["aircraft", "ACARS", "ADS-C", "CPDLC", "WebAssembly"]
+readme = "readme.md"
+authors.workspace = true
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["console_error_panic_hook"]
+
+[dependencies]
+acars = { version = "0.2.0", path = "../acars", default-features = false }
+console_error_panic_hook = { version = "0.1", optional = true }
+hex.workspace = true
+serde.workspace = true
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+serde_json.workspace = true
+wasm-bindgen-test = "0.3"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

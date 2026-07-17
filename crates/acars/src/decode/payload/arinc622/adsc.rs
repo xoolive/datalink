@@ -16,17 +16,40 @@ use crate::decode::payload::PayloadError;
 use crate::decode::{DecodeError, DecodeResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
 pub struct AdscMessage {
-    /// Ground station address that requested this ADS-C report.
-    pub atsu_address: String,
-    /// Aircraft registration (e.g. `"A7-ANR"`).
-    pub registration: String,
-    /// Decoded ADS-C tag list.
+    /// Decoded ADS-C tag list, serialized transparently as the ADS-C payload.
     pub tags: Vec<AdscTag>,
 }
 
+/// ADS-C disconnect (`DIS`) reason carried in the high nibble of its payload byte.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdscDisconnectReason {
+    ReasonNotSpecified,
+    Congestion,
+    ApplicationNotAvailable,
+    NormalDisconnect,
+    Unknown,
+}
+
+pub fn parse_adsc_disconnect_payload_hex(payload_hex: &str) -> DecodeResult<AdscDisconnectReason> {
+    let bytes =
+        hex::decode(payload_hex).map_err(|_| DecodeError::InvalidPayload(PayloadError::Adsc))?;
+    let [raw] = bytes.as_slice() else {
+        return Err(DecodeError::InvalidPayload(PayloadError::Adsc));
+    };
+    Ok(match raw >> 4 {
+        0 => AdscDisconnectReason::ReasonNotSpecified,
+        1 => AdscDisconnectReason::Congestion,
+        2 => AdscDisconnectReason::ApplicationNotAvailable,
+        8 => AdscDisconnectReason::NormalDisconnect,
+        _ => AdscDisconnectReason::Unknown,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum AdscTag {
     // Downlink tags.
     Acknowledgement { contract_number: u8 },
@@ -50,23 +73,32 @@ pub enum AdscTag {
     // Uplink tags.
     CancelAllContracts,
     CancelContract { contract_number: u8 },
-    PeriodicContractRequest(AdscContractRequest),
-    EventContractRequest(AdscContractRequest),
-    EmergencyPeriodicContractRequest(AdscContractRequest),
+    PeriodicContractRequest(AdscPeriodicContractRequest),
+    EventContractRequest(AdscEventContractRequest),
+    EmergencyPeriodicContractRequest(AdscPeriodicContractRequest),
 }
 
+/// A periodic or emergency-periodic contract.
+///
+/// The reporting interval controls the cadence of the basic report. Additional
+/// report groups are requested independently and carry their own moduli.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AdscContractRequest {
+pub struct AdscPeriodicContractRequest {
     pub contract_number: u8,
-    pub groups: Vec<AdscContractGroup>,
+    pub report_interval_secs: u32,
+    pub requested_groups: Vec<AdscPeriodicReportGroup>,
+}
+
+/// An event contract containing one or more independent event triggers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdscEventContractRequest {
+    pub contract_number: u8,
+    pub events: Vec<AdscEventTrigger>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
-pub enum AdscContractGroup {
-    ReportInterval {
-        interval_secs: u32,
-    },
+#[serde(rename_all = "snake_case")]
+pub enum AdscPeriodicReportGroup {
     FlightId {
         modulus: u8,
     },
@@ -85,24 +117,19 @@ pub enum AdscContractGroup {
     AirframeId {
         modulus: u8,
     },
-    LateralDeviationChange {
-        threshold_nm: f64,
-    },
-    VerticalSpeedChange {
-        threshold_ft_per_min: i32,
-    },
-    AltitudeRange {
-        ceiling_ft: i32,
-        floor_ft: i32,
-    },
-    ReportWaypointChanges,
     AircraftIntentData {
         modulus: u8,
         projection_time_mins: u8,
     },
-    Unknown {
-        tag: u8,
-    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdscEventTrigger {
+    LateralDeviationChange { threshold_nm: f64 },
+    VerticalSpeedChange { threshold_ft_per_min: i32 },
+    AltitudeRange { ceiling_ft: i32, floor_ft: i32 },
+    WaypointChange,
 }
 
 impl AdscTag {
@@ -135,10 +162,54 @@ impl AdscTag {
     }
 }
 
+/// Reason carried by an ADS-C negative acknowledgement (Tag 4). Mirrors the
+/// FANS-1/A / libacars reason-code table; reasons 1, 2, and 7 also carry an
+/// extension byte (erroneous octet or tag number) kept separately as
+/// `extension`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdscNackReason {
+    DuplicateGroupTag,
+    DuplicateReportingIntervalTag,
+    EventContractRequestWithNoData,
+    ImproperOperationalModeTag,
+    CancelRequestOfNonexistentContract,
+    RequestedContractAlreadyExists,
+    UndefinedContractRequestTag,
+    UndefinedError,
+    NotEnoughDataInRequest,
+    InvalidAltitudeRange,
+    VerticalSpeedThresholdIsZero,
+    AircraftIntentProjectionTimeIsZero,
+    LateralDeviationThresholdIsZero,
+    Unknown { code: u8 },
+}
+
+impl AdscNackReason {
+    pub fn from_byte(code: u8) -> Self {
+        match code {
+            1 => Self::DuplicateGroupTag,
+            2 => Self::DuplicateReportingIntervalTag,
+            3 => Self::EventContractRequestWithNoData,
+            4 => Self::ImproperOperationalModeTag,
+            5 => Self::CancelRequestOfNonexistentContract,
+            6 => Self::RequestedContractAlreadyExists,
+            7 => Self::UndefinedContractRequestTag,
+            8 => Self::UndefinedError,
+            9 => Self::NotEnoughDataInRequest,
+            10 => Self::InvalidAltitudeRange,
+            11 => Self::VerticalSpeedThresholdIsZero,
+            12 => Self::AircraftIntentProjectionTimeIsZero,
+            13 => Self::LateralDeviationThresholdIsZero,
+            other => Self::Unknown { code: other },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdscNegativeAcknowledgement {
     pub contract_request_number: u8,
-    pub reason: u8,
+    pub reason: AdscNackReason,
     pub extension: Option<u8>,
 }
 
@@ -148,9 +219,50 @@ pub struct AdscNoncomplianceNotification {
     pub groups: Vec<AdscNoncomplianceGroup>,
 }
 
+/// Which request sub-tag a non-compliance notification refers to. This is a
+/// name-only mirror of the request-group tag numbers (10–21); it carries no
+/// payload, so it is kept separate from the payload-bearing request enums.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdscNoncompliantTag {
+    LateralDeviationChange,
+    ReportInterval,
+    FlightId,
+    PredictedRoute,
+    EarthReferenceData,
+    AirReferenceData,
+    MeteoData,
+    AirframeId,
+    VerticalSpeedChange,
+    AltitudeRange,
+    ReportWaypointChanges,
+    AircraftIntentData,
+    Unknown { tag: u8 },
+}
+
+impl AdscNoncompliantTag {
+    pub fn from_byte(tag: u8) -> Self {
+        match tag {
+            10 => Self::LateralDeviationChange,
+            11 => Self::ReportInterval,
+            12 => Self::FlightId,
+            13 => Self::PredictedRoute,
+            14 => Self::EarthReferenceData,
+            15 => Self::AirReferenceData,
+            16 => Self::MeteoData,
+            17 => Self::AirframeId,
+            18 => Self::VerticalSpeedChange,
+            19 => Self::AltitudeRange,
+            20 => Self::ReportWaypointChanges,
+            21 => Self::AircraftIntentData,
+            other => Self::Unknown { tag: other },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdscNoncomplianceGroup {
-    pub noncompliant_tag: u8,
+    pub noncompliant_tag: AdscNoncompliantTag,
     pub is_unrecognized: bool,
     pub is_whole_group_unavailable: bool,
     pub parameters: Vec<u8>,
@@ -169,7 +281,7 @@ pub struct AdscBasicReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdscFlightId {
-    pub id: String,
+    pub callsign: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -216,20 +328,27 @@ fn is_false(value: &bool) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AdscMeteo {
     pub wind_speed_kt: f64,
-    pub wind_direction_true_degrees: f64,
+    /// `None` when `wind_direction_invalid` is true; the field is then omitted
+    /// from JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wind_direction_true_degrees: Option<f64>,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub wind_direction_invalid: bool,
     pub temperature_c: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdscAirframeId {
-    pub icao_hex: [u8; 3],
+    pub icao24: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AdscIntermediateProjection {
     pub distance_nm: f64,
-    pub track_degrees: f64,
+    /// `None` when `track_invalid` is true; the field is then omitted from JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_degrees: Option<f64>,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub track_invalid: bool,
     pub altitude_ft: i32,
     pub eta_seconds: u16,
@@ -386,43 +505,11 @@ pub fn parse_adsc_app_text_with_direction(
     txt: &str,
     direction: MessageDirection,
 ) -> DecodeResult<AdscMessage> {
-    let text = txt.trim();
-    if !text.starts_with('/') {
-        return Err(DecodeError::InvalidPayload(PayloadError::Adsc));
+    let message = super::parse_with_direction(txt, direction)?;
+    match message.payload {
+        super::Payload::Adsc(adsc) => Ok(adsc),
+        _ => Err(DecodeError::InvalidPayload(PayloadError::Adsc)),
     }
-
-    let marker = ".ADS.";
-    let marker_idx = text
-        .find(marker)
-        .ok_or(DecodeError::InvalidPayload(PayloadError::Adsc))?;
-    if marker_idx < 2 {
-        return Err(DecodeError::InvalidPayload(PayloadError::Adsc));
-    }
-
-    let atsu = &text[1..marker_idx];
-    if atsu.is_empty() {
-        return Err(DecodeError::InvalidPayload(PayloadError::Adsc));
-    }
-
-    let reg_plus_payload = text[marker_idx + marker.len()..].trim_start_matches('.');
-    let split_at = find_registration_split(reg_plus_payload)
-        .ok_or(DecodeError::InvalidPayload(PayloadError::Adsc))?;
-    let registration = reg_plus_payload[..split_at].to_string();
-    let payload_hex = reg_plus_payload[split_at..].to_ascii_uppercase();
-    if payload_hex.len() < 4 || !payload_hex.len().is_multiple_of(2) {
-        return Err(DecodeError::InvalidPayload(PayloadError::Adsc));
-    }
-
-    let crc_start = payload_hex.len() - 4;
-    let payload_no_crc_hex = payload_hex[..crc_start].to_string();
-
-    let tags = parse_adsc_payload_hex_with_direction(&payload_no_crc_hex, direction)?;
-
-    Ok(AdscMessage {
-        atsu_address: atsu.to_string(),
-        registration,
-        tags,
-    })
 }
 
 pub fn parse_adsc_payload_hex(payload_no_crc_hex: &str) -> DecodeResult<Vec<AdscTag>> {
@@ -471,15 +558,15 @@ pub fn parse_adsc_payload_bytes_with_direction(
                         contract_number: data[0],
                     });
                 }
-                7..=9 => {
-                    let req = parse_contract_request(buf, &mut idx)?;
-                    tags.push(match tag {
-                        7 => AdscTag::PeriodicContractRequest(req),
-                        8 => AdscTag::EventContractRequest(req),
-                        9 => AdscTag::EmergencyPeriodicContractRequest(req),
-                        _ => unreachable!(),
-                    });
-                }
+                7 => tags.push(AdscTag::PeriodicContractRequest(
+                    parse_periodic_contract_request(buf, &mut idx)?,
+                )),
+                8 => tags.push(AdscTag::EventContractRequest(parse_event_contract_request(
+                    buf, &mut idx,
+                )?)),
+                9 => tags.push(AdscTag::EmergencyPeriodicContractRequest(
+                    parse_periodic_contract_request(buf, &mut idx)?,
+                )),
                 _ => return Err(DecodeError::InvalidPayload(PayloadError::Adsc)),
             }
             continue;
@@ -504,7 +591,7 @@ pub fn parse_adsc_payload_bytes_with_direction(
                 tags.push(AdscTag::NegativeAcknowledgement(
                     AdscNegativeAcknowledgement {
                         contract_request_number: raw.contract_request_number,
-                        reason: raw.reason,
+                        reason: AdscNackReason::from_byte(raw.reason),
                         extension,
                     },
                 ));
@@ -538,7 +625,7 @@ pub fn parse_adsc_payload_bytes_with_direction(
                     }
 
                     groups.push(AdscNoncomplianceGroup {
-                        noncompliant_tag: raw.noncompliant_tag,
+                        noncompliant_tag: AdscNoncompliantTag::from_byte(raw.noncompliant_tag),
                         is_unrecognized,
                         is_whole_group_unavailable,
                         parameters,
@@ -577,7 +664,7 @@ pub fn parse_adsc_payload_bytes_with_direction(
                 .collect::<String>()
                 .trim_end()
                 .to_string();
-                tags.push(AdscTag::FlightId(AdscFlightId { id }));
+                tags.push(AdscTag::FlightId(AdscFlightId { callsign: id }));
             }
             13 => {
                 let (_, raw) = PredictedRouteRaw::from_bytes((take(buf, &mut idx, 17)?, 0))
@@ -627,27 +714,30 @@ pub fn parse_adsc_payload_bytes_with_direction(
             16 => {
                 let (_, raw) = MeteoRaw::from_bytes((take(buf, &mut idx, 4)?, 0))
                     .map_err(|e| DecodeError::Deku(e.to_string()))?;
+                let wind_direction_invalid = raw.wind_direction_invalid != 0;
                 tags.push(AdscTag::MeteoData(AdscMeteo {
                     wind_speed_kt: decode_speed(raw.wind_speed_raw),
-                    wind_direction_true_degrees: decode_wind_direction(raw.wind_direction_raw),
-                    wind_direction_invalid: raw.wind_direction_invalid != 0,
+                    wind_direction_true_degrees: (!wind_direction_invalid)
+                        .then_some(decode_wind_direction(raw.wind_direction_raw)),
+                    wind_direction_invalid,
                     temperature_c: decode_temperature(raw.temperature_raw),
                 }));
             }
             17 => {
                 let data = take(buf, &mut idx, 3)?;
                 tags.push(AdscTag::AirframeId(AdscAirframeId {
-                    icao_hex: [data[0], data[1], data[2]],
+                    icao24: format!("{:02x}{:02x}{:02x}", data[0], data[1], data[2]),
                 }));
             }
             22 => {
                 let (_, raw) = IntermediateProjectionRaw::from_bytes((take(buf, &mut idx, 8)?, 0))
                     .map_err(|e| DecodeError::Deku(e.to_string()))?;
+                let track_invalid = raw.track_invalid != 0;
                 tags.push(AdscTag::IntermediateProjection(
                     AdscIntermediateProjection {
                         distance_nm: decode_distance(raw.distance_raw),
-                        track_degrees: decode_heading(raw.track_raw),
-                        track_invalid: raw.track_invalid != 0,
+                        track_degrees: (!track_invalid).then_some(decode_heading(raw.track_raw)),
+                        track_invalid,
                         altitude_ft: decode_altitude(raw.altitude_raw),
                         eta_seconds: raw.eta_seconds,
                     },
@@ -670,88 +760,111 @@ pub fn parse_adsc_payload_bytes_with_direction(
     Ok(tags)
 }
 
-fn parse_contract_request(buf: &[u8], idx: &mut usize) -> DecodeResult<AdscContractRequest> {
+fn parse_periodic_contract_request(
+    buf: &[u8],
+    idx: &mut usize,
+) -> DecodeResult<AdscPeriodicContractRequest> {
     let contract_number = take(buf, idx, 1)?[0];
-    let mut groups = Vec::new();
-    // Request sub-tags follow until end of buffer or an unknown tag id appears.
-    // Unknown values are treated as the start of the next uplink tag so partial
-    // contract requests can still be decoded.
-    const KNOWN_REQUEST_TAGS: &[u8] = &[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
-    while *idx < buf.len() {
-        let sub = buf[*idx];
-        if !KNOWN_REQUEST_TAGS.contains(&sub) {
-            break; // not a request tag — stop and let the outer loop handle it
-        }
-        *idx += 1;
-        let group = match sub {
-            10 => {
-                let b = take(buf, idx, 1)?[0];
-                AdscContractGroup::LateralDeviationChange {
-                    threshold_nm: b as f64 / 8.0,
-                }
-            }
-            11 => {
-                let b = take(buf, idx, 1)?[0];
-                let sf_raw = (b & 0xc0) >> 6;
-                let sf: u32 = match sf_raw {
-                    2 => 8,
-                    3 => 64,
-                    v => v as u32,
-                };
-                let rate = (b & 0x3f) as u32;
-                AdscContractGroup::ReportInterval {
-                    interval_secs: sf * (rate + 1),
-                }
-            }
-            12 => AdscContractGroup::FlightId {
-                modulus: take(buf, idx, 1)?[0],
+    if buf.get(*idx) != Some(&11) {
+        return Err(DecodeError::InvalidPayload(PayloadError::Adsc));
+    }
+    *idx += 1;
+    let report_interval_secs = decode_report_interval(take(buf, idx, 1)?[0]);
+    let mut requested_groups = Vec::new();
+
+    while let Some(&tag) = buf.get(*idx) {
+        let group = match tag {
+            12 => AdscPeriodicReportGroup::FlightId {
+                modulus: take_tagged_u8(buf, idx)?,
             },
-            13 => AdscContractGroup::PredictedRoute {
-                modulus: take(buf, idx, 1)?[0],
+            13 => AdscPeriodicReportGroup::PredictedRoute {
+                modulus: take_tagged_u8(buf, idx)?,
             },
-            14 => AdscContractGroup::EarthReferenceData {
-                modulus: take(buf, idx, 1)?[0],
+            14 => AdscPeriodicReportGroup::EarthReferenceData {
+                modulus: take_tagged_u8(buf, idx)?,
             },
-            15 => AdscContractGroup::AirReferenceData {
-                modulus: take(buf, idx, 1)?[0],
+            15 => AdscPeriodicReportGroup::AirReferenceData {
+                modulus: take_tagged_u8(buf, idx)?,
             },
-            16 => AdscContractGroup::MeteoData {
-                modulus: take(buf, idx, 1)?[0],
+            16 => AdscPeriodicReportGroup::MeteoData {
+                modulus: take_tagged_u8(buf, idx)?,
             },
-            17 => AdscContractGroup::AirframeId {
-                modulus: take(buf, idx, 1)?[0],
+            17 => AdscPeriodicReportGroup::AirframeId {
+                modulus: take_tagged_u8(buf, idx)?,
             },
-            18 => {
-                let b = take(buf, idx, 1)?[0] as i8;
-                AdscContractGroup::VerticalSpeedChange {
-                    threshold_ft_per_min: b as i32 * 64,
-                }
-            }
-            19 => {
-                let data = take(buf, idx, 4)?;
-                let ceiling_raw = ((data[0] as u16) << 8) | data[1] as u16;
-                let floor_raw = ((data[2] as u16) << 8) | data[3] as u16;
-                AdscContractGroup::AltitudeRange {
-                    ceiling_ft: decode_altitude_u16(ceiling_raw),
-                    floor_ft: decode_altitude_u16(floor_raw),
-                }
-            }
-            20 => AdscContractGroup::ReportWaypointChanges,
             21 => {
+                *idx += 1;
                 let data = take(buf, idx, 2)?;
-                AdscContractGroup::AircraftIntentData {
+                AdscPeriodicReportGroup::AircraftIntentData {
                     modulus: data[0],
                     projection_time_mins: data[1],
                 }
             }
-            other => AdscContractGroup::Unknown { tag: other },
+            _ => break,
         };
-        groups.push(group);
+        requested_groups.push(group);
     }
-    Ok(AdscContractRequest {
+
+    Ok(AdscPeriodicContractRequest {
         contract_number,
-        groups,
+        report_interval_secs,
+        requested_groups,
     })
+}
+
+fn parse_event_contract_request(
+    buf: &[u8],
+    idx: &mut usize,
+) -> DecodeResult<AdscEventContractRequest> {
+    let contract_number = take(buf, idx, 1)?[0];
+    let mut events = Vec::new();
+
+    while let Some(&tag) = buf.get(*idx) {
+        let event = match tag {
+            10 => AdscEventTrigger::LateralDeviationChange {
+                threshold_nm: take_tagged_u8(buf, idx)? as f64 / 8.0,
+            },
+            18 => AdscEventTrigger::VerticalSpeedChange {
+                threshold_ft_per_min: (take_tagged_u8(buf, idx)? as i8) as i32 * 64,
+            },
+            19 => {
+                *idx += 1;
+                let data = take(buf, idx, 4)?;
+                let ceiling_raw = ((data[0] as u16) << 8) | data[1] as u16;
+                let floor_raw = ((data[2] as u16) << 8) | data[3] as u16;
+                AdscEventTrigger::AltitudeRange {
+                    ceiling_ft: decode_altitude_u16(ceiling_raw),
+                    floor_ft: decode_altitude_u16(floor_raw),
+                }
+            }
+            20 => {
+                *idx += 1;
+                AdscEventTrigger::WaypointChange
+            }
+            _ => break,
+        };
+        events.push(event);
+    }
+
+    Ok(AdscEventContractRequest {
+        contract_number,
+        events,
+    })
+}
+
+fn take_tagged_u8(buf: &[u8], idx: &mut usize) -> DecodeResult<u8> {
+    *idx += 1;
+    Ok(take(buf, idx, 1)?[0])
+}
+
+fn decode_report_interval(encoded: u8) -> u32 {
+    let scaling_factor = match (encoded & 0xc0) >> 6 {
+        2 => 8,
+        3 => 64,
+        value => value as u32,
+    };
+    let rate = (encoded & 0x3f) as u32;
+    scaling_factor * (rate + 1)
 }
 
 fn decode_altitude_u16(raw: u16) -> i32 {
@@ -856,31 +969,6 @@ fn take<'a>(buf: &'a [u8], idx: &mut usize, count: usize) -> DecodeResult<&'a [u
     Ok(out)
 }
 
-fn find_registration_split(value: &str) -> Option<usize> {
-    let mut fallback: Option<usize> = None;
-    for idx in 0..=value.len() {
-        let reg = &value[..idx];
-        let payload = &value[idx..];
-        if payload.len() >= 4
-            && payload.len().is_multiple_of(2)
-            && payload.bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            if fallback.is_none() {
-                fallback = Some(idx);
-            }
-            let reg_len = reg.len();
-            if (6..=7).contains(&reg_len)
-                && reg
-                    .bytes()
-                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
-            {
-                return Some(idx);
-            }
-        }
-    }
-    fallback
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -892,8 +980,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(msg.atsu_address, "BDOCAYA");
-        assert_eq!(msg.registration, "A7-ANR");
         assert!(!msg.tags.is_empty());
         assert_eq!(msg.tags[0].id(), 7);
     }
@@ -910,29 +996,24 @@ mod tests {
             MessageDirection::GroundToAir,
         )
         .unwrap();
-        assert_eq!(msg.atsu_address, "UPGCAYA");
-        assert_eq!(msg.registration, "B-324P");
         assert_eq!(msg.tags.len(), 1);
         let AdscTag::PeriodicContractRequest(req) = &msg.tags[0] else {
             panic!("expected PeriodicContractRequest, got {:?}", msg.tags[0]);
         };
         assert_eq!(req.contract_number, 2);
-        assert_eq!(req.groups.len(), 4);
+        assert_eq!(req.report_interval_secs, 896);
+        assert_eq!(req.requested_groups.len(), 3);
         assert!(matches!(
-            &req.groups[0],
-            AdscContractGroup::ReportInterval { interval_secs: 896 }
+            &req.requested_groups[0],
+            AdscPeriodicReportGroup::PredictedRoute { modulus: 1 }
         ));
         assert!(matches!(
-            &req.groups[1],
-            AdscContractGroup::PredictedRoute { modulus: 1 }
+            &req.requested_groups[1],
+            AdscPeriodicReportGroup::EarthReferenceData { modulus: 1 }
         ));
         assert!(matches!(
-            &req.groups[2],
-            AdscContractGroup::EarthReferenceData { modulus: 1 }
-        ));
-        assert!(matches!(
-            &req.groups[3],
-            AdscContractGroup::MeteoData { modulus: 1 }
+            &req.requested_groups[2],
+            AdscPeriodicReportGroup::MeteoData { modulus: 1 }
         ));
     }
 
@@ -952,18 +1033,188 @@ mod tests {
             panic!("expected PeriodicContractRequest");
         };
         assert_eq!(req.contract_number, 3);
-        assert_eq!(req.groups.len(), 7);
         // interval: 0x97 -> sf=2->8, rate=0x17=23 -> 8*(23+1)=192
+        assert_eq!(req.report_interval_secs, 192);
+        assert_eq!(req.requested_groups.len(), 6);
         assert!(matches!(
-            &req.groups[0],
-            AdscContractGroup::ReportInterval { interval_secs: 192 }
-        ));
-        assert!(matches!(
-            req.groups.last().unwrap(),
-            AdscContractGroup::AircraftIntentData {
+            req.requested_groups.last().unwrap(),
+            AdscPeriodicReportGroup::AircraftIntentData {
                 modulus: 0,
                 projection_time_mins: 1
             }
         ));
+    }
+
+    #[test]
+    fn parse_adsc_uplink_event_triggers() {
+        use crate::decode::acars::MessageDirection;
+        // contract_num=5, independent waypoint-change and lateral-deviation
+        // event triggers; the latter has a 5 NM threshold.
+        let msg = parse_adsc_app_text_with_direction(
+            "/OAKODYA.ADS.N2645U0805140A28E574",
+            MessageDirection::GroundToAir,
+        )
+        .unwrap();
+        let AdscTag::EventContractRequest(req) = &msg.tags[0] else {
+            panic!("expected EventContractRequest");
+        };
+        assert_eq!(req.contract_number, 5);
+        assert_eq!(req.events.len(), 2);
+        assert!(matches!(req.events[0], AdscEventTrigger::WaypointChange));
+        assert!(matches!(
+            req.events[1],
+            AdscEventTrigger::LateralDeviationChange { threshold_nm: 5.0 }
+        ));
+    }
+
+    #[test]
+    fn parse_adsc_uplink_periodic_and_event_requests() {
+        use crate::decode::acars::MessageDirection;
+        let msg = parse_adsc_app_text_with_direction(
+            "/ANCATYA.ADS.N704GT07000BC80C000D010E0110000F011500010801140A288520",
+            MessageDirection::GroundToAir,
+        )
+        .unwrap();
+        assert_eq!(msg.tags.len(), 2);
+        let AdscTag::PeriodicContractRequest(periodic) = &msg.tags[0] else {
+            panic!("expected PeriodicContractRequest");
+        };
+        assert_eq!(periodic.contract_number, 0);
+        assert_eq!(periodic.report_interval_secs, 576);
+        let AdscTag::EventContractRequest(event) = &msg.tags[1] else {
+            panic!("expected EventContractRequest");
+        };
+        assert_eq!(event.contract_number, 1);
+        assert_eq!(event.events.len(), 2);
+    }
+
+    #[test]
+    fn reject_periodic_request_without_reporting_interval() {
+        use crate::decode::acars::MessageDirection;
+        let result =
+            parse_adsc_payload_bytes_with_direction(&[7, 1, 13, 1], MessageDirection::GroundToAir);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_emergency_periodic_request() {
+        use crate::decode::acars::MessageDirection;
+        let tags = parse_adsc_payload_bytes_with_direction(
+            &[9, 3, 11, 0xcd, 13, 1],
+            MessageDirection::GroundToAir,
+        )
+        .unwrap();
+        let AdscTag::EmergencyPeriodicContractRequest(request) = &tags[0] else {
+            panic!("expected EmergencyPeriodicContractRequest");
+        };
+        assert_eq!(request.contract_number, 3);
+        assert_eq!(request.report_interval_secs, 896);
+        assert!(matches!(
+            request.requested_groups[0],
+            AdscPeriodicReportGroup::PredictedRoute { modulus: 1 }
+        ));
+    }
+
+    #[test]
+    fn flight_id_is_serialized_as_callsign() {
+        // /CCUCAYA.ADS.A6-BNC... carries a flight-id group with ETD403.
+        let msg = parse_adsc_app_text(
+            "/CCUCAYA.ADS.A6-BNC0301070B0B0A0CA048C99D2297170B88B1FC2188CA04AD0C154134C338200D0B14DA0B6088CA005B0B63BA00F508CA000E65110340040F64F9A740041013143EAC1189653AB2C1",
+        )
+        .unwrap();
+        let fid = msg
+            .tags
+            .iter()
+            .find_map(|t| match t {
+                AdscTag::FlightId(d) => Some(d),
+                _ => None,
+            })
+            .expect("expected a flight-id group");
+        assert_eq!(fid.callsign, "ETD403");
+    }
+
+    #[test]
+    fn airframe_id_is_serialized_as_icao24_lowercase_hex() {
+        // A6-BNC / ETD403 => UAE block 0x896000–0x896FFF.
+        let msg = parse_adsc_app_text(
+            "/CCUCAYA.ADS.A6-BNC0301070B0B0A0CA048C99D2297170B88B1FC2188CA04AD0C154134C338200D0B14DA0B6088CA005B0B63BA00F508CA000E65110340040F64F9A740041013143EAC1189653AB2C1",
+        )
+        .unwrap();
+        let aid = msg
+            .tags
+            .iter()
+            .find_map(|t| match t {
+                AdscTag::AirframeId(d) => Some(d),
+                _ => None,
+            })
+            .expect("expected an airframe-id group");
+        assert_eq!(aid.icao24, "89653a");
+    }
+
+    #[test]
+    fn noncompliance_tag_is_semantic_enum() {
+        // /SEZCAYA.ADS.HZ-ARC... reports the reporting-interval group (tag 11)
+        // as whole-group-unavailable.
+        let msg = parse_adsc_app_text(
+            "/SEZCAYA.ADS.HZ-ARC03010501010B4007F8D93908C88946C9519F0DF8E391086689470027FA7190FA510947000E6E60F30000AD7C",
+        )
+        .unwrap();
+        let nc = msg
+            .tags
+            .iter()
+            .find_map(|t| match t {
+                AdscTag::NoncomplianceNotification(d) => Some(d),
+                _ => None,
+            })
+            .expect("expected a non-compliance notification");
+        assert_eq!(nc.groups.len(), 1);
+        assert_eq!(
+            nc.groups[0].noncompliant_tag,
+            AdscNoncompliantTag::ReportInterval
+        );
+        assert!(nc.groups[0].is_whole_group_unavailable);
+        assert!(!nc.groups[0].is_unrecognized);
+    }
+
+    #[test]
+    fn intermediate_projection_keeps_track_invalid_flag() {
+        // /FUKJJYA.ADS.HL8701... carries a Tag 22 intermediate projection. The
+        // track validity is carried both as `track_degrees: Option<f64>` (None
+        // when invalid) and as the `track_invalid` boolean, mirroring the
+        // earth/air reference groups.
+        let msg = parse_adsc_app_text(
+            "/FUKJJYA.ADS.HL87010716B9138FDE0946EBB81F16007863D928E0106017177C037438C94708AA0D16C16B8E38C9470083182D8355554947000E63B8CE00040F63A9A540045A49",
+        )
+        .unwrap();
+        let proj = msg
+            .tags
+            .iter()
+            .find_map(|t| match t {
+                AdscTag::IntermediateProjection(d) => Some(d),
+                _ => None,
+            })
+            .expect("expected an intermediate projection");
+        assert!(proj.distance_nm.is_finite());
+        assert_eq!(proj.track_degrees.is_none(), proj.track_invalid);
+        assert!(proj.track_degrees.is_none_or(|t| t.is_finite()));
+        assert!(proj.eta_seconds <= 0x3fff);
+    }
+
+    #[test]
+    fn nack_reason_is_semantic_enum() {
+        // /ALGCAYA.ADS.ET-AWM0401069CA4: Tag 4 NAK, contract 1, reason 6
+        // (requested contract already exists), no extension.
+        let msg = parse_adsc_app_text("/ALGCAYA.ADS.ET-AWM0401069CA4").unwrap();
+        let nak = msg
+            .tags
+            .iter()
+            .find_map(|t| match t {
+                AdscTag::NegativeAcknowledgement(d) => Some(d),
+                _ => None,
+            })
+            .expect("expected a negative acknowledgement");
+        assert_eq!(nak.contract_request_number, 1);
+        assert_eq!(nak.reason, AdscNackReason::RequestedContractAlreadyExists);
+        assert!(nak.extension.is_none());
     }
 }

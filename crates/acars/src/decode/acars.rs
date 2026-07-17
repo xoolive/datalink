@@ -484,6 +484,8 @@ fn dispatch_by_label(
     txt: &str,
 ) -> crate::decode::payload::AcarsAppPayload {
     use crate::decode::payload::AcarsAppPayload;
+    #[cfg(not(feature = "flate2"))]
+    let _ = sublabel;
     if txt.is_empty() {
         return AcarsAppPayload::None;
     }
@@ -492,9 +494,12 @@ fn dispatch_by_label(
         return AcarsAppPayload::LinkTest;
     }
     match label {
+        #[cfg(feature = "flate2")]
         "MA" => crate::decode::payload::miam::parse_miam(txt)
             .map(AcarsAppPayload::Miam)
             .unwrap_or_else(|_| AcarsAppPayload::Text(txt.to_string())),
+        #[cfg(not(feature = "flate2"))]
+        "MA" => AcarsAppPayload::Text(txt.to_string()),
         "SA" => crate::decode::payload::arinc620::media_advisory::parse_media_advisory(txt)
             .map(AcarsAppPayload::MediaAdvisory)
             .unwrap_or_else(|_| AcarsAppPayload::Text(txt.to_string())),
@@ -546,6 +551,7 @@ fn dispatch_by_label(
         "37" => crate::decode::payload::aoc::label37::parse_label37(txt)
             .map(AcarsAppPayload::Label37)
             .unwrap_or_else(|| AcarsAppPayload::Text(txt.to_string())),
+        #[cfg(feature = "flate2")]
         "H1" if sublabel == Some("T1") => {
             if crate::decode::payload::boeing::ohma::is_ohma(txt) {
                 crate::decode::payload::boeing::ohma::parse_ohma(txt)

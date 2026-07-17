@@ -13,7 +13,6 @@
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use thiserror::Error;
 
 use crate::decode::acars::MessageDirection;
@@ -67,7 +66,7 @@ pub struct CpdlcMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcControlMessage {
     ConnectRequest {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,10 +136,10 @@ enum CpdlcTemplateFragment {
     Slot(CpdlcTemplateSlot),
 }
 
-// Phrase value fragments serialize one of these slots. The frontend resolves a
-// slot against an element body by using `body.data` when `body.kind == slot`, or
-// `body.data[slot]` for compound bodies. Keep `CpdlcTemplateSlot::as_str`, these
-// serde names, and `CpdlcElementBody` variant/field names aligned.
+// Phrase value fragments serialize one of these slots. With externally tagged
+// bodies, the frontend resolves a slot from either the body's variant key or an
+// identically named field in that variant's value. Keep `CpdlcTemplateSlot::as_str`,
+// these serde names, and `CpdlcElementBody` variant/field names aligned.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CpdlcTemplateSlot {
@@ -168,14 +167,14 @@ pub enum CpdlcTemplateSlot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcPhraseFragment {
     Text(String),
     Value(CpdlcTemplateSlot),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcElementBody {
     Altitude(CpdlcAltitude),
     AltitudeTime {
@@ -316,7 +315,7 @@ pub struct RouteClearance {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum RouteInformation {
     PublishedIdentifier {
         fix: String,
@@ -336,7 +335,7 @@ pub enum RouteInformation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcAltitude {
     QnhFeet(u16),
     QnhMeters(u16),
@@ -349,7 +348,7 @@ pub enum CpdlcAltitude {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum IcaoFacilityDesignation {
     Icao(String),
 }
@@ -374,7 +373,7 @@ pub struct IcaoUnitName {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum IcaoFacilityIdentification {
     Designation(String),
     Name(String),
@@ -393,7 +392,7 @@ pub enum IcaoFacilityFunction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcFrequency {
     HfKhz(u32),
     VhfKhz(u32),
@@ -402,7 +401,7 @@ pub enum CpdlcFrequency {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum DistanceOffset {
     Nm(u16),
     Km(u16),
@@ -424,7 +423,7 @@ pub enum CpdlcDirection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcPosition {
     FixName(String),
     Navaid(String),
@@ -479,7 +478,7 @@ pub struct CpdlcPositionReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcTemperature {
     Celsius(i16),
     Fahrenheit(i16),
@@ -492,7 +491,7 @@ pub struct CpdlcWinds {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcWindSpeed {
     Knots(u16),
     Kmh(u16),
@@ -511,21 +510,21 @@ pub enum CpdlcVerticalDirection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcVerticalRate {
     FeetPerMinute(u16),
     MetersPerMinute(u16),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcDistance {
     NauticalMiles(u16),
     Kilometers(u16),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcDegrees {
     Magnetic(u16),
     True(u16),
@@ -547,7 +546,7 @@ pub enum CpdlcProcedureType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcSpeed {
     IndicatedKnots(u16),
     IndicatedKmh(u16),
@@ -560,7 +559,7 @@ pub enum CpdlcSpeed {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CpdlcAltimeter {
     InHgHundredths(u16),
     HectoPascals(u16),
@@ -1642,6 +1641,7 @@ fn cpdlc_catalog() -> &'static CpdlcCatalog {
 }
 
 /// Look up an ATN B1 element by direction and numeric ID.
+#[cfg(feature = "rasn")]
 pub(crate) fn atn_element_info(kind: PduKind, id: u16) -> Option<&'static CpdlcElementInfo> {
     let catalog = atn_catalog();
     let elements = match kind {
@@ -1651,6 +1651,7 @@ pub(crate) fn atn_element_info(kind: PduKind, id: u16) -> Option<&'static CpdlcE
     elements.iter().find(|info| info.id == id)
 }
 
+#[cfg(feature = "rasn")]
 fn atn_catalog() -> &'static CpdlcCatalog {
     static ATN_CATALOG: OnceLock<CpdlcCatalog> = OnceLock::new();
     ATN_CATALOG.get_or_init(|| {
@@ -1811,11 +1812,14 @@ impl CpdlcElementBody {
             return false;
         };
 
-        body.get("kind").and_then(Value::as_str) == Some(slot)
-            || body
-                .get("data")
-                .and_then(Value::as_object)
-                .is_some_and(|object| object.contains_key(slot))
+        body.as_object()
+            .and_then(|object| object.iter().next())
+            .is_some_and(|(variant, value)| {
+                variant == slot
+                    || value
+                        .as_object()
+                        .is_some_and(|fields| fields.contains_key(slot))
+            })
             || matches!(
                 (slot, self),
                 ("route_clearance", Self::OpaqueRouteClearance { .. })

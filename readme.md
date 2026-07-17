@@ -43,8 +43,9 @@ datalink decode acars --direction downlink '<hex>'
 # Decode an AVLC frame including FCS bytes
 datalink decode avlc '<hex>'
 
-# Decode an ADS-C app payload
-datalink decode adsc '/ATSU.ADS....'
+# Decode an ADS-C app payload (direction is required for uplink contracts)
+datalink decode adsc --direction downlink '/ATSU.ADS....'
+datalink decode adsc --direction uplink '/ATSU.ADS....'
 ```
 
 ### VDL2 frontend
