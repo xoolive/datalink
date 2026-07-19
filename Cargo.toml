@@ -9,6 +9,10 @@ readme = "readme.md"
 version = "0.3.0"
 authors = ["Xavier Olive <git@xoolive.org>"]
 
+[workspace.metadata.release]
+shared-version = true
+tag-name = "v{{version}}"
+
 [workspace.dependencies]
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
