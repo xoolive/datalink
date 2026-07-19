@@ -6,7 +6,7 @@ on:
       - main
       - master
     tags:
-      - "datalink-v*"
+      - "v*"
   pull_request:
   workflow_dispatch:
 
@@ -67,8 +67,8 @@ jobs:
         working-directory: crates/datalink-wasm/pkg
         run: npm pack --dry-run
 
-      - name: Publish to npm (upon datalink release tag)
-        if: startsWith(github.ref, 'refs/tags/datalink-v')
+      - name: Publish to npm (upon workspace release tag)
+        if: startsWith(github.ref, 'refs/tags/v')
         working-directory: crates/datalink-wasm/pkg
         env:
           NPM_CONFIG_PROVENANCE: true
