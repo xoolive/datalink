@@ -13,7 +13,9 @@ use datalink::event;
 use crate::event::{Bearer, DecodedEvent, ProtocolMessage, SourceClass, SourceMetadata};
 use acars::decode::acars::{parse_acars_frame, MessageDirection};
 use acars::decode::avlc::parse_avlc_frame;
-use acars::decode::payload::arinc622::parse_with_direction as parse_arinc622_with_direction;
+use acars::decode::payload::arinc622::{
+    parse_with_direction as parse_arinc622_with_direction, Payload as Arinc622Payload,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -21,6 +23,16 @@ enum Direction {
     Unknown,
     Uplink,
     Downlink,
+}
+
+impl Direction {
+    fn as_message_direction(self) -> MessageDirection {
+        match self {
+            Direction::Unknown => MessageDirection::Unknown,
+            Direction::Uplink => MessageDirection::GroundToAir,
+            Direction::Downlink => MessageDirection::AirToGround,
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -68,10 +80,24 @@ enum DecodeCommand {
         #[arg(help = "Hex-encoded AVLC frame bytes (with FCS)")]
         hex: String,
     },
-    /// Decode an ADS-C application-layer text payload.
+    /// Decode an ARINC 622 envelope and dispatch ADS-C, CPDLC, DIS, or raw IMI payloads.
+    Arinc622 {
+        #[arg(help = "ARINC 622 application text envelope")]
+        text: String,
+        #[arg(short, long, value_enum, default_value_t = Direction::Unknown)]
+        direction: Direction,
+    },
+    /// Decode an ADS-C ARINC 622 envelope, including ADS-C disconnect.
     Adsc {
-        #[arg(help = "ADS-C app text payload")]
-        payload: String,
+        #[arg(help = "ADS-C ARINC 622 application text envelope")]
+        text: String,
+        #[arg(short, long, value_enum, default_value_t = Direction::Unknown)]
+        direction: Direction,
+    },
+    /// Decode a CPDLC ARINC 622 envelope or control message.
+    Cpdlc {
+        #[arg(help = "CPDLC ARINC 622 application text envelope")]
+        text: String,
         #[arg(short, long, value_enum, default_value_t = Direction::Unknown)]
         direction: Direction,
     },
@@ -95,12 +121,7 @@ fn run_decode(command: DecodeCommand) -> anyhow::Result<()> {
     match command {
         DecodeCommand::Acars { hex, direction } => {
             let bytes = hex::decode(hex.trim())?;
-            let dir = match direction {
-                Direction::Unknown => MessageDirection::Unknown,
-                Direction::Uplink => MessageDirection::GroundToAir,
-                Direction::Downlink => MessageDirection::AirToGround,
-            };
-            let message = parse_acars_frame(&bytes, dir)?;
+            let message = parse_acars_frame(&bytes, direction.as_message_direction())?;
             let pmsg = ProtocolMessage::Acars(Box::new(message));
 
             let event = DecodedEvent {
@@ -145,36 +166,54 @@ fn run_decode(command: DecodeCommand) -> anyhow::Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&event)?);
         }
-        DecodeCommand::Adsc { payload, direction } => {
-            let dir = match direction {
-                Direction::Unknown => MessageDirection::Unknown,
-                Direction::Uplink => MessageDirection::GroundToAir,
-                Direction::Downlink => MessageDirection::AirToGround,
-            };
-            let message = parse_arinc622_with_direction(payload.trim(), dir)?;
-            let acars_app = acars::decode::payload::AcarsAppPayload::Arinc622(message);
-
-            let pmsg = ProtocolMessage::App(Box::new(acars_app));
-
-            let event = DecodedEvent {
-                event: "message".to_string(),
-                timestamp: None,
-                bearer: Bearer::Decoded,
-                source: SourceMetadata {
-                    id: "decode_cli".into(),
-                    name: "decode_cli".into(),
-                    class: SourceClass::Frames,
-                    format: None,
-                },
-                receiver: None,
-                aircraft: crate::merged::aircraft_summary(&pmsg),
-                kinematics: pmsg.kinematics(),
-                raw_frame_hex: None,
-                message: pmsg,
-            };
-            println!("{}", serde_json::to_string_pretty(&event)?);
+        DecodeCommand::Arinc622 { text, direction } => {
+            let message =
+                parse_arinc622_with_direction(text.trim(), direction.as_message_direction())?;
+            print_app_event(acars::decode::payload::AcarsAppPayload::Arinc622(message))?;
+        }
+        DecodeCommand::Adsc { text, direction } => {
+            let message =
+                parse_arinc622_with_direction(text.trim(), direction.as_message_direction())?;
+            if !matches!(
+                &message.payload,
+                Arinc622Payload::Adsc(_) | Arinc622Payload::AdscDisconnect(_)
+            ) {
+                anyhow::bail!("ARINC 622 envelope did not contain an ADS-C payload");
+            }
+            print_app_event(acars::decode::payload::AcarsAppPayload::Arinc622(message))?;
+        }
+        DecodeCommand::Cpdlc { text, direction } => {
+            let message =
+                parse_arinc622_with_direction(text.trim(), direction.as_message_direction())?;
+            if !matches!(&message.payload, Arinc622Payload::Cpdlc(_)) {
+                anyhow::bail!("ARINC 622 envelope did not contain a CPDLC payload");
+            }
+            print_app_event(acars::decode::payload::AcarsAppPayload::Arinc622(message))?;
         }
     }
 
+    Ok(())
+}
+
+fn print_app_event(app: acars::decode::payload::AcarsAppPayload) -> anyhow::Result<()> {
+    let pmsg = ProtocolMessage::App(Box::new(app));
+
+    let event = DecodedEvent {
+        event: "message".to_string(),
+        timestamp: None,
+        bearer: Bearer::Decoded,
+        source: SourceMetadata {
+            id: "decode_cli".into(),
+            name: "decode_cli".into(),
+            class: SourceClass::Frames,
+            format: None,
+        },
+        receiver: None,
+        aircraft: crate::merged::aircraft_summary(&pmsg),
+        kinematics: pmsg.kinematics(),
+        raw_frame_hex: None,
+        message: pmsg,
+    };
+    println!("{}", serde_json::to_string_pretty(&event)?);
     Ok(())
 }
