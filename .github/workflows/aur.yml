@@ -95,6 +95,7 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           cp aur/${{ matrix.pkg }}/PKGBUILD aur-publish/${{ matrix.pkg }}/PKGBUILD
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" aur-publish/${{ matrix.pkg }}/PKGBUILD
+          sed -i "s/^_tag=.*/_tag=${{ steps.version.outputs.tag }}/" aur-publish/${{ matrix.pkg }}/PKGBUILD
           sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${{ steps.checksums.outputs.x86_64 }}')/" aur-publish/${{ matrix.pkg }}/PKGBUILD
           sed -i "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('${{ steps.checksums.outputs.aarch64 }}')/" aur-publish/${{ matrix.pkg }}/PKGBUILD
           cat aur-publish/${{ matrix.pkg }}/PKGBUILD
