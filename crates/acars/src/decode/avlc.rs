@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::decode::acars::{AcarsMessage, MessageDirection};
 use crate::decode::helpers::{
-    deserialize_addr_hex, serialize_addr_hex, serialize_bytes_hex_variant,
+    deserialize_addr_hex, deserialize_bytes_hex, serialize_addr_hex, serialize_bytes_hex_variant,
 };
 use crate::decode::x25::{parse_x25_packet, X25Packet};
 use crate::decode::xid::{parse_xid, XidMessage};
@@ -130,7 +130,10 @@ pub enum AvlcPayload {
     /// XID / Ground Station Information Frame from a U-frame with `mfunc = 0x2B`.
     Xid(Box<XidMessage>),
     /// I-frame payload that could not be decoded; raw bytes preserved.
-    #[serde(serialize_with = "serialize_bytes_hex_variant")]
+    #[serde(
+        serialize_with = "serialize_bytes_hex_variant",
+        deserialize_with = "deserialize_bytes_hex"
+    )]
     Unknown(Vec<u8>),
 }
 
@@ -267,7 +270,7 @@ impl AvlcAddr {
 /// |---|---|---|
 /// | `Command` | **Poll (P)** | Request immediate supervisory response from peer |
 /// | `Response` | **Final (F)** | This is the last response in a checkpoint sequence |
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AvlcLcf {
     /// Information frame (I-frame).
     ///
@@ -325,16 +328,6 @@ pub enum AvlcLcf {
         /// Poll/Final bit — same semantics as in I- and S-frames.
         pf: bool,
     },
-}
-
-impl Serialize for AvlcLcf {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(match self {
-            AvlcLcf::I { .. } => "I",
-            AvlcLcf::S { .. } => "S",
-            AvlcLcf::U { .. } => "U",
-        })
-    }
 }
 
 /// `AvlcFrame` implements `DekuReader`, `DekuContainerRead`, and `TryFrom<&[u8]>`

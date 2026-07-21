@@ -51,7 +51,10 @@ pub struct X25Packet {
 #[serde(rename_all = "snake_case")]
 pub enum X25Inner {
     ClnpCompressed(ClnpCompressedPdu),
-    #[serde(serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant")]
+    #[serde(
+        serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant",
+        deserialize_with = "crate::decode::helpers::deserialize_bytes_hex"
+    )]
     Unknown(Vec<u8>),
 }
 
@@ -74,7 +77,10 @@ pub struct ClnpCompressedPdu {
 pub enum ClnpInner {
     Idrp(IdrpPdu),
     Cotp(Vec<CotpPdu>),
-    #[serde(serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant")]
+    #[serde(
+        serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant",
+        deserialize_with = "crate::decode::helpers::deserialize_bytes_hex"
+    )]
     Unknown(Vec<u8>),
 }
 
@@ -113,9 +119,9 @@ pub struct CotpPdu {
     pub proto_class: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<u8>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub params: Vec<CotpVarParam>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
     #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub user_data: Option<Vec<u8>>,
@@ -145,7 +151,10 @@ pub struct CotpVarParam {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CotpParamValue {
-    #[serde(serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant")]
+    #[serde(
+        serialize_with = "crate::decode::helpers::serialize_bytes_hex_variant",
+        deserialize_with = "crate::decode::helpers::deserialize_bytes_hex"
+    )]
     Bytes(Vec<u8>),
     Uint(u64),
 }

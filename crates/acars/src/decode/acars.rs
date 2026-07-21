@@ -61,7 +61,7 @@ pub enum MessageDirection {
 }
 
 /// Acknowledgement status byte from the ACARS preamble.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AckType {
     /// Positive acknowledgement (`ACK`, 0x06).
     Ack,
@@ -81,6 +81,34 @@ impl Serialize for AckType {
             Self::Nak => serializer.serialize_str("NAK"),
             Self::Other(c) => serializer.serialize_str(&c.to_string()),
         }
+    }
+}
+
+impl TryFrom<&str> for AckType {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ACK" => Ok(Self::Ack),
+            "NAK" => Ok(Self::Nak),
+            other => {
+                let mut chars = other.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(value), None) => Ok(Self::Other(value)),
+                    _ => Err(format!("invalid ACARS acknowledgement: {other:?}")),
+                }
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AckType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::try_from(value.as_str()).map_err(serde::de::Error::custom)
     }
 }
 

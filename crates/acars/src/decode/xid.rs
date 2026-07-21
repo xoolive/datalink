@@ -55,7 +55,10 @@ pub struct GsLocation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawTlv {
     pub typecode: u8,
-    #[serde(serialize_with = "crate::decode::helpers::serialize_bytes_hex")]
+    #[serde(
+        serialize_with = "crate::decode::helpers::serialize_bytes_hex",
+        deserialize_with = "crate::decode::helpers::deserialize_bytes_hex"
+    )]
     pub data: Vec<u8>,
 }
 
@@ -64,15 +67,15 @@ pub struct RawTlv {
 pub struct XidPubParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub param_set_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
     #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub procedure_classes: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
     #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub hdlc_options: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other: Vec<RawTlv>,
 }
 
@@ -81,27 +84,27 @@ pub struct XidPubParams {
 pub struct XidVdlParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub param_set_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
     #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub avlc_specific_options: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub freq_support_list: Vec<FreqSupport>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
     #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub timer_t4: Option<Vec<u8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub airport_coverage: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
     #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub atn_router_nets: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub system_mask: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gs_location: Option<GsLocation>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other: Vec<RawTlv>,
 }
 

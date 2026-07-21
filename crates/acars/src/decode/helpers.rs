@@ -27,6 +27,11 @@ pub fn serialize_opt_bytes_hex<S: Serializer>(
     }
 }
 
+/// Deserialise `Vec<u8>` from a hex string or byte array.
+pub fn deserialize_bytes_hex<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    deserialize_opt_bytes_hex(d)?.ok_or_else(|| serde::de::Error::custom("expected hex bytes"))
+}
+
 /// Deserialise `Option<Vec<u8>>` from JSON `null`, a hex string, or a byte array.
 pub fn deserialize_opt_bytes_hex<'de, D: Deserializer<'de>>(
     d: D,
