@@ -51,6 +51,28 @@ pub struct GsLocation {
     pub lon: f32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AircraftLocation {
+    pub lat: f32,
+    pub lon: f32,
+    pub altitude_ft: i32,
+}
+
+impl From<[u8; 4]> for AircraftLocation {
+    fn from(buf: [u8; 4]) -> Self {
+        // NOTE: the fixed-size input guarantees that the shared location parser succeeds.
+        let location = parse_gs_location(&buf[..3]).expect("three location bytes");
+        Self {
+            lat: location.lat,
+            lon: location.lon,
+            altitude_ft: i32::from(buf[3]) * 1000,
+        }
+    }
+}
+
+// TODO: consider migrating the remaining parse_* helpers in this module to
+// fixed-size From / TryFrom
+
 /// An unparsed TLV parameter (typecode + raw data).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawTlv {
@@ -94,6 +116,10 @@ pub struct XidVdlParams {
     #[serde(serialize_with = "crate::decode::helpers::serialize_opt_bytes_hex")]
     #[serde(deserialize_with = "crate::decode::helpers::deserialize_opt_bytes_hex")]
     pub timer_t4: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_airport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aircraft_location: Option<AircraftLocation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub airport_coverage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -195,6 +221,14 @@ fn parse_vdl_params(buf: &[u8]) -> XidVdlParams {
         0x00 => p.param_set_id = bytes_to_ascii(data),
         0x04 => p.avlc_specific_options = Some(data.to_vec()),
         0x42 => p.timer_t4 = Some(data.to_vec()),
+        // ETSI EN 301 842-2 v1.2.1 Table 5-23
+        0x83 => p.destination_airport = bytes_to_ascii(data),
+        // ETSI EN 301 842-2 v1.2.1 Table 5-24
+        0x84 => {
+            p.aircraft_location = data
+                .first_chunk::<4>()
+                .map(|bytes| AircraftLocation::from(*bytes));
+        }
         0xC0 => p.freq_support_list = parse_freq_support_list(data),
         0xC1 => p.airport_coverage = bytes_to_ascii(data),
         0xC4 => p.atn_router_nets = Some(data.to_vec()),
@@ -345,4 +379,53 @@ fn find_conn_mgmt(p: &XidVdlParams) -> (u8, u8) {
         }
     }
     (1, 1) // default: forces GSIF/LPM
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decode::avlc::{AvlcFrame, AvlcPayload};
+
+    fn xid_from_frame(frame_hex: &str) -> XidMessage {
+        let bytes = hex::decode(frame_hex).unwrap();
+        let frame = AvlcFrame::try_from(bytes.as_slice()).unwrap();
+        let json = serde_json::to_string(&frame).unwrap();
+        let frame: AvlcFrame = serde_json::from_str(&json).unwrap();
+        let Some(AvlcPayload::Xid(xid)) = frame.payload else {
+            panic!("expected XID payload");
+        };
+        *xid
+    }
+
+    #[test]
+    fn parses_aircraft_location_from_xid() {
+        // gqrx_20260518_114025_136500000_1800000_fc.raw
+        // start of channel @ 136.775 MHz
+        let gmmw = xid_from_frame(
+            "94049CA2101040AFBF828000140109383838353A3139393302020001030320A480F000180001560101010301050401258304474D4D5784041A70042549C5",
+        );
+        assert_eq!(gmmw.vdl_params.destination_airport.as_deref(), Some("GMMW"));
+        assert_eq!(
+            gmmw.vdl_params.aircraft_location,
+            Some(AircraftLocation {
+                lat: 42.3,
+                lon: 0.4,
+                altitude_ft: 37_000,
+            })
+        );
+
+        // about 10.14s later @ 136.825 MHz
+        let lfpo = xid_from_frame(
+            "1462545250088069BF828000140109383838353A3139393302020001030320A480F0001800015601010103010204012583044C46504F84041C100B1CC7B1",
+        );
+        assert_eq!(lfpo.vdl_params.destination_airport.as_deref(), Some("LFPO"));
+        assert_eq!(
+            lfpo.vdl_params.aircraft_location,
+            Some(AircraftLocation {
+                lat: 44.9,
+                lon: 1.1,
+                altitude_ft: 28_000,
+            })
+        );
+    }
 }

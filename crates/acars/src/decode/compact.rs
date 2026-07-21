@@ -334,10 +334,23 @@ impl ExtractKinematics for AcarsMessage {
 
 impl ExtractKinematics for AvlcFrame {
     fn kinematics(&self) -> Option<Kinematics> {
-        if let Some(AvlcPayload::Acars(msg)) = &self.payload {
-            msg.kinematics()
-        } else {
-            None
+        match &self.payload {
+            Some(AvlcPayload::Acars(msg)) => msg.kinematics(),
+            Some(AvlcPayload::Xid(xid)) => {
+                xid.vdl_params
+                    .aircraft_location
+                    .as_ref()
+                    .map(|location| Kinematics {
+                        position: Some(Position {
+                            latitude: location.lat.into(),
+                            longitude: location.lon.into(),
+                        }),
+                        altitude_ft: Some(location.altitude_ft),
+                        derived_from: Some("vdl2_xid_aircraft_location".into()),
+                        ..Default::default()
+                    })
+            }
+            _ => None,
         }
     }
 }
