@@ -341,11 +341,6 @@ pub fn parse_with_direction(text: &str, direction: MessageDirection) -> DecodeRe
     })
 }
 
-/// Back-compatible name for the ARINC 622 parser.
-pub fn parse_and_dispatch(text: &str) -> DecodeResult<Message> {
-    parse(text)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

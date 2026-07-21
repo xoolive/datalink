@@ -7,7 +7,7 @@
 //!
 //! The public entry point for standalone application text is
 //! [`parse_adsc_app_text`]. Normal ACARS label routing reaches this module via
-//! [`super::parse_with_direction`] and [`super::parse_and_dispatch`].
+//! [`super::parse_with_direction`] and [`super::parse`].
 
 use deku::prelude::*;
 use serde::{Deserialize, Serialize};

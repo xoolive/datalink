@@ -1,6 +1,6 @@
 use acars::decode::acars::{extract_sublabel_and_mfi, MessageDirection};
 use acars::decode::payload::arinc622::adsc::{parse_adsc_app_text, AdscTag};
-use acars::decode::payload::arinc622::{parse_and_dispatch, Imi, Payload};
+use acars::decode::payload::arinc622::{parse, Imi, Payload};
 use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -54,8 +54,7 @@ fn opensky_adsc_message_samples_parse() {
             continue;
         };
 
-        let message =
-            parse_and_dispatch(&text).unwrap_or_else(|e| panic!("{name}: ADS-C parse failed: {e}"));
+        let message = parse(&text).unwrap_or_else(|e| panic!("{name}: ADS-C parse failed: {e}"));
 
         assert_eq!(message.atsu_address, expect.atsu, "{name}: wrong ATSU");
         assert_eq!(
@@ -109,7 +108,7 @@ fn earth_and_air_reference_decode_tag_specific_scales() {
 #[test]
 fn adsc_serializes_with_external_payload_and_tag_keys() {
     let text = "/MGQCAYA.ADS.A6-BLJ0707E9392157890809021F0E0B30E940040F0CD9A280046DD7";
-    let message = parse_and_dispatch(text).expect("issue #17 sample should parse");
+    let message = parse(text).expect("issue #17 sample should parse");
     let json = serde_json::to_value(message).expect("ARINC 622 should serialize");
 
     assert!(json["payload"].get("kind").is_none());
@@ -291,7 +290,7 @@ fn verify_json_output_schema() {
             continue;
         };
 
-        let message = parse_and_dispatch(&text).expect("parse and dispatch should succeed");
+        let message = parse(&text).expect("parse and dispatch should succeed");
         let message_json = serde_json::to_value(&message).expect("message should serialize");
         assert!(
             message_json.get("atsu_address").is_some(),
@@ -332,7 +331,7 @@ fn end_to_end_acars_h1_arinc622_adsc_json_chain() {
             format!("/{normalized}")
         };
 
-        let message = parse_and_dispatch(&normalized).expect("parse_and_dispatch should succeed");
+        let message = parse(&normalized).expect("parse_and_dispatch should succeed");
         assert_eq!(message.imi, Imi::Ads, "wrong IMI");
         assert_eq!(
             message.registration, expect.registration,
