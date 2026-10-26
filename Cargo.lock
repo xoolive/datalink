@@ -88,6 +88,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
 
 [[package]]
+name = "async-compression"
+version = "0.4.50"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee19bd99b43e3691acbad4e840420a4881cea6c0b66a208125a824f8fd53f5a1"
+dependencies = [
+ "compression-codecs",
+ "compression-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "async-lock"
 version = "3.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -304,6 +316,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "compression-codecs"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98fc98460ba0ad5317075d3632b8dfc45d0be8c4a49347c2a38272019717614a"
+dependencies = [
+ "compression-core",
+ "zstd",
+ "zstd-safe",
+]
+
+[[package]]
+name = "compression-core"
+version = "0.4.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -422,7 +451,7 @@ dependencies = [
  "chrono",
  "clap",
  "desperado",
- "dirs",
+ "dirs 6.0.0",
  "futures-util",
  "hex",
  "hound",
@@ -482,13 +511,15 @@ dependencies = [
 
 [[package]]
 name = "desperado"
-version = "0.4.2"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a5eca4e77dafb9389d12160b079e99e5b018ff0914e09efc0b74e6e3a7657bb"
+checksum = "3184e8434c3ba789e2ea175d9a631f350a9b7b27fefbac6616fc82a4ce2a80cb"
 dependencies = [
+ "async-compression",
  "biquad",
- "dirs",
+ "dirs 7.0.0",
  "futures",
+ "hound",
  "num-complex",
  "rs-hackrf",
  "rs-rtl",
@@ -498,6 +529,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]
@@ -515,6 +547,15 @@ name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
 dependencies = [
  "dirs-sys",
 ]
@@ -1498,9 +1539,9 @@ dependencies = [
 
 [[package]]
 name = "rs-hackrf"
-version = "0.4.2"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "affa4ab24c6d4463c8ca53272ebf5ecacda5739df891be62459bd10d943bb49d"
+checksum = "6858103e0ab37f53122d6bbd528d510f999f32249bc62587d1802fd8e9edeb26"
 dependencies = [
  "nusb",
  "thiserror",
@@ -1509,9 +1550,9 @@ dependencies = [
 
 [[package]]
 name = "rs-rtl"
-version = "0.4.2"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b14d2eb2473e57beeefdcdca0d7cbc51c5f312e0a9c96ff6374393d5ff4b54b1"
+checksum = "44dac86f459e54b8256e51ee865ac63e4e2058c11c7ff5361ed7e7deeaa1ecd9"
 dependencies = [
  "nusb",
  "thiserror",
@@ -1520,9 +1561,9 @@ dependencies = [
 
 [[package]]
 name = "rs-spy"
-version = "0.4.2"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c3b1c25996092982f9f8316df5922fb52f85a8ee3c119cce9748d001843db95"
+checksum = "81a41e859f93a66432c0aeb75d154adec088135386a5d6053936fa5587bbd436"
 dependencies = [
  "num-complex",
  "nusb",
@@ -2679,3 +2720,31 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zstd"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "057cfd910cfac363a0ada849592624b4c9ff2e10bef504c3433810d78ed96f93"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "8.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdd44c6a7284e91f3717755b24315a302edd9153a01f753c3cba3d765e8eafac"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.1+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aeec9eaf2dffbbd09201e23bd0ffcbaa33bb8e9266a10734fd7ed90a85eca078"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
