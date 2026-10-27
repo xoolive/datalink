@@ -356,30 +356,12 @@ async fn collect_decoded_pdus(
         frame_sync_count += diagnostics.frame_hits.len() as u64;
         candidate_count += diagnostics.pdu_candidates.len() as u64;
         for candidate in &diagnostics.pdu_candidates {
-            let Ok(parsed) = parse_hfdl_pdu(&candidate.bytes) else {
-                continue;
-            };
-            if parsed.fcs == FcsResult::Pass {
-                continue;
+            if let Some(event) =
+                event_from_candidate(&candidate.bytes, channel_khz, source_meta, receiver_bearer)
+            {
+                pdu_ok += 1;
+                out.push(event);
             }
-            pdu_ok += 1;
-            let pmsg = ProtocolMessage::Hfdl(Box::new(parsed));
-
-            let event = DecodedEvent {
-                event: "message".to_string(),
-                timestamp: None,
-                bearer: receiver_bearer,
-                source: source_meta.clone(),
-                receiver: Some(ReceiverMetadata {
-                    bearer: receiver_bearer,
-                    channel_hz: Some((channel_khz * 1000.0).round() as u32),
-                }),
-                aircraft: crate::merged::aircraft_summary(&pmsg),
-                kinematics: pmsg.kinematics(),
-                raw_frame_hex: Some(hex::encode_upper(&candidate.bytes)),
-                message: pmsg,
-            };
-            out.push(event);
         }
     }
     if options.stats {
@@ -392,6 +374,34 @@ async fn collect_decoded_pdus(
         );
     }
     Ok(out)
+}
+
+/// Apply the collector's acceptance policy and construct an event from a demodulated PDU.
+fn event_from_candidate(
+    bytes: &[u8],
+    channel_khz: f64,
+    source_meta: &SourceMetadata,
+    receiver_bearer: Bearer,
+) -> Option<DecodedEvent> {
+    let parsed = parse_hfdl_pdu(bytes).ok()?;
+    if parsed.fcs != FcsResult::Pass {
+        return None;
+    }
+    let pmsg = ProtocolMessage::Hfdl(Box::new(parsed));
+    Some(DecodedEvent {
+        event: "message".to_string(),
+        timestamp: None,
+        bearer: receiver_bearer,
+        source: source_meta.clone(),
+        receiver: Some(ReceiverMetadata {
+            bearer: receiver_bearer,
+            channel_hz: Some((channel_khz * 1000.0).round() as u32),
+        }),
+        aircraft: crate::merged::aircraft_summary(&pmsg),
+        kinematics: pmsg.kinematics(),
+        raw_frame_hex: Some(hex::encode_upper(bytes)),
+        message: pmsg,
+    })
 }
 
 async fn samples_for_source(
@@ -768,6 +778,45 @@ mod tests {
             }
         }
         crc
+    }
+
+    #[test]
+    fn collector_emits_valid_candidates_and_rejects_corrupt_or_malformed_pdus() {
+        let source = SourceMetadata {
+            id: "test-hfdl".into(),
+            name: "Test receiver".into(),
+            class: SourceClass::Iq,
+            format: None,
+        };
+        let mut valid = vec![0u8; 66];
+        valid[1] = 12;
+        let fcs = hfdl_fcs(&valid[..64]);
+        valid[64..].copy_from_slice(&fcs.to_le_bytes());
+        assert_eq!(parse_hfdl_pdu(&valid).unwrap().fcs, FcsResult::Pass);
+        let mut corrupt = valid.clone();
+        corrupt[64] ^= 1;
+        assert_eq!(parse_hfdl_pdu(&corrupt).unwrap().fcs, FcsResult::Fail);
+
+        let candidates = [valid.clone(), corrupt, Vec::new()];
+        let events: Vec<_> = candidates
+            .iter()
+            .filter_map(|bytes| event_from_candidate(bytes, 10081.0, &source, Bearer::Hfdl))
+            .collect();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.source.id, source.id);
+        assert_eq!(
+            event.receiver.as_ref().unwrap().channel_hz,
+            Some(10_081_000)
+        );
+        assert_eq!(
+            event.raw_frame_hex.as_deref(),
+            Some(hex::encode_upper(&valid).as_str())
+        );
+        let ProtocolMessage::Hfdl(parsed) = &event.message else {
+            panic!("expected HFDL event");
+        };
+        assert_eq!(parsed.fcs, FcsResult::Pass);
     }
 
     #[test]
