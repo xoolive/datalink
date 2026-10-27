@@ -391,45 +391,58 @@ async fn decode_source(
     let mut sample_indices = vec![0_u64; channels.len()];
     let mut stats = DecodeStats::default();
 
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result?;
-        for channel_chunk in channelizer.process(&chunk) {
-            let idx = channel_chunk.channel_index;
-            for sample in channel_chunk.samples {
-                let one = std::slice::from_mut(&mut demods[idx]);
-                let mut passthrough = ResampleAdapter::new(None);
-                let mut pipeline = IqPipeline::new(
-                    &mut passthrough,
-                    one,
-                    &mut sample_indices[idx],
-                    demod_sample_rate,
-                    run_start,
-                );
-                let frames =
-                    collect_iq_frames(&mut pipeline, sample.re, sample.im, |d, re, im| {
-                        Ok(d.process_sample(re, im))
-                    })?;
-                for (mut ctx, demod_frame) in frames {
-                    ctx.channel_index = idx;
-                    handle_acars_frame(
-                        &channels,
-                        FrameSinks {
-                            output: output.as_deref_mut(),
-                            redis: redis.as_deref_mut(),
-                            collect: collect.as_deref_mut(),
-                        },
-                        &mut stats,
-                        ctx,
-                        demod_frame,
-                        source_meta,
-                        receiver_bearer,
-                    )
-                    .await?;
+    let run_result: anyhow::Result<()> = async {
+        while let Some(chunk_result) = tokio::select! {
+            chunk = stream.next() => chunk,
+            _ = tokio::signal::ctrl_c() => None,
+        } {
+            let chunk = chunk_result?;
+            for channel_chunk in channelizer.process(&chunk) {
+                let idx = channel_chunk.channel_index;
+                for sample in channel_chunk.samples {
+                    let one = std::slice::from_mut(&mut demods[idx]);
+                    let mut passthrough = ResampleAdapter::new(None);
+                    let mut pipeline = IqPipeline::new(
+                        &mut passthrough,
+                        one,
+                        &mut sample_indices[idx],
+                        demod_sample_rate,
+                        run_start,
+                    );
+                    let frames =
+                        collect_iq_frames(&mut pipeline, sample.re, sample.im, |d, re, im| {
+                            Ok(d.process_sample(re, im))
+                        })?;
+                    for (mut ctx, demod_frame) in frames {
+                        ctx.channel_index = idx;
+                        handle_acars_frame(
+                            &channels,
+                            FrameSinks {
+                                output: output.as_deref_mut(),
+                                redis: redis.as_deref_mut(),
+                                collect: collect.as_deref_mut(),
+                            },
+                            &mut stats,
+                            ctx,
+                            demod_frame,
+                            source_meta,
+                            receiver_bearer,
+                        )
+                        .await?;
+                    }
                 }
             }
         }
+        Ok(())
     }
-
+    .await;
+    let stop_result = if matches!(effective_src.address, Address::File { .. }) {
+        Ok(())
+    } else {
+        stream.stop().await
+    };
+    run_result?;
+    stop_result?;
     Ok(stats)
 }
 

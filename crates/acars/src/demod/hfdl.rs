@@ -486,7 +486,9 @@ pub fn decode_frame_candidate_variants(
     let deinterleaved = deinterleave_soft_bits(&soft, params);
     let viterbi_input = if params.code_rate == 4 {
         deinterleaved
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0] & pair[1]) + ((pair[0] ^ pair[1]) >> 1))
             .collect()
     } else {
@@ -569,7 +571,7 @@ pub fn viterbi_decode_27(symbols: &[u8]) -> Result<Vec<u8>, HfdlDemodError> {
     metrics[0] = 0;
     let mut decisions = vec![[0usize; STATES]; nbits];
 
-    for (t, pair) in symbols.chunks_exact(2).enumerate() {
+    for (t, pair) in symbols.as_chunks::<2>().0.iter().enumerate() {
         let mut next = [INF; STATES];
         for (state, &metric) in metrics.iter().enumerate() {
             if metric >= INF {

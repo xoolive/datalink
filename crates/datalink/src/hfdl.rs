@@ -464,21 +464,36 @@ async fn read_sdr_window(
     let mut stream = open_source(source).await?;
     let mut seen = 0usize;
     let mut out = Vec::with_capacity(keep);
-    while out.len() < keep {
-        let Some(chunk_result) = stream.next().await else {
-            break;
-        };
-        let chunk = chunk_result?;
-        for sample in chunk {
-            if seen >= skip && out.len() < keep {
-                out.push(Complex::new(sample.re, sample.im));
-            }
-            seen = seen.saturating_add(1);
-            if out.len() >= keep {
+    let run_result: anyhow::Result<()> = async {
+        while out.len() < keep {
+            let chunk_result = tokio::select! {
+                chunk = stream.next() => chunk,
+                _ = tokio::signal::ctrl_c() => None,
+            };
+            let Some(chunk_result) = chunk_result else {
                 break;
+            };
+            let chunk = chunk_result?;
+            for sample in chunk {
+                if seen >= skip && out.len() < keep {
+                    out.push(Complex::new(sample.re, sample.im));
+                }
+                seen = seen.saturating_add(1);
+                if out.len() >= keep {
+                    break;
+                }
             }
         }
+        Ok(())
     }
+    .await;
+    let stop_result = if matches!(source.address, Address::File { .. }) {
+        Ok(())
+    } else {
+        stream.stop().await
+    };
+    run_result?;
+    stop_result?;
     Ok(out)
 }
 
@@ -650,13 +665,13 @@ fn seek_to_second<R: Seek>(
 fn decode_complex_bytes(format: SampleFormat, raw: &[u8], out: &mut [Complex<f32>]) {
     match format {
         SampleFormat::U8 => {
-            for (idx, chunk) in raw.chunks_exact(2).enumerate() {
+            for (idx, chunk) in raw.as_chunks::<2>().0.iter().enumerate() {
                 out[idx].re = (chunk[0] as f32 - 127.5) / 128.0;
                 out[idx].im = (chunk[1] as f32 - 127.5) / 128.0;
             }
         }
         SampleFormat::Cs16 => {
-            for (idx, chunk) in raw.chunks_exact(4).enumerate() {
+            for (idx, chunk) in raw.as_chunks::<4>().0.iter().enumerate() {
                 let i = i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0;
                 let q = i16::from_le_bytes([chunk[2], chunk[3]]) as f32 / 32768.0;
                 out[idx].re = i;
@@ -665,7 +680,7 @@ fn decode_complex_bytes(format: SampleFormat, raw: &[u8], out: &mut [Complex<f32
         }
         SampleFormat::Wav16 => unreachable!("WAV samples are decoded by read_wav_complex_window"),
         SampleFormat::Cf32 => {
-            for (idx, chunk) in raw.chunks_exact(8).enumerate() {
+            for (idx, chunk) in raw.as_chunks::<8>().0.iter().enumerate() {
                 out[idx].re = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 out[idx].im = f32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
             }
