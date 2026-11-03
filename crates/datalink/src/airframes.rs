@@ -280,7 +280,9 @@ pub(crate) fn normalize_payload(
 
     Ok(DecodedEvent {
         event: "message".to_string(),
+        time_source: timestamp.map(|_| crate::event::TimeSource::Upstream),
         timestamp,
+        time_offset: None,
         bearer,
         source,
         receiver: None::<ReceiverMetadata>,

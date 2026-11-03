@@ -95,6 +95,9 @@ pub struct Source {
     pub vga_gain: Option<f64>,
     #[serde(default, alias = "iq_format")]
     pub format: Option<String>,
+    /// Capture start time for file/stdin input, as RFC 3339 or Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
 }
 
 impl Source {
@@ -179,6 +182,7 @@ impl FromStr for Source {
                 mixer_gain: None,
                 vga_gain: None,
                 format: None,
+                start_time: None,
             });
         }
         let default = Url::parse("file://").unwrap();
@@ -271,6 +275,7 @@ impl FromStr for Source {
             mixer_gain: None,
             vga_gain: None,
             format: None,
+            start_time: None,
         };
 
         if let Some(query) = url.query() {
@@ -293,6 +298,7 @@ impl FromStr for Source {
                     "mixer_gain" | "mix_gain" => source.mixer_gain = value.parse::<f64>().ok(),
                     "vga_gain" | "bb_gain" => source.vga_gain = value.parse::<f64>().ok(),
                     "format" | "iq_format" => source.format = Some(value.into_owned()),
+                    "start_time" | "start" => source.start_time = Some(value.into_owned()),
                     _ if !key.is_empty() && value.is_empty() => {
                         source.name = Some(key.into_owned())
                     }

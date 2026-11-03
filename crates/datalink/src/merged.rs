@@ -22,7 +22,6 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::time::SystemTime;
 
 use crate::event::{
     Aircraft, Bearer, DecodedEvent, ProtocolMessage, ReceiverMetadata, SourceClass, SourceMetadata,
@@ -92,6 +91,9 @@ pub(crate) struct SourceConfig {
     pub sample_rate: Option<u32>,
     #[serde(default, alias = "iq_format")]
     pub format: Option<String>,
+    /// Capture start time for file/stdin input (RFC 3339 or Unix seconds).
+    #[serde(default)]
+    pub start_time: Option<String>,
     #[serde(default)]
     pub gain: Option<Gain>,
     #[serde(default, alias = "rf_amp")]
@@ -485,11 +487,11 @@ async fn run_live_iq_source(
     );
 
     let mut stream = crate::vdl2::open_source(&runtime_source).await?;
-    let run_start = SystemTime::now();
+    let time_base = crate::time_base::TimeBase::for_source(&runtime_source)?;
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
         for receiver in &mut receivers {
-            for event in receiver.process_chunk(&chunk, run_start, source_meta)? {
+            for event in receiver.process_chunk(&chunk, time_base, source_meta)? {
                 output.emit(event).await?;
             }
         }
@@ -572,7 +574,7 @@ impl LiveReceiver {
     fn process_chunk(
         &mut self,
         chunk: &[rustfft::num_complex::Complex<f32>],
-        run_start: SystemTime,
+        time_base: crate::time_base::TimeBase,
         source_meta: &SourceMetadata,
     ) -> anyhow::Result<Vec<DecodedEvent>> {
         match self {
@@ -595,7 +597,7 @@ impl LiveReceiver {
                             one,
                             &mut sample_indices[idx],
                             *sample_rate,
-                            run_start,
+                            time_base,
                         );
                         let frames =
                             collect_iq_frames(&mut pipeline, sample.re, sample.im, |d, re, im| {
@@ -611,7 +613,9 @@ impl LiveReceiver {
                             let pmsg = ProtocolMessage::Acars(Box::new(message));
                             events.push(DecodedEvent {
                                 event: "message".to_string(),
-                                timestamp: Some(ctx.timestamp_unix),
+                                timestamp: ctx.timestamp_unix,
+                                time_offset: Some(ctx.seconds_into_recording),
+                                time_source: ctx.time_source,
                                 bearer: *bearer,
                                 source: source_meta.clone(),
                                 receiver: Some(ReceiverMetadata {
@@ -647,7 +651,7 @@ impl LiveReceiver {
                             one,
                             &mut sample_indices[idx],
                             *sample_rate,
-                            run_start,
+                            time_base,
                         );
                         let frames =
                             collect_iq_frames(&mut pipeline, sample.re, sample.im, |d, re, im| {
@@ -664,7 +668,9 @@ impl LiveReceiver {
                             let pmsg = ProtocolMessage::Avlc(Box::new(avlc));
                             events.push(DecodedEvent {
                                 event: "message".to_string(),
-                                timestamp: Some(ctx.timestamp_unix),
+                                timestamp: ctx.timestamp_unix,
+                                time_offset: Some(ctx.seconds_into_recording),
+                                time_source: ctx.time_source,
                                 bearer: *bearer,
                                 source: source_meta.clone(),
                                 receiver: Some(ReceiverMetadata {
@@ -691,6 +697,7 @@ fn runtime_source(source: &SourceConfig, source_url: &str) -> anyhow::Result<Sou
     parsed.center_freq = source.center_freq;
     parsed.sample_rate = source.sample_rate;
     parsed.format = source.format.clone();
+    parsed.start_time = source.start_time.clone();
     parsed.gain = source.gain.clone();
     parsed.bias_tee = source.bias_tee;
     parsed.amp_enable = source.amp_enable;
