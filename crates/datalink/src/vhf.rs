@@ -158,7 +158,7 @@ pub(crate) struct Cli {
     /// Print demod/decode counters to stderr at end
     #[arg(long)]
     stats: bool,
-    /// I/Q sample format for file input: cu8, cs8, cs16, cf32
+    /// I/Q sample format for file input: cu8 (u8), cs8, cs16 (s16), cf32
     #[arg(long)]
     format: Option<String>,
     /// Center frequency for file and SDR sources
@@ -622,14 +622,14 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
             center_freq,
             sample_rate,
             DEFAULT_CHUNK_SIZE,
-            src.iq_format(),
+            src.iq_format()?,
         )),
         Address::File { file } => Ok(IqAsyncSource::from_file(
             expanduser(file),
             center_freq,
             sample_rate,
             DEFAULT_CHUNK_SIZE,
-            src.iq_format(),
+            src.iq_format()?,
         )
         .await?),
         #[cfg(feature = "rtlsdr")]
