@@ -35,38 +35,34 @@ pub(crate) struct CaptureParams {
     pub center_freq: u32,
     /// Sample rate in samples per second, when present in the filename.
     pub sample_rate: Option<u32>,
-    /// I/Q format hint, such as `cf32` for Gqrx float captures.
-    pub format: Option<&'static str>,
+    /// I/Q format, when the filename encodes it.
+    pub format: Option<desperado::IqFormat>,
 }
 
 /// Infer capture parameters from known filename conventions.
+///
+/// GQRX, SDRuno and rtl_sdr names (including `.zst`) are recognised by
+/// [`desperado::capture`]; any other name ending in `<digits>kHz` still
+/// yields a center frequency.
 pub(crate) fn infer_capture_params(path: &str) -> Option<CaptureParams> {
-    infer_gqrx_capture_params(path).or_else(|| {
-        infer_sdruno_center_freq(path).map(|center_freq| CaptureParams {
-            center_freq,
-            sample_rate: None,
-            format: None,
+    desperado::capture::parse_capture_filename(path)
+        .and_then(|meta| {
+            Some(CaptureParams {
+                center_freq: meta.center_freq_hz?,
+                sample_rate: meta.sample_rate_hz,
+                format: meta.format,
+            })
         })
-    })
+        .or_else(|| {
+            infer_khz_center_freq(path).map(|center_freq| CaptureParams {
+                center_freq,
+                sample_rate: None,
+                format: None,
+            })
+        })
 }
 
-fn infer_gqrx_capture_params(path: &str) -> Option<CaptureParams> {
-    let stem = Path::new(path).file_stem()?.to_string_lossy();
-    let parts: Vec<&str> = stem.split('_').collect();
-    let fc_pos = parts.iter().rposition(|&part| part == "fc")?;
-    if fc_pos < 2 {
-        return None;
-    }
-    let center_freq = parts[fc_pos - 2].parse::<u32>().ok()?;
-    let sample_rate = parts[fc_pos - 1].parse::<u32>().ok()?;
-    Some(CaptureParams {
-        center_freq,
-        sample_rate: Some(sample_rate),
-        format: Some("cf32"),
-    })
-}
-
-pub(crate) fn infer_sdruno_center_freq(path: &str) -> Option<u32> {
+fn infer_khz_center_freq(path: &str) -> Option<u32> {
     let name = Path::new(path).file_name()?.to_string_lossy();
     let lower = name.to_ascii_lowercase();
     let khz_pos = lower.rfind("khz")?;
@@ -230,7 +226,18 @@ mod tests {
         let params = infer_capture_params("gqrx_20260518_114025_136500000_1800000_fc.raw").unwrap();
         assert_eq!(params.center_freq, 136_500_000);
         assert_eq!(params.sample_rate, Some(1_800_000));
-        assert_eq!(params.format, Some("cf32"));
+        assert_eq!(params.format, Some(desperado::IqFormat::Cf32));
+    }
+
+    #[test]
+    fn infers_compressed_and_rtlsdr_capture_params() {
+        let params =
+            infer_capture_params("gqrx_20260603_083011_134000000_8000000_fc.raw.zst").unwrap();
+        assert_eq!(params.sample_rate, Some(8_000_000));
+        let params = infer_capture_params("rtlsdr_136850000_1050000_dumpvdl_6min.rtl").unwrap();
+        assert_eq!(params.center_freq, 136_850_000);
+        assert_eq!(params.sample_rate, Some(1_050_000));
+        assert_eq!(params.format, Some(desperado::IqFormat::Cu8));
     }
 
     #[test]

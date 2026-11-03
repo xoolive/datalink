@@ -208,15 +208,15 @@ pub(crate) struct Options {
     format: SampleFormat,
 
     /// Recording center frequency in Hz
-    #[arg(long, default_value_t = 10_000_000)]
+    #[arg(long, default_value_t = 10_000_000, value_parser = crate::source::parse_hz_arg)]
     center_freq: u32,
 
     /// Recording sample rate in samples/s
-    #[arg(long, default_value_t = 8_000_000)]
+    #[arg(long, default_value_t = 8_000_000, value_parser = crate::source::parse_hz_arg)]
     sample_rate: u32,
 
     /// HFDL channel frequencies, in Hz or kHz. Defaults to known channels within the recording bandwidth.
-    #[arg(long, num_args = 1..)]
+    #[arg(long, num_args = 1.., value_parser = crate::source::parse_hz_f64_arg)]
     channel: Option<Vec<f64>>,
 
     /// Start offset in seconds for file decoding
@@ -930,7 +930,7 @@ mod tests {
     fn gqrx_inferred_params_cover_hfdl_channels() {
         let params = infer_capture_params("gqrx_20260518_114025_10000000_8000000_fc.raw").unwrap();
         let channels = channels_khz_for(None, params.sample_rate.unwrap(), params.center_freq);
-        assert_eq!(params.format, Some("cf32"));
+        assert_eq!(params.format, Some(desperado::IqFormat::Cf32));
         assert!(channels.contains(&10081.0));
         assert!(channels.contains(&11387.0));
         assert!(!channels.contains(&6529.0));
