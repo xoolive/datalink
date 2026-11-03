@@ -173,10 +173,13 @@ const KNOWN_HFDL_CHANNELS_KHZ: &[f64] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum SampleFormat {
     /// Unsigned interleaved 8-bit complex samples.
+    #[value(alias = "cu8")]
     U8,
     /// Signed interleaved 16-bit complex samples.
+    #[value(aliases = ["s16", "s16le", "s16_le"])]
     Cs16,
     /// Interleaved 32-bit floating-point complex samples.
+    #[value(alias = "f32")]
     Cf32,
     /// 16-bit stereo WAV I/Q file (auto-selected for .wav sources when --format is omitted).
     Wav16,
@@ -257,9 +260,14 @@ pub(crate) async fn decode_file_values(
 ) -> anyhow::Result<Vec<DecodedEvent>> {
     let options = Options {
         source: Some(source.parse()?),
-        format: format
-            .and_then(parse_sample_format)
-            .unwrap_or(SampleFormat::Cf32),
+        format: match format {
+            Some(name) => parse_sample_format(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unsupported HFDL I/Q format {name:?}; expected u8, cs16 (s16), cf32 or wav16"
+                )
+            })?,
+            None => SampleFormat::Cf32,
+        },
         center_freq: center_freq.unwrap_or(10_000_000),
         sample_rate: sample_rate.unwrap_or(8_000_000),
         channel: channels.map(|v| v.iter().map(|&hz| hz as f64).collect()),
@@ -280,8 +288,8 @@ pub(crate) async fn decode_file_values(
 fn parse_sample_format(value: &str) -> Option<SampleFormat> {
     match value.to_ascii_lowercase().as_str() {
         "u8" | "cu8" => Some(SampleFormat::U8),
-        "cs16" => Some(SampleFormat::Cs16),
-        "cf32" => Some(SampleFormat::Cf32),
+        "cs16" | "s16" | "s16le" | "s16_le" => Some(SampleFormat::Cs16),
+        "cf32" | "f32" => Some(SampleFormat::Cf32),
         "wav16" | "wav" => Some(SampleFormat::Wav16),
         _ => None,
     }
@@ -517,11 +525,11 @@ async fn open_source(src: &Source) -> anyhow::Result<desperado::IqAsyncSource> {
             center_freq,
             sample_rate,
             65_536,
-            src.iq_format(),
+            src.iq_format()?,
         )),
         Address::File { file } => {
             Ok(
-                IqAsyncSource::from_file(file, center_freq, sample_rate, 65_536, src.iq_format())
+                IqAsyncSource::from_file(file, center_freq, sample_rate, 65_536, src.iq_format()?)
                     .await?,
             )
         }

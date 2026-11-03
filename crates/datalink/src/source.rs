@@ -23,6 +23,27 @@ pub enum SourceParseError {
     /// The source string could not be parsed as a URL.
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+    /// The I/Q sample format is not recognised.
+    #[error(
+        "unsupported I/Q format {0:?}; expected cu8 (u8), cs8 (s8), cs16 (s16, s16le) or cf32 (f32)"
+    )]
+    UnsupportedFormat(String),
+}
+
+/// Parse an I/Q sample format name.
+///
+/// Besides desperado's own names (`cu8`, `cs8`, `cs16`, `cf32`), this accepts
+/// the names used by acarsdec and dumpvdl2 (`U8`, `S16`, `S16_LE`) and a few
+/// other common spellings, case-insensitively.
+pub fn parse_iq_format(value: &str) -> Result<IqFormat, SourceParseError> {
+    let normalized = value.trim().to_ascii_lowercase().replace(['_', '-'], "");
+    match normalized.as_str() {
+        "cu8" | "u8" => Ok(IqFormat::Cu8),
+        "cs8" | "s8" | "i8" => Ok(IqFormat::Cs8),
+        "cs16" | "s16" | "s16le" | "cs16le" | "i16" => Ok(IqFormat::Cs16),
+        "cf32" | "f32" | "f32le" | "cf32le" | "fc32" => Ok(IqFormat::Cf32),
+        _ => Err(SourceParseError::UnsupportedFormat(value.to_string())),
+    }
 }
 
 /// Concrete source address selected after parsing CLI or TOML input.
@@ -125,12 +146,13 @@ impl Source {
         }
     }
 
-    pub fn iq_format(&self) -> IqFormat {
+    /// I/Q sample format for file and stdin input, defaulting to `cu8`.
+    ///
+    /// Unknown format names are an error rather than a silent fallback.
+    pub fn iq_format(&self) -> Result<IqFormat, SourceParseError> {
         self.format
             .as_deref()
-            .unwrap_or("cu8")
-            .parse()
-            .unwrap_or(IqFormat::Cu8)
+            .map_or(Ok(IqFormat::Cu8), parse_iq_format)
     }
 
     pub fn gain_or(&self, default: Gain) -> Gain {
@@ -398,6 +420,35 @@ channels = [131525000, 131725000]
             src.channels_with(|_| vec![]),
             vec![131_525_000, 131_725_000]
         );
+    }
+
+    #[test]
+    fn parses_iq_format_aliases() {
+        for (name, expected) in [
+            ("cu8", IqFormat::Cu8),
+            ("U8", IqFormat::Cu8),
+            ("cs8", IqFormat::Cs8),
+            ("cs16", IqFormat::Cs16),
+            ("S16", IqFormat::Cs16),
+            ("S16_LE", IqFormat::Cs16),
+            ("s16le", IqFormat::Cs16),
+            ("cf32", IqFormat::Cf32),
+            ("F32", IqFormat::Cf32),
+        ] {
+            assert_eq!(parse_iq_format(name).unwrap(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_iq_format() {
+        let src: Source = "file:///tmp/x.raw?format=s12".parse().unwrap();
+        assert!(src.iq_format().is_err());
+    }
+
+    #[test]
+    fn defaults_iq_format_to_cu8() {
+        let src: Source = "file:///tmp/x.raw".parse().unwrap();
+        assert_eq!(src.iq_format().unwrap(), IqFormat::Cu8);
     }
 
     #[test]
