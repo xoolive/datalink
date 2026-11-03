@@ -14,6 +14,19 @@ pub enum SourceClass {
     Frames,
 }
 
+/// Where an event's absolute `timestamp` comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeSource {
+    /// Capture start time (from the file name or an explicit `start_time`)
+    /// plus the frame's offset into the recording.
+    Capture,
+    /// Wall-clock time at the start of a live run plus the processed-sample offset.
+    Wallclock,
+    /// Timestamp provided by an upstream feed such as Airframes.io.
+    Upstream,
+}
+
 // TODO remove alias
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -58,8 +71,17 @@ pub struct DecodedEvent {
     /// Event class emitted by the receiver; currently `"message"` for decoded rows.
     pub event: String,
     /// Receive or upstream event timestamp as Unix epoch seconds when available.
+    ///
+    /// For file and stdin input this is only set when the capture start time is
+    /// known; see [`DecodedEvent::time_source`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<f64>,
+    /// Seconds from the start of the recording (or live run) to the frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_offset: Option<f64>,
+    /// Provenance of `timestamp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_source: Option<TimeSource>,
     /// Physical or feed bearer that produced the message.
     pub bearer: Bearer,
     /// Metadata describing the file, SDR, websocket, or frame source.

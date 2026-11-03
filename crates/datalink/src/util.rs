@@ -79,6 +79,16 @@ fn infer_khz_center_freq(path: &str) -> Option<u32> {
     digits.parse::<u32>().ok().map(|khz| khz * 1000)
 }
 
+/// Capture start time (Unix seconds, UTC) encoded in a capture filename
+/// (GQRX and SDRuno conventions, see [`desperado::capture`]).
+pub(crate) fn infer_capture_start(path: &str) -> Option<f64> {
+    let start = desperado::capture::parse_capture_filename(path)?.start?;
+    start
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs_f64())
+}
+
 #[cfg(feature = "hackrf")]
 pub(crate) fn hackrf_gain(src: &crate::source::Source) -> desperado::Gain {
     let mut elements = Vec::new();
@@ -238,6 +248,23 @@ mod tests {
         assert_eq!(params.center_freq, 136_850_000);
         assert_eq!(params.sample_rate, Some(1_050_000));
         assert_eq!(params.format, Some(desperado::IqFormat::Cu8));
+    }
+
+    #[test]
+    fn infers_capture_start() {
+        assert_eq!(
+            infer_capture_start("~/x/gqrx_20260603_083011_134000000_8000000_fc.raw.zst"),
+            Some(1_780_475_411.0)
+        );
+        assert_eq!(
+            infer_capture_start("SDRuno_20200908_152020Z_129535kHz.wav"),
+            Some(1_599_578_420.0)
+        );
+        assert_eq!(
+            infer_capture_start("rtlsdr_136850000_1050000_dumpvdl_6min.rtl"),
+            None
+        );
+        assert_eq!(infer_capture_start("HFDL_10081kHz.wav"), None);
     }
 
     #[test]

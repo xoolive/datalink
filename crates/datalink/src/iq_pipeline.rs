@@ -5,8 +5,8 @@
 //! recording timestamp, run every channel demodulator, and return decoded frame
 //! candidates with a [`FrameContext`].
 
+use crate::time_base::TimeBase;
 use acars::demod::resample::ResampleAdapter;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
@@ -18,8 +18,10 @@ pub(crate) struct FrameContext {
     pub sample_index: u64,
     /// Seconds elapsed from the beginning of the recording or live run.
     pub seconds_into_recording: f64,
-    /// Best-effort Unix timestamp derived from the run start plus elapsed samples.
-    pub timestamp_unix: f64,
+    /// Unix timestamp derived from the time base plus elapsed samples, when known.
+    pub timestamp_unix: Option<f64>,
+    /// Provenance of `timestamp_unix`.
+    pub time_source: Option<crate::event::TimeSource>,
 }
 
 /// Stateful adapter that feeds one resampled I/Q stream into many demodulators.
@@ -28,7 +30,7 @@ pub(crate) struct IqPipeline<'a, D> {
     demods: &'a mut [D],
     sample_index: &'a mut u64,
     sample_rate: u32,
-    run_start: SystemTime,
+    time_base: TimeBase,
 }
 
 impl<'a, D> IqPipeline<'a, D> {
@@ -37,14 +39,14 @@ impl<'a, D> IqPipeline<'a, D> {
         demods: &'a mut [D],
         sample_index: &'a mut u64,
         sample_rate: u32,
-        run_start: SystemTime,
+        time_base: TimeBase,
     ) -> Self {
         Self {
             adapter,
             demods,
             sample_index,
             sample_rate,
-            run_start,
+            time_base,
         }
     }
 }
@@ -64,11 +66,7 @@ where
     for sample in pipeline.adapter.feed(re, im) {
         *pipeline.sample_index = pipeline.sample_index.saturating_add(1);
         let seconds_into_recording = *pipeline.sample_index as f64 / pipeline.sample_rate as f64;
-        let frame_ts = pipeline.run_start + Duration::from_secs_f64(seconds_into_recording);
-        let timestamp_unix = frame_ts
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or_default();
+        let timestamp_unix = pipeline.time_base.timestamp(seconds_into_recording);
 
         for (channel_index, demod) in pipeline.demods.iter_mut().enumerate() {
             for frame in process(demod, sample.re, sample.im)? {
@@ -78,6 +76,7 @@ where
                         sample_index: *pipeline.sample_index,
                         seconds_into_recording,
                         timestamp_unix,
+                        time_source: pipeline.time_base.time_source(),
                     },
                     frame,
                 ));

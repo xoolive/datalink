@@ -4,6 +4,7 @@ mod hfdl;
 mod iq_pipeline;
 mod merged;
 mod source;
+mod time_base;
 mod util;
 mod vdl2;
 mod vhf;
@@ -127,6 +128,8 @@ fn run_decode(command: DecodeCommand) -> anyhow::Result<()> {
             let event = DecodedEvent {
                 event: "message".to_string(),
                 timestamp: None,
+                time_offset: None,
+                time_source: None,
                 bearer: Bearer::Vhf,
                 source: SourceMetadata {
                     id: "decode_cli".into(),
@@ -151,6 +154,8 @@ fn run_decode(command: DecodeCommand) -> anyhow::Result<()> {
             let event = DecodedEvent {
                 event: "message".to_string(),
                 timestamp: None,
+                time_offset: None,
+                time_source: None,
                 bearer: Bearer::Vdl2,
                 source: SourceMetadata {
                     id: "decode_cli".into(),
@@ -201,6 +206,8 @@ fn print_app_event(app: acars::decode::payload::AcarsAppPayload) -> anyhow::Resu
     let event = DecodedEvent {
         event: "message".to_string(),
         timestamp: None,
+        time_offset: None,
+        time_source: None,
         bearer: Bearer::Decoded,
         source: SourceMetadata {
             id: "decode_cli".into(),

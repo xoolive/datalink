@@ -59,7 +59,6 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::time::SystemTime;
 
 const DEFAULT_CENTER_FREQ: u32 = 136_850_000;
 
@@ -152,6 +151,8 @@ pub(crate) struct Options {
     #[serde(default)]
     format: Option<String>,
     #[serde(default)]
+    start_time: Option<String>,
+    #[serde(default)]
     center_freq: Option<u32>,
     #[serde(default)]
     sample_rate: Option<u32>,
@@ -187,6 +188,10 @@ pub(crate) struct Cli {
     /// I/Q sample format for file input: cu8 (u8), cs8, cs16 (s16), cf32
     #[arg(long)]
     format: Option<String>,
+    /// Capture start time for file/stdin input (RFC 3339 or Unix seconds).
+    /// Without it, file timestamps are only set when the filename encodes the start.
+    #[arg(long)]
+    start_time: Option<String>,
     /// Center frequency in Hz for file and SDR sources (e.g. 131700000 or 131.7M)
     #[arg(long, value_parser = crate::source::parse_hz_arg)]
     center_freq: Option<u32>,
@@ -225,6 +230,9 @@ impl Options {
         }
         if cli.format.is_some() {
             self.format = cli.format;
+        }
+        if cli.start_time.is_some() {
+            self.start_time = cli.start_time;
         }
         if cli.center_freq.is_some() {
             self.center_freq = cli.center_freq;
@@ -341,6 +349,9 @@ fn apply_source_overrides(options: &mut Options) {
     if options.format.is_some() {
         source.format = options.format.clone();
     }
+    if options.start_time.is_some() {
+        source.start_time = options.start_time.clone();
+    }
 }
 
 /// Decode a VDL2 file source and collect common decoded events for merged mode.
@@ -369,6 +380,7 @@ pub(crate) async fn decode_file_values(
         mixer_gain: None,
         vga_gain: None,
         format: format.map(str::to_string),
+        start_time: None,
     };
     let options = Options {
         source: Some(src.clone()),
@@ -438,7 +450,7 @@ async fn decode_source(
         .collect();
 
     let mut stream = open_source(&effective_src).await?;
-    let run_start = SystemTime::now();
+    let time_base = crate::time_base::TimeBase::for_source(&effective_src)?;
     let mut sample_indices = vec![0_u64; channels.len()];
     let mut stats = DecodeStats::default();
 
@@ -458,7 +470,7 @@ async fn decode_source(
                         one,
                         &mut sample_indices[idx],
                         demod_sample_rate,
-                        run_start,
+                        time_base,
                     );
                     let frames =
                         collect_iq_frames(&mut pipeline, sample.re, sample.im, |d, re, im| {
@@ -534,7 +546,9 @@ async fn handle_avlc_frame(
 
             let event = DecodedEvent {
                 event: "message".to_string(),
-                timestamp: Some(ctx.timestamp_unix),
+                timestamp: ctx.timestamp_unix,
+                time_offset: Some(ctx.seconds_into_recording),
+                time_source: ctx.time_source,
                 bearer: receiver_bearer,
                 source: source_meta.clone(),
                 receiver: Some(ReceiverMetadata {
@@ -607,7 +621,7 @@ async fn decode_wav_source(
             d
         })
         .collect();
-    let run_start = SystemTime::now();
+    let time_base = crate::time_base::TimeBase::for_source(&effective_src)?;
     let mut sample_index: u64 = 0;
     let mut stats = DecodeStats::default();
     let mut samples = reader.samples::<i16>();
@@ -619,7 +633,7 @@ async fn decode_wav_source(
             &mut demods,
             &mut sample_index,
             sample_rate,
-            run_start,
+            time_base,
         );
         let frames =
             collect_iq_frames(
@@ -797,6 +811,7 @@ mod tests {
             mixer_gain: None,
             vga_gain: None,
             format: None,
+            start_time: None,
         }
     }
 

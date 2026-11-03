@@ -399,6 +399,8 @@ fn event_from_candidate(
     Some(DecodedEvent {
         event: "message".to_string(),
         timestamp: None,
+        time_offset: None,
+        time_source: None,
         bearer: receiver_bearer,
         source: source_meta.clone(),
         receiver: Some(ReceiverMetadata {
