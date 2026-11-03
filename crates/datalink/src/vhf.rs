@@ -161,14 +161,14 @@ pub(crate) struct Cli {
     /// I/Q sample format for file input: cu8, cs8, cs16, cf32
     #[arg(long)]
     format: Option<String>,
-    /// Center frequency for file and SDR sources
-    #[arg(long)]
+    /// Center frequency in Hz for file and SDR sources (e.g. 131700000 or 131.7M)
+    #[arg(long, value_parser = crate::source::parse_hz_arg)]
     center_freq: Option<u32>,
-    /// Sample rate for file and SDR sources
-    #[arg(long)]
+    /// Sample rate in samples/s for file and SDR sources (e.g. 1050000 or 1.05M)
+    #[arg(long, value_parser = crate::source::parse_hz_arg)]
     sample_rate: Option<u32>,
-    /// ACARS channel frequencies in Hz
-    #[arg(long, num_args = 1..)]
+    /// ACARS channel frequencies in Hz (unit suffixes accepted, e.g. 131.725M)
+    #[arg(long, num_args = 1.., value_parser = crate::source::parse_hz_arg)]
     channel: Option<Vec<u32>>,
     /// Publish decoded messages to application-specific Redis pub/sub topics
     #[arg(long, value_name = "REDIS URL")]

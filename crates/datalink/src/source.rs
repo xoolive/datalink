@@ -298,15 +298,41 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-fn parse_hz(value: impl AsRef<str>) -> Option<u32> {
-    let value = value.as_ref().trim();
+/// Parse a frequency or rate such as `131725000`, `131.725M`, `1.05MHz` or `12.5k`.
+///
+/// Returns the value in Hz as a float; suffixes `k`, `M` and `G` (optionally
+/// followed by `Hz`) are case-insensitive. Bare numbers are returned unchanged.
+fn parse_hz_f64(value: &str) -> Option<f64> {
+    let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    let value = lower.strip_suffix("hz").unwrap_or(&lower).trim_end();
     let (num, mult) = match value.chars().last()? {
-        'k' | 'K' => (&value[..value.len() - 1], 1_000.0),
-        'm' | 'M' => (&value[..value.len() - 1], 1_000_000.0),
-        'g' | 'G' => (&value[..value.len() - 1], 1_000_000_000.0),
+        'k' => (&value[..value.len() - 1], 1e3),
+        'm' => (&value[..value.len() - 1], 1e6),
+        'g' => (&value[..value.len() - 1], 1e9),
         _ => (value, 1.0),
     };
-    num.parse::<f64>().ok().map(|v| (v * mult).round() as u32)
+    let hz = num.trim().parse::<f64>().ok()? * mult;
+    (hz.is_finite() && hz >= 0.0).then_some(hz)
+}
+
+fn parse_hz(value: impl AsRef<str>) -> Option<u32> {
+    let hz = parse_hz_f64(value.as_ref())?.round();
+    (hz <= u32::MAX as f64).then_some(hz as u32)
+}
+
+/// Clap value parser for frequencies and sample rates in Hz, with unit suffixes.
+pub(crate) fn parse_hz_arg(value: &str) -> Result<u32, String> {
+    parse_hz(value).ok_or_else(|| {
+        format!("invalid frequency {value:?}; expected Hz, optionally with a k/M/G suffix (e.g. 131.725M)")
+    })
+}
+
+/// Clap value parser like [`parse_hz_arg`] that keeps a floating-point value.
+pub(crate) fn parse_hz_f64_arg(value: &str) -> Result<f64, String> {
+    parse_hz_f64(value).ok_or_else(|| {
+        format!("invalid frequency {value:?}; expected a number, optionally with a k/M/G suffix")
+    })
 }
 
 #[cfg(test)]
@@ -398,6 +424,22 @@ channels = [131525000, 131725000]
             src.channels_with(|_| vec![]),
             vec![131_525_000, 131_725_000]
         );
+    }
+
+    #[test]
+    fn parses_hz_with_units() {
+        assert_eq!(parse_hz_arg("131725000"), Ok(131_725_000));
+        assert_eq!(parse_hz_arg("131.725M"), Ok(131_725_000));
+        assert_eq!(parse_hz_arg("131.725MHz"), Ok(131_725_000));
+        assert_eq!(parse_hz_arg("1.05m"), Ok(1_050_000));
+        assert_eq!(parse_hz_arg("12.5 kHz"), Ok(12_500));
+        assert_eq!(parse_hz_arg("1G"), Ok(1_000_000_000));
+        assert!(parse_hz_arg("").is_err());
+        assert!(parse_hz_arg("abc").is_err());
+        assert!(parse_hz_arg("-1M").is_err());
+        assert!(parse_hz_arg("5G").is_err());
+        assert_eq!(parse_hz_f64_arg("11184"), Ok(11_184.0));
+        assert_eq!(parse_hz_f64_arg("11.184M"), Ok(11_184_000.0));
     }
 
     #[test]

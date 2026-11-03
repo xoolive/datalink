@@ -205,15 +205,15 @@ pub(crate) struct Options {
     format: SampleFormat,
 
     /// Recording center frequency in Hz
-    #[arg(long, default_value_t = 10_000_000)]
+    #[arg(long, default_value_t = 10_000_000, value_parser = crate::source::parse_hz_arg)]
     center_freq: u32,
 
     /// Recording sample rate in samples/s
-    #[arg(long, default_value_t = 8_000_000)]
+    #[arg(long, default_value_t = 8_000_000, value_parser = crate::source::parse_hz_arg)]
     sample_rate: u32,
 
     /// HFDL channel frequencies, in Hz or kHz. Defaults to known channels within the recording bandwidth.
-    #[arg(long, num_args = 1..)]
+    #[arg(long, num_args = 1.., value_parser = crate::source::parse_hz_f64_arg)]
     channel: Option<Vec<f64>>,
 
     /// Start offset in seconds for file decoding
