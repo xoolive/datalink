@@ -24,26 +24,19 @@ pub enum SourceParseError {
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
     /// The I/Q sample format is not recognised.
-    #[error(
-        "unsupported I/Q format {0:?}; expected cu8 (u8), cs8 (s8), cs16 (s16, s16le) or cf32 (f32)"
-    )]
+    #[error("{0}")]
     UnsupportedFormat(String),
 }
 
 /// Parse an I/Q sample format name.
 ///
-/// Besides desperado's own names (`cu8`, `cs8`, `cs16`, `cf32`), this accepts
-/// the names used by acarsdec and dumpvdl2 (`U8`, `S16`, `S16_LE`) and a few
-/// other common spellings, case-insensitively.
+/// Delegates to [`IqFormat`]'s parser, which accepts desperado's names (`cu8`,
+/// `cs8`, `cs16`, `cf32`) as well as those used by rtl_sdr, acarsdec and
+/// dumpvdl2 (`U8`, `S16`, `S16_LE`), GQRX (`fc`) and SoapySDR.
 pub fn parse_iq_format(value: &str) -> Result<IqFormat, SourceParseError> {
-    let normalized = value.trim().to_ascii_lowercase().replace(['_', '-'], "");
-    match normalized.as_str() {
-        "cu8" | "u8" => Ok(IqFormat::Cu8),
-        "cs8" | "s8" | "i8" => Ok(IqFormat::Cs8),
-        "cs16" | "s16" | "s16le" | "cs16le" | "i16" => Ok(IqFormat::Cs16),
-        "cf32" | "f32" | "f32le" | "cf32le" | "fc32" => Ok(IqFormat::Cf32),
-        _ => Err(SourceParseError::UnsupportedFormat(value.to_string())),
-    }
+    value
+        .parse::<IqFormat>()
+        .map_err(|err| SourceParseError::UnsupportedFormat(err.to_string()))
 }
 
 /// Concrete source address selected after parsing CLI or TOML input.
@@ -321,14 +314,27 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 fn parse_hz(value: impl AsRef<str>) -> Option<u32> {
-    let value = value.as_ref().trim();
-    let (num, mult) = match value.chars().last()? {
-        'k' | 'K' => (&value[..value.len() - 1], 1_000.0),
-        'm' | 'M' => (&value[..value.len() - 1], 1_000_000.0),
-        'g' | 'G' => (&value[..value.len() - 1], 1_000_000_000.0),
-        _ => (value, 1.0),
-    };
-    num.parse::<f64>().ok().map(|v| (v * mult).round() as u32)
+    desperado::parse_si_value(value.as_ref()).ok()
+}
+
+/// Clap value parser for frequencies and sample rates in Hz, with unit
+/// suffixes such as `131.725M`, `1.05MHz` or `12.5 kHz`.
+pub(crate) fn parse_hz_arg(value: &str) -> Result<u32, String> {
+    desperado::parse_si_value(value).map_err(|err| {
+        format!("{err}; expected Hz, optionally with a k/M/G suffix (e.g. 131.725M)")
+    })
+}
+
+/// Clap value parser like [`parse_hz_arg`] that keeps a floating-point value.
+pub(crate) fn parse_hz_f64_arg(value: &str) -> Result<f64, String> {
+    desperado::parse_si_value::<f64>(value)
+        .ok()
+        .filter(|hz| hz.is_finite() && *hz >= 0.0)
+        .ok_or_else(|| {
+            format!(
+                "invalid frequency {value:?}; expected a number, optionally with a k/M/G suffix"
+            )
+        })
 }
 
 #[cfg(test)]
@@ -449,6 +455,22 @@ channels = [131525000, 131725000]
     fn defaults_iq_format_to_cu8() {
         let src: Source = "file:///tmp/x.raw".parse().unwrap();
         assert_eq!(src.iq_format().unwrap(), IqFormat::Cu8);
+    }
+
+    #[test]
+    fn parses_hz_with_units() {
+        assert_eq!(parse_hz_arg("131725000"), Ok(131_725_000));
+        assert_eq!(parse_hz_arg("131.725M"), Ok(131_725_000));
+        assert_eq!(parse_hz_arg("131.725MHz"), Ok(131_725_000));
+        assert_eq!(parse_hz_arg("12.5 kHz"), Ok(12_500));
+        assert_eq!(parse_hz_arg("1G"), Ok(1_000_000_000));
+        assert!(parse_hz_arg("").is_err());
+        assert!(parse_hz_arg("abc").is_err());
+        assert!(parse_hz_arg("-1M").is_err());
+        assert!(parse_hz_arg("5G").is_err());
+        assert_eq!(parse_hz_f64_arg("11184"), Ok(11_184.0));
+        assert_eq!(parse_hz_f64_arg("11.184M"), Ok(11_184_000.0));
+        assert!(parse_hz_f64_arg("-1k").is_err());
     }
 
     #[test]
