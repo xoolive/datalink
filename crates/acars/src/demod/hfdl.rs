@@ -166,6 +166,11 @@ pub struct HfdlPduCandidate {
     pub m1: usize,
     pub byte_len: usize,
     pub bytes: Vec<u8>,
+    /// Symbol index (at [`SYMBOL_RATE`]) just after the frame's last data
+    /// segment, counted from the start of the demodulated window. Divide by
+    /// `SYMBOL_RATE` for the frame end time relative to the window start.
+    #[serde(default)]
+    pub end_symbol: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -508,6 +513,7 @@ pub fn decode_frame_candidate_variants(
             m1: hit.m1,
             byte_len: bytes.len(),
             bytes,
+            end_symbol: data_start + frame_symbols,
         });
     }
     Ok(variants)

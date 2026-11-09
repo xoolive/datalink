@@ -16,8 +16,12 @@ pub(crate) struct FrameContext {
     pub channel_index: usize,
     /// Number of output-rate samples processed since the start of the run.
     pub sample_index: u64,
-    /// Seconds elapsed from the beginning of the recording or live run.
+    /// Seconds of samples processed since the start of the recording or run,
+    /// by sample count.
     pub seconds_into_recording: f64,
+    /// Event `time_offset`: equal to `seconds_into_recording` for files; for
+    /// live input, wall-clock seconds since the first sample.
+    pub time_offset: f64,
     /// Unix timestamp derived from the time base plus elapsed samples, when known.
     pub timestamp_unix: Option<f64>,
     /// Provenance of `timestamp_unix`.
@@ -66,7 +70,7 @@ where
     for sample in pipeline.adapter.feed(re, im) {
         *pipeline.sample_index = pipeline.sample_index.saturating_add(1);
         let seconds_into_recording = *pipeline.sample_index as f64 / pipeline.sample_rate as f64;
-        let timestamp_unix = pipeline.time_base.timestamp(seconds_into_recording);
+        let (timestamp_unix, time_offset) = pipeline.time_base.resolve(seconds_into_recording);
 
         for (channel_index, demod) in pipeline.demods.iter_mut().enumerate() {
             for frame in process(demod, sample.re, sample.im)? {
@@ -75,6 +79,7 @@ where
                         channel_index,
                         sample_index: *pipeline.sample_index,
                         seconds_into_recording,
+                        time_offset,
                         timestamp_unix,
                         time_source: pipeline.time_base.time_source(),
                     },

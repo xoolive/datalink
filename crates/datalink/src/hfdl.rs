@@ -38,6 +38,7 @@ use crate::event::{
     Bearer, DecodedEvent, ProtocolMessage, ReceiverMetadata, SourceClass, SourceMetadata,
 };
 use crate::source::{Address, Source};
+use crate::time_base::TimeBase;
 #[cfg(feature = "hackrf")]
 use crate::util::hackrf_gain;
 #[cfg(feature = "airspy")]
@@ -255,11 +256,16 @@ pub(crate) async fn decode_file_values(
     channels: Option<&[u32]>,
     start_second: f64,
     max_seconds: f64,
+    start_time: Option<&str>,
     source_meta: &SourceMetadata,
     receiver_bearer: Bearer,
 ) -> anyhow::Result<Vec<DecodedEvent>> {
+    let mut source: Source = source.parse()?;
+    if let Some(start_time) = start_time {
+        source.start_time = Some(start_time.to_string());
+    }
     let options = Options {
-        source: Some(source.parse()?),
+        source: Some(source),
         format: match format {
             Some(name) => parse_sample_format(name).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -342,7 +348,9 @@ async fn collect_decoded_pdus(
         .source
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("missing source; pass an explicit I/Q or SDR source"))?;
-    let (samples, sample_rate, center_freq, channels) = samples_for_source(source, options).await?;
+    let (samples, sample_rate, center_freq, channels, time_base) =
+        samples_for_source(source, options).await?;
+    let time_source = time_base.time_source();
     anyhow::ensure!(
         !channels.is_empty(),
         "no HFDL channels selected; pass --channel or use a wider/centered recording"
@@ -364,9 +372,17 @@ async fn collect_decoded_pdus(
         frame_sync_count += diagnostics.frame_hits.len() as u64;
         candidate_count += diagnostics.pdu_candidates.len() as u64;
         for candidate in &diagnostics.pdu_candidates {
-            if let Some(event) =
+            // Frame end, in seconds from the first sample read (the window
+            // starts `start_second` into the recording or live run).
+            let offset = options.start_second.max(0.0)
+                + candidate.end_symbol as f64 / f64::from(acars::demod::hfdl::SYMBOL_RATE);
+            let (timestamp, time_offset) = time_base.resolve(offset);
+            if let Some(mut event) =
                 event_from_candidate(&candidate.bytes, channel_khz, source_meta, receiver_bearer)
             {
+                event.timestamp = timestamp;
+                event.time_offset = Some(time_offset);
+                event.time_source = timestamp.and(time_source);
                 pdu_ok += 1;
                 out.push(event);
             }
@@ -417,7 +433,7 @@ fn event_from_candidate(
 async fn samples_for_source(
     source: &Source,
     options: &Options,
-) -> anyhow::Result<(Vec<Complex<f32>>, u32, u32, Vec<f64>)> {
+) -> anyhow::Result<(Vec<Complex<f32>>, u32, u32, Vec<f64>, TimeBase)> {
     let mut effective_source = source.clone();
     if effective_source.center_freq.is_none() {
         effective_source.center_freq = Some(options.center_freq);
@@ -465,18 +481,31 @@ async fn samples_for_source(
                 options.start_second,
                 options.max_seconds,
             )?;
-            return Ok((samples, sample_rate, center_freq, channels));
+            let time_base = TimeBase::for_source(&effective_source)?;
+            return Ok((samples, sample_rate, center_freq, channels, time_base));
         }
-        _ => read_sdr_window(&effective_source, options.start_second, options.max_seconds).await?,
+        _ => {
+            let mut time_base = TimeBase::for_source(&effective_source)?;
+            let samples = read_sdr_window(
+                &effective_source,
+                options.start_second,
+                options.max_seconds,
+                &mut time_base,
+            )
+            .await?;
+            (samples, time_base)
+        }
     };
+    let (samples, time_base) = samples;
 
-    Ok((samples, sample_rate, center_freq, channels))
+    Ok((samples, sample_rate, center_freq, channels, time_base))
 }
 
 async fn read_sdr_window(
     source: &Source,
     start_second: f64,
     max_seconds: f64,
+    time_base: &mut TimeBase,
 ) -> anyhow::Result<Vec<Complex<f32>>> {
     let sample_rate = source.sample_rate.unwrap_or(8_000_000);
     let skip = (start_second.max(0.0) * sample_rate as f64).round() as usize;
@@ -494,6 +523,7 @@ async fn read_sdr_window(
                 break;
             };
             let chunk = chunk_result?;
+            time_base.on_chunk_warn(chunk.len(), sample_rate, "datalink hfdl");
             for sample in chunk {
                 if seen >= skip && out.len() < keep {
                     out.push(Complex::new(sample.re, sample.im));

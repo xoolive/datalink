@@ -402,6 +402,7 @@ async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow
                     receiver.channels.as_deref(),
                     source.start_second.unwrap_or(0.0),
                     source.max_seconds.unwrap_or(20.0),
+                    source.start_time.as_deref(),
                     &source_meta,
                     receiver.bearer,
                 )
@@ -417,6 +418,7 @@ async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow
                     source.center_freq,
                     source.sample_rate,
                     receiver.channels.as_deref(),
+                    source.start_time.as_deref(),
                     &source_meta,
                     receiver.bearer,
                 )
@@ -432,6 +434,7 @@ async fn run_iq_source(source: &SourceConfig, output: &mut OutputSink) -> anyhow
                     source.center_freq,
                     source.sample_rate,
                     receiver.channels.as_deref(),
+                    source.start_time.as_deref(),
                     &source_meta,
                     receiver.bearer,
                 )
@@ -487,9 +490,10 @@ async fn run_live_iq_source(
     );
 
     let mut stream = crate::vdl2::open_source(&runtime_source).await?;
-    let time_base = crate::time_base::TimeBase::for_source(&runtime_source)?;
+    let mut time_base = crate::time_base::TimeBase::for_source(&runtime_source)?;
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
+        time_base.on_chunk_warn(chunk.len(), raw_sample_rate, "datalink");
         for receiver in &mut receivers {
             for event in receiver.process_chunk(&chunk, time_base, source_meta)? {
                 output.emit(event).await?;
@@ -614,7 +618,7 @@ impl LiveReceiver {
                             events.push(DecodedEvent {
                                 event: "message".to_string(),
                                 timestamp: ctx.timestamp_unix,
-                                time_offset: Some(ctx.seconds_into_recording),
+                                time_offset: Some(ctx.time_offset),
                                 time_source: ctx.time_source,
                                 bearer: *bearer,
                                 source: source_meta.clone(),
@@ -669,7 +673,7 @@ impl LiveReceiver {
                             events.push(DecodedEvent {
                                 event: "message".to_string(),
                                 timestamp: ctx.timestamp_unix,
-                                time_offset: Some(ctx.seconds_into_recording),
+                                time_offset: Some(ctx.time_offset),
                                 time_source: ctx.time_source,
                                 bearer: *bearer,
                                 source: source_meta.clone(),

@@ -316,12 +316,14 @@ fn apply_source_overrides(options: &mut Options) {
 }
 
 /// Decode a VHF ACARS file source and collect common decoded events for merged mode.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn decode_file_values(
     file: &str,
     format: Option<&str>,
     center_freq: Option<u32>,
     sample_rate: Option<u32>,
     channels: Option<&[u32]>,
+    start_time: Option<&str>,
     source_meta: &SourceMetadata,
     receiver_bearer: Bearer,
 ) -> anyhow::Result<Vec<DecodedEvent>> {
@@ -341,7 +343,7 @@ pub(crate) async fn decode_file_values(
         mixer_gain: None,
         vga_gain: None,
         format: format.map(str::to_string),
-        start_time: None,
+        start_time: start_time.map(str::to_string),
     };
     let mut out = Vec::new();
     decode_source(
@@ -399,7 +401,7 @@ async fn decode_source(
         .collect();
 
     let mut stream = open_source(&effective_src).await?;
-    let time_base = crate::time_base::TimeBase::for_source(&effective_src)?;
+    let mut time_base = crate::time_base::TimeBase::for_source(&effective_src)?;
     let mut sample_indices = vec![0_u64; channels.len()];
     let mut stats = DecodeStats::default();
 
@@ -409,6 +411,7 @@ async fn decode_source(
             _ = tokio::signal::ctrl_c() => None,
         } {
             let chunk = chunk_result?;
+            time_base.on_chunk_warn(chunk.len(), raw_sample_rate, "datalink vhf");
             for channel_chunk in channelizer.process(&chunk) {
                 let idx = channel_chunk.channel_index;
                 for sample in channel_chunk.samples {
@@ -484,7 +487,7 @@ async fn handle_acars_frame(
             let event = DecodedEvent {
                 event: "message".to_string(),
                 timestamp: ctx.timestamp_unix,
-                time_offset: Some(ctx.seconds_into_recording),
+                time_offset: Some(ctx.time_offset),
                 time_source: ctx.time_source,
                 bearer: receiver_bearer,
                 source: source_meta.clone(),
