@@ -9,6 +9,9 @@ Every decoded row uses a common `DecodedEvent` envelope.
 
 The output includes:
 
+- `timestamp`: Unix epoch seconds, when an absolute time is known (see below);
+- `time_offset`: seconds from the start of the recording or live run to the frame (I/Q sources);
+- `time_source`: where `timestamp` comes from: `capture`, `wallclock`, or `upstream`;
 - `bearer`: `vhf`, `vdl2`, `hfdl`, `decoded`, or `unknown`;
 - `source`: file, SDR, websocket, or standalone decode metadata;
 - `receiver`: channel information for I/Q receivers;
@@ -16,6 +19,29 @@ The output includes:
 - `kinematics`: best-effort position, speed, altitude, or meteorological values;
 - `raw_frame_hex`: raw frame bytes when available;
 - `message`: the protocol-specific decoded body.
+
+### Timestamps
+
+How `timestamp` is set depends on the source:
+
+| Source | `timestamp` | `time_source` |
+| --- | --- | --- |
+| Live SDR | arrival time of the samples containing the frame (see below) | `wallclock` |
+| File with `start_time` set (`--start-time`, `?start_time=`, or `start_time` in a TOML source) | `start_time` + `time_offset` | `capture` |
+| Gqrx (`gqrx_YYYYMMDD_HHMMSS_…`) or SDRuno (`SDRuno_YYYYMMDD_HHMMSSZ_…`) file | start encoded in the filename + `time_offset` | `capture` |
+| Other files and stdin | omitted | omitted |
+| Airframes.io | upstream timestamp | `upstream` |
+
+`start_time` accepts RFC 3339 (`2026-06-03T08:30:11Z`) or Unix epoch seconds:
+
+```sh
+datalink vdl2 --format cu8 --center-freq 136850000 --sample-rate 1050000 \
+  --start-time 2026-06-01T12:00:00Z capture.cu8
+```
+
+Decoding a recording never uses the time of decoding as the event time, so replayed captures cannot be mistaken for live reception. `time_offset` is set on all I/Q events (VHF, VDL2 and HFDL) and is useful for comparing decoders on the same recording. It marks the end of the frame; for HFDL, the time also includes `--start-second` when decoding a window.
+
+For live SDR input, each chunk of samples is stamped with the time it arrives and frames are placed within their chunk by sample count. If decoding cannot keep up with the sample rate, the SDR driver drops samples; timestamps still follow real time, and `datalink` prints a warning on stderr when the received samples fall behind real time (first at 2 s, then each time the lag doubles). There, `time_offset` is the wall-clock time since the first sample.
 
 An ADS-C event captured from the airframes.io websocket feed looks like this:
 
