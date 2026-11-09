@@ -511,8 +511,9 @@ dependencies = [
 
 [[package]]
 name = "desperado"
-version = "0.5.1"
-source = "git+https://github.com/xoolive/desperado?branch=feat%2Fcapture-metadata#13983c5a31138e1f38e40a6c55ba89a489544b18"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5d0a44460d70b19d05d16517e0e0b5696c45dc77debc5af11c5f6cfdd53cfa1"
 dependencies = [
  "async-compression",
  "biquad",
@@ -1538,8 +1539,9 @@ dependencies = [
 
 [[package]]
 name = "rs-hackrf"
-version = "0.5.1"
-source = "git+https://github.com/xoolive/desperado?branch=feat%2Fcapture-metadata#13983c5a31138e1f38e40a6c55ba89a489544b18"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53727ffef8d8092a9e9f0bbce1350deed0a75ee41a9404986d4dce72034c16bf"
 dependencies = [
  "nusb",
  "thiserror",
@@ -1548,8 +1550,9 @@ dependencies = [
 
 [[package]]
 name = "rs-rtl"
-version = "0.5.1"
-source = "git+https://github.com/xoolive/desperado?branch=feat%2Fcapture-metadata#13983c5a31138e1f38e40a6c55ba89a489544b18"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2260a79b7705ad9da2b8c4acfa84f0a09f28a02031b768f88bdf32e3faa33c6"
 dependencies = [
  "nusb",
  "thiserror",
@@ -1558,8 +1561,9 @@ dependencies = [
 
 [[package]]
 name = "rs-spy"
-version = "0.5.1"
-source = "git+https://github.com/xoolive/desperado?branch=feat%2Fcapture-metadata#13983c5a31138e1f38e40a6c55ba89a489544b18"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e82b5d2fa2af7072cf8881f0a7a97fa0c125743493db56f1bc1d87c2a7d3abdc"
 dependencies = [
  "num-complex",
  "nusb",
