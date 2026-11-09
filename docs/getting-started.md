@@ -33,7 +33,7 @@ They may need different receiver setups. The key take-away is that, unlike ADS-B
 
 | System        | Typical frequencies        | Coverage                | Common tools in the ecosystem                                                                          |
 | ------------- | -------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------ |
-| VHF ACARS     | mainly 129–131 MHz         | Line of sight           | [`acarsdec`](https://github.com/TLeconte/acarsdec)                                                     |
+| VHF ACARS     | mainly 129–131 MHz         | Line of sight           | [`acarsdec`](https://github.com/f00b4r0/acarsdec)                                                     |
 | VDL Mode 2    | 136–137 MHz                | Line of sight           | [`dumpvdl2`](https://github.com/szpajder/dumpvdl2), [`vdlm2dec`](https://github.com/szpajder/vdlm2dec) |
 | HFDL          | roughly 2–22 MHz HF        | Long range (oceanic)    | [`dumphfdl`](https://github.com/szpajder/dumphfdl)                                                     |
 | Inmarsat AERO | around 1.5 GHz L-band (\*) | Satellite footprint     | [`JAERO`](https://github.com/jontio/JAERO)                                                             |
@@ -44,6 +44,14 @@ They may need different receiver setups. The key take-away is that, unlike ADS-B
 !!! note
 
     The tool names above are ecosystem references, not required dependencies. `datalink` is intended to provide a unified Rust path for the bearers it supports.
+
+[acarsdec 4.7](https://github.com/f00b4r0/acarsdec/releases/tag/v4.7)
+adds raw U8/S16 IQ file and stdin input. This provides a way to compare ACARS
+decoding against `datalink` using the same recording without converting IQ to
+audio first. IQ input requires an explicit sample rate and center frequency;
+`-T` enables timestamps for file/stdin inputs, where they are disabled by default.
+A sufficiently wideband IQ source can also feed separate ACARS and VDL2 decoders,
+provided both receive the same stream with matching format, rate and center frequency.
 
 For reference, here are frequencies for other surveillance systems:
 
@@ -73,15 +81,61 @@ VDL2 channels cluster around 136–137 MHz.
 
 `datalink` uses the same idea: choose known channels that fit the source bandwidth when possible, or fall back to default scan channels.
 
-|   Frequency | Support          |   Frequency | Support                 |
-| ----------: | ---------------- | ----------: | ----------------------- |
-| 136.100 MHz | USA ARINC        | 136.650 MHz | USA ARINC               |
-| 136.675 MHz | Europe ARINC     | 136.700 MHz | USA ARINC               |
-| 136.725 MHz | Europe ARINC     | 136.750 MHz | Additional USA / Europe |
-| 136.775 MHz | Europe SITA      | 136.800 MHz | USA SITA                |
-| 136.825 MHz | Europe ARINC     | 136.850 MHz | North America SITA      |
-| 136.875 MHz | Europe SITA      | 136.900 MHz | European secondary      |
-| 136.975 MHz | Worldwide common |             |                         |
+The following regional lists were reported by Sergi in the
+[acars-vdl2 forum, message #7405](https://acars-vdl2.groups.io/g/main/message/7405)
+on November 5, 2026. They are community reports, not an independently verified
+regulatory channel plan. Frequencies are in MHz.
+
+| Region / status | Reported channels |
+| --- | --- |
+| Europe, current in the November report | 136.675, 136.725, 136.775, 136.825, 136.850, 136.875, 136.900, 136.975 |
+| USA, current in the November report | 136.100, 136.300, 136.650, 136.800, 136.975 |
+| Europe, progressive introduction from January 2027 | 136.700, 136.725, 136.750, 136.775, 136.800, 136.825, 136.850, 136.875, 136.900, 136.925, 136.950, 136.975 |
+
+The same message reports that 136.675 MHz will become a guard channel from
+January 2027, no longer carrying data or voice. Verify this against operational
+sources before changing a live receiver plan. `datalink` retains this channel for
+current use and historical recordings; it does not switch plans by date or region.
+The automatic selector includes current, historically documented and announced
+channels that fit the source bandwidth, including 136.300, 136.925 and 136.950 MHz.
+This is a scan-candidate list, not a claim that every channel is active locally.
+The compact fallback scan list is unchanged. Configure explicit channels when a
+specific regional or date-dependent plan is required.
+
+### Ground-station identification references
+
+Sergi maintains [VDL2_Ground_Stations.txt in the forum Files area](https://acars-vdl2.groups.io/g/main/files/VDL2_Ground_Stations.txt).
+In [message #7402](https://acars-vdl2.groups.io/g/main/message/7402), he explicitly
+permits redistribution and invites reports of missing stations. Preserve source
+attribution and revision provenance; this statement is not a blanket license for
+other forum files. Access may require group membership. This external reference
+is not currently loaded automatically by `datalink`.
+
+[RADIMCOM](https://github.com/om2amr/RADIMCOM) is another receiver project mentioned
+in the thread; its author offered station observations as potential contributions.
+It is an ecosystem reference, not a dependency or a locally validated decoder.
+
+### Inmarsat frequency references
+
+The [acars-vdl2 forum Files area](https://acars-vdl2.groups.io/g/main/files)
+contains community-maintained Inmarsat frequency lists. Prefer the
+[25°E list](https://acars-vdl2.groups.io/g/main/files/Inmarsat%2025E%20frequency%20list.pdf)
+and [98°W list](https://acars-vdl2.groups.io/g/main/files/Inmarsat%2098W%20frequency%20list.pdf),
+both revised November 2, 2026, over the provisional
+[combined list](https://acars-vdl2.groups.io/g/main/files/INMARSAT%20frequency%20list.pdf)
+dated April 4, 2026. Access may require group membership.
+
+The newer PDFs list AERO-H+ 10500-bps data P-channels at **1545.3150 and
+1545.3275 MHz** for 25°E (GES `90`, hexadecimal), and **1545.3200 and
+1545.3325 MHz** for 98°W (GES `D0`, hexadecimal), replacing different entries
+in the April list. These are published reference values, not independently
+verified reception measurements. The 98°W lists retain 1546.0625 MHz (GES `02`)
+and 1546.0775 MHz (GES `05`).
+
+The author has requested reception-based verification of other satellite lists.
+Check the latest revision and distinguish AERO data from voice, Inmarsat-C and
+other services before using frequencies. These references do not change
+terrestrial ACARS, VDL2 or HFDL channels or imply native SATCOM receiver support.
 
 ### Others
 

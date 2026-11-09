@@ -26,22 +26,31 @@
 //! The automatic channel selector chooses from this list when a source center
 //! frequency and sample rate are known. The list is based on the SIGIDWiki
 //! VDL-M2 table, the Airframes technology docs, ACARS Online notes, and
-//! captured Airframes.io message counts.
+//! captured Airframes.io message counts, and the November 5, 2026 community
+//! report at <https://acars-vdl2.groups.io/g/main/message/7405>.
+//! The scan list includes historical and announced channels, not just currently
+//! active channels. The report describes progressive European expansion from
+//! January 2027 and 136.675 MHz becoming a guard channel. This is not independently
+//! verified here; retain 136.675 MHz for current use and historical replay.
+//! No automatic date/region switch is applied; fallback defaults are unchanged.
 //!
 //! | Frequency | Support |
 //! |---:|---|
 //! | 136.100 MHz | USA ARINC |
+//! | 136.300 MHz | USA (November 2026 forum report) |
 //! | 136.650 MHz | USA ARINC |
 //! | 136.675 MHz | Europe ARINC |
-//! | 136.700 MHz | USA ARINC |
+//! | 136.700 MHz | Historically listed USA; Europe announced from January 2027 |
 //! | 136.725 MHz | Europe ARINC |
-//! | 136.750 MHz | Additional USA / new European channel |
+//! | 136.750 MHz | Historically listed USA; Europe announced from January 2027 |
 //! | 136.775 MHz | Europe SITA |
-//! | 136.800 MHz | USA SITA |
+//! | 136.800 MHz | USA; Europe announced from January 2027 |
 //! | 136.825 MHz | Europe ARINC |
-//! | 136.850 MHz | SITA North America channel |
+//! | 136.850 MHz | Europe in November 2026 report; historically listed North America |
 //! | 136.875 MHz | Europe SITA |
 //! | 136.900 MHz | European secondary channel |
+//! | 136.925 MHz | Europe announced from January 2027 |
+//! | 136.950 MHz | Europe announced from January 2027 |
 //! | 136.975 MHz | Worldwide common signalling channel |
 
 use crate::event::{
@@ -82,32 +91,39 @@ const DEFAULT_CHANNELS: &[u32] = &[
     136_975_000,
 ];
 
-/// Common VDL Mode 2 channels
+/// Scan candidates including historical channels and the January 2027 European
+/// expansion reported at https://acars-vdl2.groups.io/g/main/message/7405.
+/// This is not a region/date-specific operational plan.
 const KNOWN_VDL2_CHANNELS: &[u32] = &[
     // USA ARINC
     136_100_000,
+    // USA, November 2026 forum report
+    136_300_000,
     // USA ARINC
     136_650_000,
     // Europe ARINC
     136_675_000,
-    // USA ARINC
+    // Historically listed USA; Europe announced from January 2027
     136_700_000,
     // Europe ARINC
     136_725_000,
-    // Additional USA / new European channel
+    // Historically listed USA; Europe announced from January 2027
     136_750_000,
     // Europe SITA
     136_775_000,
-    // USA SITA
+    // USA; Europe announced from January 2027
     136_800_000,
     // Europe ARINC
     136_825_000,
-    // SITA North America channel
+    // Europe in November 2026 report; historically listed North America
     136_850_000,
     // Europe SITA
     136_875_000,
     // European secondary channel
     136_900_000,
+    // Europe announced from January 2027
+    136_925_000,
+    136_950_000,
     // Worldwide common signalling channel
     136_975_000,
 ];
@@ -798,6 +814,46 @@ mod tests {
             vga_gain: None,
             format: None,
         }
+    }
+
+    #[test]
+    fn auto_channels_include_reported_channels_and_preserve_historical_replay() {
+        let src = file_source("gqrx_20260518_114025_136500000_1800000_fc.raw");
+        let effective = effective_file_source(&src, None);
+        let channels = effective.channels_with(auto_channels);
+        for frequency in [136_300_000, 136_675_000, 136_925_000, 136_950_000] {
+            assert!(channels.contains(&frequency), "missing {frequency}");
+        }
+        assert!(channels.windows(2).all(|pair| pair[0] < pair[1]));
+
+        let mut narrow = src;
+        narrow.center_freq = Some(136_925_000);
+        narrow.sample_rate = Some(100_000);
+        assert_eq!(
+            auto_channels(&narrow),
+            vec![136_900_000, 136_925_000, 136_950_000]
+        );
+        narrow.channels = Some(vec![136_975_000]);
+        assert_eq!(narrow.channels_with(auto_channels), vec![136_975_000]);
+    }
+
+    #[test]
+    fn fallback_scan_channels_remain_unchanged() {
+        let mut src = file_source("unknown.raw");
+        src.center_freq = Some(100_000_000);
+        src.sample_rate = Some(100_000);
+        assert_eq!(
+            auto_channels(&src),
+            vec![
+                136_650_000,
+                136_675_000,
+                136_725_000,
+                136_775_000,
+                136_825_000,
+                136_875_000,
+                136_975_000,
+            ]
+        );
     }
 
     #[test]
