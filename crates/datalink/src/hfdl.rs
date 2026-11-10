@@ -200,7 +200,7 @@ impl SampleFormat {
 #[derive(Debug, Parser)]
 #[command(about = "HF Data Link frontend for WAV and I/Q captures")]
 pub(crate) struct Options {
-    /// WAV, I/Q, or SDR source, e.g. file://capture.wav, rtlsdr://0, hackrf://0, or ~/capture.raw.
+    /// WAV, I/Q, or SDR source; use - for raw I/Q on stdin (set format, rate and center).
     source: Option<Source>,
 
     /// I/Q sample format
@@ -219,11 +219,11 @@ pub(crate) struct Options {
     #[arg(long, num_args = 1.., value_parser = crate::source::parse_hz_f64_arg)]
     channel: Option<Vec<f64>>,
 
-    /// Start offset in seconds for file decoding
+    /// Start offset in seconds (stdin consumes and discards samples before this offset)
     #[arg(long, default_value_t = 0.0)]
     start_second: f64,
 
-    /// Maximum seconds to decode from the file
+    /// Maximum seconds of samples to decode from a file or stream
     #[arg(long, default_value_t = 20.0)]
     max_seconds: f64,
 
@@ -434,6 +434,13 @@ async fn samples_for_source(
     let channels = channels_khz_for(configured_channels.as_deref(), sample_rate, center_freq);
 
     let samples = match &effective_source.address {
+        Address::File { file } if file == "-" => {
+            let format = stdin_format(effective_source.format.as_deref(), options.format)?;
+            // Source parameters take precedence; otherwise preserve the HFDL CLI
+            // format/default rather than Source's generic CU8 default.
+            effective_source.format = Some(format.into());
+            read_stream_window(&effective_source, options.start_second, options.max_seconds).await?
+        }
         Address::File { file } => {
             let path = expanduser(file.strip_prefix("file://").unwrap_or(file));
             let path = path.to_string_lossy();
@@ -465,53 +472,89 @@ async fn samples_for_source(
             )?;
             return Ok((samples, sample_rate, center_freq, channels));
         }
-        _ => read_sdr_window(&effective_source, options.start_second, options.max_seconds).await?,
+        _ => {
+            read_stream_window(&effective_source, options.start_second, options.max_seconds).await?
+        }
     };
 
     Ok((samples, sample_rate, center_freq, channels))
 }
 
-async fn read_sdr_window(
+fn stdin_format(
+    source_format: Option<&str>,
+    default: SampleFormat,
+) -> anyhow::Result<&'static str> {
+    let format = match source_format {
+        Some(name) => parse_sample_format(name)
+            .ok_or_else(|| anyhow::anyhow!("unsupported HFDL I/Q format {name:?}"))?,
+        None => default,
+    };
+    match format {
+        SampleFormat::U8 => Ok("u8"),
+        SampleFormat::Cs16 => Ok("cs16"),
+        SampleFormat::Cf32 => Ok("cf32"),
+        SampleFormat::Wav16 => anyhow::bail!(
+            "HFDL stdin expects raw IQ (u8, cs16 or cf32); use a file path for WAV input"
+        ),
+    }
+}
+
+async fn read_stream_window(
     source: &Source,
     start_second: f64,
     max_seconds: f64,
 ) -> anyhow::Result<Vec<Complex<f32>>> {
     let sample_rate = source.sample_rate.unwrap_or(8_000_000);
-    let skip = (start_second.max(0.0) * sample_rate as f64).round() as usize;
-    let keep = (max_seconds.max(0.0) * sample_rate as f64).ceil() as usize;
+    anyhow::ensure!(sample_rate > 0, "HFDL stream sample rate must be positive");
+    anyhow::ensure!(
+        start_second.is_finite()
+            && start_second >= 0.0
+            && max_seconds.is_finite()
+            && max_seconds >= 0.0,
+        "HFDL stream offsets and durations must be finite and non-negative"
+    );
+    let skip = (start_second * sample_rate as f64).round();
+    let keep = (max_seconds * sample_rate as f64).ceil();
+    anyhow::ensure!(
+        skip + keep < usize::MAX as f64,
+        "HFDL stream window is too large"
+    );
     let mut stream = open_source(source).await?;
-    let mut seen = 0usize;
-    let mut out = Vec::with_capacity(keep);
-    let run_result: anyhow::Result<()> = async {
-        while out.len() < keep {
-            let chunk_result = tokio::select! {
-                chunk = stream.next() => chunk,
-                _ = tokio::signal::ctrl_c() => None,
-            };
-            let Some(chunk_result) = chunk_result else {
-                break;
-            };
-            let chunk = chunk_result?;
-            for sample in chunk {
-                if seen >= skip && out.len() < keep {
-                    out.push(Complex::new(sample.re, sample.im));
-                }
-                seen = seen.saturating_add(1);
-                if out.len() >= keep {
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-    .await;
+    let run_result = collect_stream_window(&mut stream, skip as usize, keep as usize).await;
     let stop_result = if matches!(source.address, Address::File { .. }) {
         Ok(())
     } else {
         stream.stop().await
     };
-    run_result?;
+    let out = run_result?;
     stop_result?;
+    Ok(out)
+}
+
+async fn collect_stream_window<S>(
+    stream: &mut S,
+    mut skip: usize,
+    keep: usize,
+) -> anyhow::Result<Vec<Complex<f32>>>
+where
+    S: futures_util::Stream<Item = Result<Vec<Complex<f32>>, desperado::Error>> + Unpin,
+{
+    let mut out = Vec::new();
+    out.try_reserve_exact(keep)?;
+    while out.len() < keep {
+        let chunk_result = tokio::select! {
+            chunk = stream.next() => chunk,
+            _ = tokio::signal::ctrl_c() => None,
+        };
+        let Some(chunk_result) = chunk_result else {
+            break;
+        };
+        let chunk = chunk_result?;
+        let discarded = skip.min(chunk.len());
+        skip -= discarded;
+        let needed = keep - out.len();
+        out.extend(chunk.into_iter().skip(discarded).take(needed));
+    }
     Ok(out)
 }
 
@@ -786,6 +829,76 @@ mod tests {
             }
         }
         crc
+    }
+
+    #[test]
+    fn stdin_format_preserves_hfdl_defaults_and_source_overrides() {
+        assert_eq!(stdin_format(None, SampleFormat::Cf32).unwrap(), "cf32");
+        assert_eq!(stdin_format(None, SampleFormat::Cs16).unwrap(), "cs16");
+        assert_eq!(stdin_format(None, SampleFormat::U8).unwrap(), "u8");
+        assert_eq!(
+            stdin_format(Some("s16le"), SampleFormat::U8).unwrap(),
+            "cs16"
+        );
+        assert_eq!(
+            stdin_format(Some("cu8"), SampleFormat::Wav16).unwrap(),
+            "u8"
+        );
+        assert!(stdin_format(Some("invalid"), SampleFormat::Cf32).is_err());
+        assert!(stdin_format(Some("wav"), SampleFormat::Cs16).is_err());
+        assert!(stdin_format(None, SampleFormat::Wav16).is_err());
+    }
+
+    #[tokio::test]
+    async fn stream_window_skips_across_chunks_and_stops_at_limit() {
+        let samples: Vec<_> = (0..8).map(|n| Complex::new(n as f32, 0.0)).collect();
+        let mut stream = futures_util::stream::iter([
+            Ok(samples[..2].to_vec()),
+            Ok(samples[2..5].to_vec()),
+            Ok(samples[5..].to_vec()),
+            Err(std::io::Error::other("must not read past window").into()),
+        ]);
+        assert_eq!(
+            collect_stream_window(&mut stream, 3, 3).await.unwrap(),
+            samples[3..6]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_window_handles_short_and_empty_inputs() {
+        let sample = Complex::new(0.25, -0.5);
+        let mut short = futures_util::stream::iter([Ok(vec![sample])]);
+        assert_eq!(
+            collect_stream_window(&mut short, 0, 3).await.unwrap(),
+            vec![sample]
+        );
+        let mut past_eof = futures_util::stream::iter([Ok(vec![sample])]);
+        assert!(collect_stream_window(&mut past_eof, 2, 3)
+            .await
+            .unwrap()
+            .is_empty());
+        let mut no_read = futures_util::stream::iter([Err(std::io::Error::other(
+            "must not read a zero-length window",
+        )
+        .into())]);
+        assert!(collect_stream_window(&mut no_read, 0, 0)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_window_propagates_read_errors_even_after_samples() {
+        for skip in [0, 2] {
+            let mut stream = futures_util::stream::iter([
+                Ok(vec![Complex::new(0.0, 0.0)]),
+                Err(std::io::Error::other("injected IQ read failure").into()),
+            ]);
+            let error = collect_stream_window(&mut stream, skip, 3)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("injected IQ read failure"));
+        }
     }
 
     #[test]
